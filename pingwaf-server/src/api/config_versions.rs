@@ -193,7 +193,8 @@ async fn rollback_version(
     // string, and echoing it named the table to the caller.
     let outcome =
         config_history::rollback(&state.db, version_id, Some(&current.email))
-            .await?;
+            .await
+            .map_err(crate::api::sites::map_site_domain_conflict)?;
 
     match outcome.scope {
         VersionScope::Site(site_id) => {

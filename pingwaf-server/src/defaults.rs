@@ -15,8 +15,8 @@
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
-    QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    EntityTrait, QueryFilter, Set,
 };
 use uuid::Uuid;
 
@@ -320,7 +320,7 @@ pub async fn seed_waf_defaults(
 /// Creates the built-in WAF group and any missing WAF rules for `site_id` in
 /// `rule_mode`; the single implementation behind both seeding paths.
 async fn seed_waf_defaults_with_mode(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
     rule_mode: &str,
 ) -> Result<usize, sea_orm::DbErr> {
@@ -367,7 +367,7 @@ async fn seed_waf_defaults_with_mode(
 
 /// Creates any missing built-in cache rules for `site_id`, disabled.
 pub async fn seed_cache_defaults(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<usize, sea_orm::DbErr> {
     let timestamp = Utc::now();
@@ -413,7 +413,7 @@ pub async fn seed_cache_defaults(
 /// traffic history that a blocking rule could surprise. Existing sites never
 /// reach this function.
 pub async fn seed_site_defaults(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<(), sea_orm::DbErr> {
     seed_waf_defaults_with_mode(db, site_id, NEW_SITE_WAF_RULE_MODE).await?;
@@ -444,7 +444,7 @@ fn seeded_row_present(
 
 /// Finds the built-in group, creating it when the site does not have one yet.
 async fn ensure_waf_group(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
     timestamp: chrono::DateTime<Utc>,
 ) -> Result<Uuid, sea_orm::DbErr> {

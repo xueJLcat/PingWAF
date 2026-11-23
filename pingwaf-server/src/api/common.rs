@@ -623,11 +623,9 @@ pub fn ensure_acme_wildcard_supported(
 /// `exclude` is the site being edited, so that a site does not conflict with
 /// itself. New sites pass `None`.
 ///
-/// This is a friendly pre-check only. The authoritative guard is the database
-/// itself: the unique index `uq_sites_domain` (primary hostnames) plus the
-/// `trg_site_domain_conflicts` trigger (alternate-hostname cross-site
-/// conflicts) reject racing writers, and [`map_domain_conflict`] turns those
-/// violations into the same 400 this function returns.
+/// This is a friendly pre-check only. The deferred database constraint rejects
+/// racing writers, and [`map_domain_conflict`] maps those failures to this same
+/// 400, including when the failure happens at commit.
 pub async fn ensure_domains_available(
     db: &DatabaseConnection,
     domains: &[String],
@@ -648,8 +646,8 @@ pub async fn ensure_domains_available(
 
 /// Recognises a database-level hostname-conflict rejection.
 ///
-/// Matches all three database-side sources of conflict, by their exact
-/// messages:
+/// The deferred trigger supplies a named constraint. Recognize the prior
+/// migration's errors too:
 ///
 /// - the unique index on the primary hostname (constraint name
 ///   `uq_sites_domain`);
@@ -658,10 +656,18 @@ pub async fn ensure_domains_available(
 /// - the same trigger's same-site branch (`domain "x" is already in use by
 ///   this site`) — matched via `is already in use by this site`.
 ///
-/// Wildcard-overlap conflicts are still only caught by the pre-check; the
-/// pre-check's own `is already served by another site` ApiError message is
-/// never a `DbErr` and is deliberately not matched here.
 pub fn is_domain_conflict(err: &DbErr) -> bool {
+    if let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
+        sea_orm::sqlx::Error::Database(database),
+    ))
+    | DbErr::Query(sea_orm::RuntimeErr::SqlxError(
+        sea_orm::sqlx::Error::Database(database),
+    )) = err
+    {
+        if database.constraint() == Some("sites_ingress_domain_conflict") {
+            return true;
+        }
+    }
     let message = err.to_string();
     message.contains("uq_sites_domain")
         || message.contains("domain already in use")

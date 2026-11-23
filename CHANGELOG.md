@@ -10,6 +10,15 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Site creation is atomic.** A new site, its default pool and origin, its
+  TLS settings, and its built-in rules are committed together before the site
+  is published to agents. PostgreSQL now rejects overlapping hostnames even
+  for concurrent or direct writes. Migration `000104` refuses to proceed if
+  stored hostnames are not canonical or have ambiguous ownership. Custom
+  ingress ports are not enabled by this migration.
+
 ### Added
 
 - **Adaptive proof-of-work difficulty.** A challenge's difficulty now starts at
@@ -7488,4 +7497,3 @@ The first PingWAF release line. Version numbering continues from `pingap`
 
 - Version 0.6.1 - ([55287d9](https://github.com/vicanso/pingap/commit/55287d9e5fbe68053fc8100ebaf29c855925b8d1))
 - Adjust meta size - ([d0c8e10](https://github.com/vicanso/pingap/commit/d0c8e10fc34da363252de4d01fc7a80aaea4b4d0))
-

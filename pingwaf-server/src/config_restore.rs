@@ -317,6 +317,17 @@ async fn merge_row<C: ConnectionTrait>(
 
     let mut merged = base.cloned().unwrap_or_else(|| json!({}));
     merge_shallow(&mut merged, &row);
+    if let Some(object) =
+        merged.as_object_mut().filter(|_| spec.name == "sites")
+    {
+        // Legacy snapshots (and current default sites) omit the ingress
+        // fields; restoring one must not inherit a live custom ingress.
+        for field in ["ingress_port", "ingress_protocol"] {
+            if row.get(field).is_none() {
+                object.remove(field);
+            }
+        }
+    }
     for (field, info) in columns {
         if merged.get(field).is_none() && schema == 1 {
             if let Some(default) = &info.default {
@@ -1272,14 +1283,14 @@ pub async fn apply_restore(
          WHERE action = 'allow' AND mode = 'off'",
     )
     .await?;
-    // DR32-07: make the gap between the snapshot and what actually came back
-    // visible — `skipped` rows failed validation and were dropped.
+    // Report skipped validation rows, without implying the caller's
+    // transaction has committed (deferred constraints can still fail).
     let restored: usize = report.rows_by_table.values().sum();
     tracing::info!(
         restored,
         skipped = report.skipped_rows,
         tables = report.rows_by_table.len(),
-        "restore applied"
+        "restore changes staged for commit"
     );
     Ok(report)
 }

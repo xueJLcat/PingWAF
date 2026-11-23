@@ -108,6 +108,9 @@ mod m20240101_000100_agent_process_rss;
 mod m20240101_000101_agent_site_assignments;
 mod m20240101_000102_access_log_asn;
 mod m20240101_000103_challenge_adaptive_pow;
+mod m20240101_000104_site_ingress;
+#[cfg(test)]
+mod site_ingress_tests;
 
 use sea_orm_migration::prelude::*;
 
@@ -231,6 +234,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000101_agent_site_assignments::Migration),
             Box::new(m20240101_000102_access_log_asn::Migration),
             Box::new(m20240101_000103_challenge_adaptive_pow::Migration),
+            Box::new(m20240101_000104_site_ingress::Migration),
         ]
     }
 }
@@ -242,7 +246,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 103);
+        assert_eq!(migrations.len(), 104);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

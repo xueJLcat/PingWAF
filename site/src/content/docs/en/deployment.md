@@ -61,6 +61,8 @@ cargo build --release --bin pingwaf --features full
 
 On Linux, `install.sh` downloads the prebuilt archive, installs to `/usr/local/bin`, writes `/etc/pingwaf/pingwaf.toml` and a systemd unit, and starts the service. Run it on a terminal with no arguments for guided prompts (deployment mode, admin credentials, PostgreSQL URL, certificate SANs, version), or pipe it for a one-line unattended install.
 
+Before upgrading the control plane, back up PostgreSQL. Migration `000104` checks the existing site hostnames and fails without changing the schema if it finds a noncanonical hostname or overlapping claims. Resolve the affected sites by their UUIDs in the migration log before retrying. This migration does not enable custom ingress ports.
+
 ```bash
 # interactive prompts, with an installation plan and confirmation
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh -o install.sh && bash install.sh

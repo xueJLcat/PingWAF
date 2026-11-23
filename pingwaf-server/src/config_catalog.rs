@@ -334,8 +334,17 @@ pub(crate) async fn query_rows<C: ConnectionTrait>(
 ) -> Result<Vec<Value>, DbErr> {
     let table = quote_ident(spec.name);
     let order = quote_ident(spec.order);
+    // Preserve the legacy snapshot shape when both columns are unset. Older
+    // readers reject unknown columns, even if the stored values are null.
+    let row = if spec.name == "sites" {
+        "CASE WHEN to_jsonb(t)->>'ingress_port' IS NULL AND \
+         to_jsonb(t)->>'ingress_protocol' IS NULL THEN \
+         to_jsonb(t) - 'ingress_port' - 'ingress_protocol' ELSE to_jsonb(t) END"
+    } else {
+        "to_jsonb(t)"
+    };
     let mut sql = format!(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.{order}), \
+        "SELECT COALESCE(jsonb_agg({row} ORDER BY t.{order}), \
          '[]'::jsonb) AS rows FROM {table} t"
     );
     let mut values = Vec::new();

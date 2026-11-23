@@ -418,7 +418,9 @@ async fn restore_backup(
     )
     .await?;
     config_restore::apply_restore(&txn, plan).await?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(crate::api::sites::map_site_domain_conflict)?;
 
     let mut post_warnings = Vec::new();
     match scope {

@@ -543,7 +543,7 @@ List sites (paginated).
 
 ### POST /sites
 
-Create a new site. `upstream_address` is required: a site without an origin cannot serve traffic. The site is created with a `default` origin pool containing that origin.
+Create a new site. `upstream_address` is required: a site without an origin cannot serve traffic. The site, its `default` origin pool and first origin, initial TLS settings, and built-in rules commit together. A failed creation does not leave a partial site.
 
 **Request:**
 ```json
@@ -560,6 +560,10 @@ Create a new site. `upstream_address` is required: a site without an origin cann
 ```
 
 **Response (201):** Site object.
+
+A hostname already claimed by another site, including wildcard overlap, returns
+HTTP `400` with `error.code: "site.domain_conflict"`. This also applies when a
+concurrent request wins the claim before creation commits.
 
 ### GET /sites/{site_id}
 

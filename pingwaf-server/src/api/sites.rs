@@ -66,12 +66,12 @@ fn site_domain_conflict(err: ApiError) -> ApiError {
     }
 }
 
-/// [`map_domain_conflict`] for the database-side hostname backstops
-/// (`uq_sites_domain` and the conflict trigger), with the specific code.
+/// [`map_domain_conflict`] with the specific API code, including deferred
+/// hostname conflicts returned by `commit`.
 ///
 /// A non-conflict database error keeps its default code: `map_domain_conflict`
 /// passes it through `From<DbErr>`, which never produces a `BadRequest`.
-fn map_site_domain_conflict(err: DbErr) -> ApiError {
+pub(crate) fn map_site_domain_conflict(err: DbErr) -> ApiError {
     site_domain_conflict(map_domain_conflict(err))
 }
 
@@ -1278,6 +1278,8 @@ async fn create(
 
     let timestamp = Utc::now();
     let id = Uuid::new_v4();
+    // Publish a complete new site with its defaults or nothing at all.
+    let txn = state.db.begin().await?;
     let model = site::ActiveModel {
         id: Set(id),
         user_id: Set(current.id),
@@ -1304,9 +1306,7 @@ async fn create(
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
-    .insert(&state.db)
-    // The pre-check above is not atomic: a racing create can slip through it.
-    // The unique index and the conflicts trigger on `sites` are the backstop.
+    .insert(&txn)
     .await
     .map_err(map_site_domain_conflict)?;
 
@@ -1339,7 +1339,7 @@ async fn create(
         is_default: Set(true),
         created_at: Set(timestamp),
     }
-    .insert(&state.db)
+    .insert(&txn)
     .await?;
 
     site_upstreams::ActiveModel {
@@ -1354,13 +1354,10 @@ async fn create(
         health_status: Set("unknown".to_string()),
         created_at: Set(timestamp),
     }
-    .insert(&state.db)
+    .insert(&txn)
     .await?;
 
-    // Built-in WAF (monitor mode) and cache rules ship with every new site.
-    if let Err(err) = crate::defaults::seed_site_defaults(&state.db, id).await {
-        tracing::error!(%id, error = %err, "failed to seed built-in rules");
-    }
+    crate::defaults::seed_site_defaults(&txn, id).await?;
 
     // Every new site gets an SSL row with https enabled: without it the data
     // plane's `ssl.enabled` gate stays closed and a later ACME request would
@@ -1396,8 +1393,9 @@ async fn create(
         http2_enabled: Set(true),
         created_at: Set(timestamp),
     }
-    .insert(&state.db)
+    .insert(&txn)
     .await?;
+    txn.commit().await.map_err(map_site_domain_conflict)?;
 
     tracing::info!(%id, %domain, upstream = %upstream_address, owner = %current.id, "site created");
     notify_config_changed(&state, id, Some(&current.email)).await;
@@ -1408,8 +1406,7 @@ async fn create(
 /// `POST /api/v1/sites/{site_id}/clone`
 ///
 /// Copies a site's configuration onto a new site id. The caller must supply
-/// the new primary domain: every hostname has to stay unique, and reusing the
-/// source's would collide with `uq_sites_domain` and the conflict trigger.
+/// the new primary domain: reusing the source's hostname would conflict.
 #[derive(Debug, Deserialize)]
 pub struct CloneSiteRequest {
     pub domain: String,
@@ -2020,7 +2017,7 @@ async fn clone_site(
     // same grouping semantics.
     clone_site_rules(&txn, source_id, new_id, timestamp).await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(map_site_domain_conflict)?;
 
     tracing::info!(
         site_id = %new_id,
