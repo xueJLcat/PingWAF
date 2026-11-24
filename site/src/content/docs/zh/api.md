@@ -115,4 +115,6 @@ Webhook 通知通过 `PINGWAF_WEBHOOK_URL` 配置，通知路由可以从控制�
 
 在节点的 `/etc/pingwaf/static-roots.json` 登记目录，例如 `{"public":"/srv/www/public"}`。目录需要包含 `index.html`。控制台显示目录标识和内容摘要，发布时节点验证并复制到 `/var/lib/pingwaf/site-content`。通过 `PINGWAF_STATIC_ROOTS_FILE` 和 `PINGWAF_SITE_CONTENT_DIR` 可指定其他位置。确保运行服务的账户能读取源目录、写入版本目录。
 
+支持目录管理的节点还可通过「节点 → 静态目录」登记、修改和移除。平台管理员可以查看使用站点及节点校验结果。新增路径位于 `/srv/www` 下，父目录可由运维通过 `PINGWAF_STATIC_PUBLIC_DIR` 指定。移除登记会保留源文件；已引用目录需要先调整站点配置。站点的预置目录下拉框旁有直达入口和刷新按钮。
+
 上传 ZIP 时，控制台先建立仅上传者可访问的草稿，再取得十分钟有效、仅能读取该草稿的预览地址。预览页面使用独立的浏览器沙箱，允许站内样式和图片。发布时将 `static_draft_id` 和 `{"kind":"zip","digest":"<草稿 SHA-256>"}` 提交到站点接口。节点每次最多下载 256 KiB，在私有临时目录完成校验后原子发布。配置生效情况见站点详情。查询 `GET /sites/{id}/static-versions` 获取该站点的版本，使用站点更新接口提交此前的摘要即可回退。数据库全量备份包含发布包；配置快照引用对应摘要。

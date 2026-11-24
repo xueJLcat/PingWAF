@@ -10,6 +10,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Administrators can register static directories from the node inventory.
+  Linux nodes validate the selected directory, persist changes by revision,
+  and acknowledge the result. Site editors continue to select identifiers.
+
 - Keep compatible managed HTTP connections alive during a site policy update.
   Each new request uses the published view, including streams on a reused
   HTTP/2 connection. Changes to routing ownership or TLS still revoke it.

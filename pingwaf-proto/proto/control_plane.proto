@@ -227,6 +227,22 @@ message IngressListeners {
   bool supports_site_archives = 5;
   // Locally retained registered directory snapshots (site UUID / tree SHA-256).
   repeated string prepared_directories = 6;
+  // Privileged inventory for node administrators; never serialize in site options.
+  StaticRootRegistry static_root_registry = 7;
+}
+
+message StaticRootRegistry {
+  string revision = 1;
+  map<string,string> paths = 2;
+  string public_root = 3;
+  string last_command = 4;
+  string last_error = 5;
+}
+
+message UpdateStaticRoot {
+  string revision = 1;
+  string identifier = 2;
+  optional string path = 3;
 }
 
 // Backend health of one upstream, reported per heartbeat.
@@ -319,6 +335,7 @@ message ServerCommand {
     RestartAgentCommand restart_agent = 16;
     FlushLogsCommand flush_logs = 17;
     ManagedConfigChangedCommand managed_config_changed = 18;
+    UpdateStaticRoot update_static_root = 19;
   }
 }
 
@@ -333,6 +350,7 @@ enum CommandType {
   COMMAND_RESTART_AGENT = 7;
   COMMAND_FLUSH_LOGS = 8;
   COMMAND_MANAGED_CONFIG_CHANGED = 9;
+  COMMAND_UPDATE_STATIC_ROOT = 10;
 }
 
 // An advisory pull hint. Carries neither configuration nor authorization.

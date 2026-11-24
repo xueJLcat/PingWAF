@@ -12,6 +12,9 @@ use std::{
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ENTRIES: usize = 2048;
 
+mod registry;
+pub use registry::{directory_report, apply_directory_update, registry_changed};
+
 struct Manifest {
     files: BTreeMap<String, [u8; 32]>,
     bytes: u64,
@@ -205,6 +208,10 @@ fn scan_root(root: &Path, output: Option<&Path>) -> anyhow::Result<String> {
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
     )?);
+    scan_directory(dir, output)
+}
+
+fn scan_directory(dir: File, output: Option<&Path>) -> anyhow::Result<String> {
     let mut manifest = Manifest {
         files: BTreeMap::new(),
         bytes: 0,
@@ -256,12 +263,13 @@ fn registered_roots() -> anyhow::Result<BTreeMap<String, String>> {
 
 pub fn inventory() -> anyhow::Result<HashMap<String, String>> {
     let mut report = HashMap::new();
-    for (id, root) in registered_roots()? {
-        let digest = digest(Path::new(&root)).unwrap_or_else(|error| {
+    let registry = registry::Registry::load()?;
+    for id in registry.paths().keys() {
+        let digest = registry.scan(id, None).unwrap_or_else(|error| {
             tracing::warn!(directory = %id, %error, "static root unavailable");
             String::new()
         });
-        report.insert(id, digest);
+        report.insert(id.clone(), digest);
     }
     Ok(report)
 }
@@ -280,17 +288,14 @@ pub fn prepare_registered(
         );
         return Ok(());
     }
-    let roots = registered_roots()?;
-    let root = roots
-        .get(id)
-        .context("static directory is no longer registered")?;
+    let registry = registry::Registry::load()?;
     let parent = target.parent().context("invalid release path")?;
     std::fs::create_dir_all(parent)?;
     let stage = tempfile::Builder::new()
         .prefix(".prepare-")
         .tempdir_in(parent)?;
     ensure!(
-        scan_root(Path::new(root), Some(stage.path()))? == expected,
+        registry.scan(id, Some(stage.path()))? == expected,
         "registered directory digest changed"
     );
     if let Err(err) = std::fs::rename(stage.path(), target) {

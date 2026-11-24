@@ -27,6 +27,9 @@ import { Table, type Column } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { AgentProbePanel } from '@/components/agents/AgentProbePanel'
+import { StaticRootsDialog } from '@/components/agents/StaticRootsDialog'
+import { useSearchParams } from 'react-router-dom'
+import { useAuthStore } from '@/stores/authStore'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
@@ -65,6 +68,15 @@ export function AgentsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
+  const isAdmin = useAuthStore(s=>s.user?.role === 'admin')
+  const [params,setParams] = useSearchParams()
+  const rootNode = params.get('directories')
+  const openRoots = (id: string | null) => setParams(old => {
+    const next = new URLSearchParams(old)
+    if (id) next.set('directories',id)
+    else next.delete('directories')
+    return next
+  })
   const now = useNow(15_000)
 
   const [search, setSearch] = useState('')
@@ -435,6 +447,7 @@ export function AgentsPage() {
       width: '1%',
       cell: (a) => (
         <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+            {isAdmin && <Button size="sm" variant="ghost" onClick={()=>openRoots(a.id)}>静态目录</Button>}
           <Button
             size="icon"
             variant="ghost"
@@ -669,6 +682,8 @@ export function AgentsPage() {
       )}
 
       {/* Agent detail */}
+      {isAdmin && rootNode && <StaticRootsDialog key={rootNode} node={rootNode}
+        name={agents.find(a=>a.id===rootNode)?.hostname} close={()=>openRoots(null)}/>}
       <Dialog
         open={detail !== null}
         onClose={() => setDetail(null)}

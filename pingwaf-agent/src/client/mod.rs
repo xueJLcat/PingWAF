@@ -1033,6 +1033,16 @@ impl ControlPlaneClient {
         );
 
         match &command.payload {
+            Some(proto::server_command::Payload::UpdateStaticRoot(change)) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let change = change.clone();
+                    let id = command.command_id.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || crate::static_dirs::apply_directory_update(id, change)).await {
+                        error!(%error, "static directory update failed");
+                    }
+                }
+            },
             Some(proto::server_command::Payload::RuleUpdate(update)) => {
                 if let Some(ref bundle) = update.rules {
                     if let Err(e) = rule_cache.update_from_bundle(bundle) {

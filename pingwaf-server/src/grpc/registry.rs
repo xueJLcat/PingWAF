@@ -166,6 +166,14 @@ fn repush_cooldown(repushes: u32) -> Duration {
 }
 
 fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
+    if let Some(registry) = &report.static_root_registry {
+        if registry.paths.len() > 16 || registry.public_root.len() > 4096
+            || registry.last_command.len() > 64 || registry.last_error.len() > 8192
+            || !(registry.revision.is_empty() || registry.revision.len() == 64 &&
+                registry.revision.bytes().all(|c| c.is_ascii_hexdigit()))
+            || registry.paths.iter().any(|(id,path)| id.is_empty() || id.len()>64 || path.len()>16384)
+        { return None; }
+    }
     if report.listeners.len() > MAX_INGRESS_LISTENERS || report.static_directories.len() > 16
         || report.prepared_directories.len() > 2048 || report.prepared_directories.iter().any(|v| v.len() != 101)
         || report.static_directories.iter().any(|(id, digest)| {
@@ -1433,6 +1441,7 @@ mod tests {
                 supports_site_archives: false,
             static_directories: Default::default(),
             prepared_directories: Vec::new(),
+            static_root_registry: None,
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,
@@ -1499,6 +1508,7 @@ mod tests {
                 supports_site_archives: false,
             static_directories: Default::default(),
             prepared_directories: Vec::new(),
+            static_root_registry: None,
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,

@@ -277,7 +277,60 @@ pub fn routes() -> Router<AppState> {
         .route("/agents/{agent_id}/sites", axum::routing::put(update_sites))
         .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
+        .route("/agents/{agent_id}/static-roots", get(static_roots).put(update_static_root))
         .route("/agents/flush-logs", post(flush_logs))
+}
+
+async fn root_report(state: &AppState, id: Uuid, current: &AuthUser) -> Result<pingwaf_proto::StaticRootRegistry, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    load_agent(state, id, current).await?;
+    state.agents.ingress_listeners(id, std::time::Duration::from_secs(90)).await
+        .ok_or_else(|| ApiError::Conflict("节点离线或尚未上报监听信息".into()))?
+        .static_root_registry.ok_or_else(|| ApiError::Conflict("节点尚未启用静态目录管理，请检查节点版本及受管监听".into()))
+}
+
+async fn directory_users(state: &AppState, id: Uuid) -> Result<std::collections::BTreeMap<String, Vec<String>>, ApiError> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT s.site_handler->>'directory_id' AS directory_id, s.domain
+         FROM sites s JOIN agent_sites a ON a.site_id=s.id
+         WHERE a.agent_id=$1 AND s.site_handler->>'kind'='static' ORDER BY s.domain", [id.into()])).await?;
+    let mut users = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for row in rows { users.entry(row.try_get("", "directory_id")?).or_default().push(row.try_get("", "domain")?); }
+    Ok(users)
+}
+
+async fn static_roots(State(state): State<AppState>, current: AuthUser, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, ApiError> {
+    let report = root_report(&state, id, &current).await?;
+    Ok(Json(serde_json::json!({"revision":report.revision,"paths":report.paths,"public_root":report.public_root,
+        "last_command":report.last_command,"last_error":report.last_error,"sites":directory_users(&state,id).await?})))
+}
+
+#[derive(Deserialize)]
+struct DirectoryChange { revision: String, identifier: String, path: Option<String> }
+
+async fn update_static_root(State(state): State<AppState>, current: AuthUser, Path(id): Path<Uuid>,
+    Json(change): Json<DirectoryChange>) -> Result<Response, ApiError> {
+    let report = root_report(&state, id, &current).await?;
+    if report.revision.is_empty() || report.revision != change.revision {
+        return Err(ApiError::Conflict("清单已变化或不可用，请刷新".into()));
+    }
+    if change.identifier.is_empty() || change.identifier.len() > 64
+        || !change.identifier.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c,b'_'|b'-'))
+        || change.path.as_ref().is_some_and(|p| !p.starts_with('/') || p.len()>1024 || p.chars().any(char::is_control)) {
+        return Err(ApiError::BadRequest("目录标识或绝对路径无效".into()));
+    }
+    if directory_users(&state,id).await?.contains_key(&change.identifier) {
+        return Err(ApiError::Conflict("已有站点引用此目录，请先调整站点配置".into()));
+    }
+    let command_id = Uuid::new_v4().to_string();
+    tracing::info!(agent=%id, actor=%current.id, identifier=%change.identifier, old=?report.paths.get(&change.identifier), new=?change.path, %command_id, "request static directory update");
+    let command = ServerCommand { command_id: command_id.clone(), issued_at: now_timestamp(), r#type: pingwaf_proto::CommandType::CommandUpdateStaticRoot as i32,
+        payload: Some(pingwaf_proto::server_command::Payload::UpdateStaticRoot(pingwaf_proto::UpdateStaticRoot {
+            revision:change.revision, identifier:change.identifier, path:change.path
+        })) };
+    if !state.agents.send_command_now(&id,command).await { return Err(ApiError::Conflict("节点已断开连接".into())); }
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"command_id":command_id}))).into_response())
 }
 
 /// Permissions of the key an enrollment mints.

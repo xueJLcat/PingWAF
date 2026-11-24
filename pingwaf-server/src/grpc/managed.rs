@@ -933,6 +933,7 @@ pub(super) async fn check_postgres(
                 supports_site_archives: false,
         static_directories: Default::default(),
             prepared_directories: Vec::new(),
+            static_root_registry: None,
         dynamic_bind: false,
         listeners: vec![pingwaf_proto::IngressListenerStatus {
             port: 81,

@@ -506,6 +506,13 @@ restore that backup together with the previous binaries when rolling back.
 
 ### Inventory of preconfigured static directories on Linux
 
+From the Agents page, administrators can open **静态目录** for a managed
+Linux node. Register an identifier and absolute directory below `/srv/www`
+(override the allowed parent with `PINGWAF_STATIC_PUBLIC_DIR`). The node
+checks the files and reports the outcome. UI overrides are stored under the
+service's private `PINGWAF_SITE_CONTENT_DIR`; removing a registration leaves
+the source directory intact. The static site form links to the same dialog.
+
 To report local static content to the control plane, create
 `/etc/pingwaf/static-roots.json` as an operator-managed JSON object, for
 example `{"company-home":"/srv/www/company"}`. Give the service account

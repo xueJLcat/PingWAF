@@ -30,6 +30,7 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sitesApi, siteKeys } from '@/api/sites'
 import { sslApi } from '@/api/ssl'
+import { useAuthStore } from '@/stores/authStore'
 import { Select } from '@/components/ui/Select'
 import { validIngressPort } from './sites/ingressForm'
 import { SiteArchiveField } from './sites/SiteArchiveField'
@@ -131,6 +132,7 @@ export function SitesListPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
+  const isAdmin = useAuthStore(s => s.user?.role === 'admin')
 
   const [query, setQuery] = useState('')
   const debouncedQuery = useDebouncedValue(query.trim(), 350)
@@ -1160,6 +1162,13 @@ export function SitesListPage() {
             <option value="">{t('pages.sites.selectDirectory')}</option>
             {directories.map(([id]) => <option key={id} value={id}>{id}</option>)}
           </Select>}
+          {form.directory && isAdmin && <div className="flex flex-wrap items-center gap-3 text-sm">
+            {directoryNodes.length ? directoryNodes.map(node =>
+              <Link key={node.id} to={'/agents?directories='+encodeURIComponent(node.id)} target="_blank" rel="noopener noreferrer"
+                className="text-fg-brand underline">{node.name} · 维护静态目录</Link>) :
+              <Link to="/agents" target="_blank" rel="noopener noreferrer" className="underline">前往节点维护静态目录</Link>}
+            <Button size="sm" onClick={()=>void ingressInventory.refetch()} loading={ingressInventory.isFetching}>刷新目录</Button>
+          </div>}
           {form.directory && editing && <Select label={t('pages.sites.publishedVersions')}
             value={form.directory.rollback ? form.directory.directory_id + ':' + form.directory.digest : ''}
             onChange={event => {

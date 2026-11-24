@@ -2172,6 +2172,20 @@ RSS as `process_rss_bytes`), newest first. Cumulative counters (network and disk
 
 Deregister an agent.
 
+### GET /agents/{agent_id}/static-roots
+
+Administrators can read the current node registry, its revision, permitted
+public content parent, paths, site references and the most recent command
+receipt. Disconnected or incompatible nodes return 409. Site ingress options
+only disclose directory identifiers and content digests.
+
+### PUT /agents/{agent_id}/static-roots
+
+Send `revision`, `identifier` and an absolute `path` (null to remove).
+A 202 response contains a command ID. Read the inventory to confirm the node
+applied that ID without an error. The node checks the revision and scans the
+directory before persisting. A referenced identifier must first be detached.
+
 ### POST /agents/{agent_id}/commands
 
 Send a command to an agent. The request is a flat object — the command name

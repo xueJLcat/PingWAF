@@ -263,22 +263,28 @@ pub(super) async fn run(
     let (_shutdown, watch) = watch::channel(false);
     let mut running = BTreeMap::<u16, (Endpoint, JoinSet<()>)>::new();
     let mut previous = None;
-    let (directory_updates, directories) = watch::channel((std::collections::HashMap::new(), Vec::<String>::new()));
+    let (directory_updates, directories) = watch::channel((std::collections::HashMap::new(), Vec::<String>::new(), None));
     #[cfg(target_os = "linux")]
     if host.is_some() {
         tokio::spawn(async move {
             loop {
-                let inventory = tokio::task::spawn_blocking(|| pingwaf_agent::static_dirs::inventory()
-                    .map(|roots| (roots, pingwaf_agent::static_dirs::retained_directories()))).await;
+                let inventory = tokio::task::spawn_blocking(|| {
+                    let report = pingwaf_agent::static_dirs::directory_report();
+                    let roots = pingwaf_agent::static_dirs::inventory().unwrap_or_default();
+                    (roots, pingwaf_agent::static_dirs::retained_directories(), Some(report))
+                }).await;
                 let report = match inventory {
-                    Ok(Ok(report)) => report,
+                    Ok(report) => report,
                     error => {
                         warn!(target: LOG_TARGET, ?error, "static directory inventory unavailable");
                         Default::default()
                     }
                 };
                 if directory_updates.send(report).is_err() { break; }
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => {},
+                    _ = pingwaf_agent::static_dirs::registry_changed() => {},
+                }
             }
         });
     }
@@ -319,8 +325,8 @@ pub(super) async fn run(
                 tasks.shutdown().await;
             }
         }
-        let (static_directories, prepared_directories) = directories.borrow().clone();
-        let mut report = IngressListeners { dynamic_bind: host.is_some(), supports_site_handlers: host.is_some(), supports_site_archives: host.is_some(), listeners: Vec::new(), static_directories, prepared_directories };
+        let (static_directories, prepared_directories, static_root_registry) = directories.borrow().clone();
+        let mut report = IngressListeners { dynamic_bind: host.is_some(), supports_site_handlers: host.is_some(), supports_site_archives: host.is_some(), listeners: Vec::new(), static_directories, prepared_directories, static_root_registry };
         for (port, endpoint) in desired {
             let assigned_standard = (!fixed.contains_key(&port) || shared_ports.contains(&port)) && matches!(
                 (port, endpoint.protocol),

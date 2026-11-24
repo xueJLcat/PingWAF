@@ -10,6 +10,47 @@ use std::time::Duration;
 
 const USER: &str = "00000000-0000-0000-0000-000000000001";
 
+/// Recreate the .55 schema with its original applied migration names.
+/// The next official release added a second, independently named 000104.
+struct Local55;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Local55 {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        Migrator::migrations().into_iter()
+            .take_while(|m| m.name() <= "m20240101_000115_dynamic_pages")
+            .filter(|m| m.name() != "m20240101_000104_site_ssl_self_signed_backfill")
+            .collect()
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PINGWAF_TEST_DATABASE_URL pointing at a fresh disposable PostgreSQL database"]
+async fn upgrade_local55_preserves_certificate_selection() {
+    let url = std::env::var("PINGWAF_TEST_DATABASE_URL").unwrap();
+    let db = Database::connect(url).await.unwrap();
+    assert!(scalar::<bool>(&db, "SELECT to_regclass('seaql_migrations') IS NULL").await);
+    Local55::up(&db, None).await.unwrap();
+    assert_eq!(scalar::<i64>(&db, "SELECT count(*) FROM seaql_migrations").await, 115);
+    db.execute_unprepared(&format!("INSERT INTO users(id,email,password_hash,created_at,updated_at)
+        VALUES ('{USER}','owner@example.test','unused',now(),now())")).await.unwrap();
+    for domain in ["selected.test", "empty.test"] {
+        db.execute_unprepared(&legacy_insert(domain)).await.unwrap();
+    }
+    db.execute_unprepared("INSERT INTO site_ssl(id,site_id,domain,https_enabled,self_signed,created_at)
+        SELECT gen_random_uuid(),id,domain,true,false,now() FROM sites;
+        INSERT INTO site_certificates(id,site_id,domain,created_at,updated_at)
+        SELECT gen_random_uuid(),id,domain,now(),now() FROM sites WHERE domain='selected.test';
+        INSERT INTO site_certificate_links(site_id,certificate_id) SELECT site_id,id FROM site_certificates;
+        UPDATE site_ssl s SET certificate_id=c.id FROM site_certificates c WHERE s.site_id=c.site_id").await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+    assert_eq!(scalar::<i64>(&db, "SELECT count(*) FROM seaql_migrations WHERE version LIKE 'm20240101_000104_%'").await, 2);
+    assert!(scalar::<bool>(&db, "SELECT self_signed FROM site_ssl WHERE domain='empty.test'").await);
+    assert!(scalar::<bool>(&db, "SELECT EXISTS(SELECT FROM site_ssl s JOIN site_certificate_links l
+        ON (s.site_id,s.certificate_id)=(l.site_id,l.certificate_id) WHERE s.domain='selected.test' AND NOT s.self_signed)").await);
+}
+
 fn legacy_insert(domain: &str) -> String {
     format!(
         "INSERT INTO sites (id, user_id, name, domain, created_at, updated_at) \
@@ -555,7 +596,11 @@ async fn site_ingress_migration_postgres() {
     db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses=ARRAY['http:18085'] WHERE id='{a}'")).await.unwrap();
     let overlap = db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses=ARRAY['https:18085'] WHERE id='{b}'")).await.unwrap_err();
     assert_db_error(&overlap, "23505", Some("sites_ingress_protocol_conflict"));
-    Migrator::down(&db, Some(4)).await.unwrap(); // directory history, static releases, handlers and upload drafts
+    // Exercise the listener rollback guard even when later feature migrations
+    // have been appended. Roll back only migrations newer than that guard.
+    let steps = Migrator::migrations().iter().rev()
+        .position(|m| m.name() == "m20240101_000108_site_listeners").unwrap();
+    Migrator::down(&db, Some(steps as u32)).await.unwrap();
     assert!(Migrator::down(&db, Some(1)).await.unwrap_err().to_string().contains("remove additional site listeners"));
     db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses='{{}}' WHERE id='{a}'")).await.unwrap();
     Migrator::down(&db, Some(1)).await.unwrap();
@@ -625,7 +670,11 @@ async fn site_ingress_migration_postgres() {
         "23514",
         Some("sites_custom_ingress_disabled"),
     );
-    Migrator::down(&db, Some(3)).await.unwrap();
+    // Both the local ingress migration and the official SSL backfill carry
+    // sequence 104. Return to the last pre-ingress schema by its full name.
+    let applied = Migrator::get_applied_migrations(&db).await.unwrap();
+    let steps = applied.iter().rev().take_while(|m| !m.name().starts_with("m20240101_000103_")).count();
+    Migrator::down(&db, Some(steps as u32)).await.unwrap();
     assert!(scalar::<bool>(&db, "SELECT to_regclass('sites_domain_key') IS NOT NULL AND to_regclass('uq_sites_domain') IS NOT NULL").await);
     let error = db
         .execute_unprepared(&legacy_insert("app.test"))
