@@ -313,7 +313,7 @@ async fn update(
     Json(payload): Json<UpdateOidcRequest>,
 ) -> Result<Json<OidcView>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
 
     let row = find_or_create(&state, id).await?;
     let stored_claims = decode_claims(&row.claims_to_headers)?;
@@ -425,6 +425,16 @@ async fn update(
 
     // An enabled gate with a half-filled configuration would lock the site
     // out; reject instead of silently downgrading to disabled.
+    if resolved.enabled && site.ingress_port.is_some() {
+        managed_callback(
+            site.ingress_protocol.as_deref(),
+            &site.domain,
+            &site.alternate_domains,
+            &resolved.redirect_url,
+            &resolved.redirect_path,
+        )
+        .map_err(|msg| ApiError::BadRequest(msg.into()))?;
+    }
     guard_enabled(&state, &resolved).await?;
 
     let mut active: site_oidc_model::ActiveModel = row.into();
@@ -558,6 +568,54 @@ fn validate_session_ttl(ttl: i32) -> Result<(), ApiError> {
         )));
     }
     Ok(())
+}
+
+/// Validate the externally visible callback. NAT may translate its port.
+pub(crate) fn managed_callback(
+    protocol: Option<&str>,
+    domain: &str,
+    aliases: &[String],
+    url: &str,
+    path: &str,
+) -> Result<reqwest::Url, &'static str> {
+    if protocol != Some("https") {
+        return Err(
+            "managed visitor authentication requires an HTTPS listener",
+        );
+    }
+    let callback = reqwest::Url::parse(url)
+        .map_err(|_| "set an absolute HTTPS redirect_url for this listener")?;
+    let host = callback
+        .host_str()
+        .ok_or("redirect_url must include a host")?;
+    let matches = std::iter::once(domain)
+        .chain(aliases.iter().map(String::as_str))
+        .any(|name| {
+            if let Some(suffix) = name.strip_prefix("*.") {
+                host.strip_suffix(suffix).is_some_and(|prefix| {
+                    prefix.len() > 1 && prefix.ends_with('.')
+                })
+            } else {
+                host.eq_ignore_ascii_case(name)
+            }
+        });
+    let path = if path.is_empty() {
+        DEFAULT_REDIRECT_PATH
+    } else {
+        path
+    };
+    if callback.scheme() != "https"
+        || !matches
+        || host.ends_with('.')
+        || !callback.username().is_empty()
+        || callback.password().is_some()
+        || callback.query().is_some()
+        || callback.fragment().is_some()
+        || callback.path() != path
+    {
+        return Err("redirect_url must use a canonical HTTPS origin belonging to this site and match redirect_path");
+    }
+    Ok(callback)
 }
 
 /// `redirect_url`, when set, must be an absolute http(s) URL whose path is
@@ -1033,6 +1091,39 @@ mod tests {
             "stored",
             "cookie_secret",
             64
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn managed_callback_requires_site_https_origin_and_configured_path() {
+        let check = |url| {
+            managed_callback(
+                Some("https"),
+                "*.app.test",
+                &["alias.test".into()],
+                url,
+                "/cb",
+            )
+        };
+        assert!(check("https://sub.app.test:8443/cb").is_ok());
+        assert!(check("https://alias.test/cb").is_ok());
+        for url in [
+            "",
+            "http://sub.app.test/cb",
+            "https://app.test/cb",
+            "https://else.test/cb",
+            "https://sub.app.test/other",
+            "https://alias.test/cb?x=1",
+        ] {
+            assert!(check(url).is_err(), "{url}");
+        }
+        assert!(managed_callback(
+            Some("http"),
+            "app.test",
+            &[],
+            "https://app.test/cb",
+            "/cb"
         )
         .is_err());
     }

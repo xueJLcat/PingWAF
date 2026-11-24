@@ -1020,36 +1020,15 @@ async fn passkey_context<'a>(
         let invalid = || {
             Status::failed_precondition("invalid managed visitor callback URL")
         };
-        let callback = reqwest::Url::parse(&settings.redirect_url)
-            .map_err(|_| invalid())?;
+        let callback = crate::api::site_oidc::managed_callback(
+            site.ingress_protocol.as_deref(),
+            &site.domain,
+            &site.alternate_domains,
+            &settings.redirect_url,
+            &settings.redirect_path,
+        )
+        .map_err(|_| invalid())?;
         let host = callback.host_str().ok_or_else(invalid)?;
-        let matches = std::iter::once(&site.domain)
-            .chain(&site.alternate_domains)
-            .any(|domain| {
-                if let Some(suffix) = domain.strip_prefix("*.") {
-                    host.strip_suffix(suffix).is_some_and(|prefix| {
-                        prefix.len() > 1 && prefix.ends_with('.')
-                    })
-                } else {
-                    host.eq_ignore_ascii_case(domain)
-                }
-            });
-        let path = if settings.redirect_path.is_empty() {
-            "/oauth2/callback"
-        } else {
-            &settings.redirect_path
-        };
-        if callback.scheme() != "https"
-            || !matches
-            || host.ends_with('.')
-            || !callback.username().is_empty()
-            || callback.password().is_some()
-            || callback.query().is_some()
-            || callback.fragment().is_some()
-            || callback.path() != path
-        {
-            return Err(invalid());
-        }
         config.rp_id = host.to_owned();
         config.origin = callback.origin().ascii_serialization();
         namespace = format!(
@@ -1181,7 +1160,7 @@ pub(crate) async fn visitor_passkey_register_finish(
     let (site_row, config, store) =
         passkey_context(service, &payload.agent_token, &payload.site_id)
             .await?;
-    let credential: passkey_server::types::RegistrationResponse =
+    let mut credential: passkey_server::types::RegistrationResponse =
         serde_json::from_str(&payload.credential_json).map_err(|err| {
             debug!(error = %err, "visitor passkey registration body is malformed");
             Status::invalid_argument("the credential is malformed")
@@ -1224,10 +1203,15 @@ pub(crate) async fn visitor_passkey_register_finish(
             error_code: "not_granted".to_string(),
         }));
     }
-    // The crate's signature takes no label; the name is applied through the
-    // store's `create_passkey`, which `finish_registration` calls with the
-    // credential's own name. Ours is written after, so an operator's label
-    // wins over the authenticator's default.
+    let label = payload.name.trim();
+    if !label.is_empty() {
+        if label.chars().count() > 100 {
+            return Err(Status::invalid_argument(
+                "passkey name exceeds 100 characters",
+            ));
+        }
+        credential.name = Some(label.to_owned());
+    }
     match passkey_server::finish_registration(
         &store,
         &visitor_id,

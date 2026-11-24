@@ -396,11 +396,12 @@ impl VisitorAuth {
         serde_json::from_slice(&payload).ok()
     }
 
-    /// Sets the session cookie and sends the browser to the portal.
+    /// Attach the signed session to the password redirect or passkey JSON reply.
     fn signed_in_response(
         &self,
         session: VisitorSession,
         secure: bool,
+        mut response: HttpResponse,
     ) -> HttpResponse {
         let Some(value) = self.seal(&session) else {
             return error_page(
@@ -415,17 +416,6 @@ impl VisitorAuth {
             SESSION_TTL_SECONDS,
             secure,
         );
-        let mut response = match see_other(PORTAL_PATH) {
-            Ok(response) => response,
-            Err(error) => {
-                warn!(error = %error, "visitor: could not build the redirect");
-                return error_page(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Could not continue",
-                    "Please try again.",
-                );
-            },
-        };
         response.headers.get_or_insert_with(Vec::new).push(cookie);
         no_store(response)
     }
@@ -677,9 +667,11 @@ var wait = setInterval(function () {{
                     token_version: result.token_version,
                     exp: now_secs() + SESSION_TTL_SECONDS,
                 };
-                Ok(RequestPluginResult::Respond(
-                    self.signed_in_response(session_data, secure),
-                ))
+                Ok(RequestPluginResult::Respond(self.signed_in_response(
+                    session_data,
+                    secure,
+                    see_other(PORTAL_PATH)?,
+                )))
             },
             Ok(result) => {
                 // The control plane already chose wording that does not say
@@ -908,7 +900,9 @@ var wait = setInterval(function () {{
 </div>"#,
             );
         }
+        out.push_str("<script>");
         out.push_str(&passkey_login_script());
+        out.push_str("</script>");
         out.replace("{provider_entry}", crate::oidc::PROVIDER_ENTRY_PATH)
     }
 
@@ -1239,16 +1233,14 @@ var wait = setInterval(function () {{
                     token_version: result.token_version,
                     exp: now_secs() + SESSION_TTL_SECONDS,
                 };
-                // A sign-in ends at the portal, the same as a password one:
-                // the requirement is that the visitor lands on their account,
-                // not on the site they came from.
-                let mut response =
-                    self.signed_in_response(session_data, secure);
-                // The script asked for JSON, so it gets JSON — the cookie is
-                // set on the same response either way.
-                let body = br#"{"ok":true}"#.to_vec();
-                response.body = body.into();
-                Ok(RequestPluginResult::Respond(response))
+                let response = json_ok(
+                    &serde_json::json!({"ok": true, "redirect": PORTAL_PATH}),
+                );
+                Ok(RequestPluginResult::Respond(self.signed_in_response(
+                    session_data,
+                    secure,
+                    response,
+                )))
             },
             Ok(result) => {
                 let message = if result.error.is_empty() {
@@ -1843,7 +1835,7 @@ if (pkBtn) pkBtn.addEventListener('click', async function () {
     var begin = await fetch('{login}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     var start = await begin.json();
     if (!begin.ok) { passkeyAlert(start.error || 'Could not start.'); return; }
-    var opts = JSON.parse(start.options).publicKey;
+    var opts = JSON.parse(start.options);
     opts.challenge = b64urlToBuf(opts.challenge);
     if (opts.allowCredentials) opts.allowCredentials = opts.allowCredentials.map(function (c) {
       return Object.assign({}, c, { id: b64urlToBuf(c.id) });
@@ -1900,7 +1892,7 @@ if (addBtn) addBtn.addEventListener('click', async function () {
     var begin = await fetch('{register}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     var start = await begin.json();
     if (!begin.ok) { show(start.error || 'Could not start.'); return; }
-    var opts = JSON.parse(start.options).publicKey;
+    var opts = JSON.parse(start.options);
     opts.challenge = b64urlToBuf(opts.challenge);
     if (opts.user && opts.user.id) opts.user.id = b64urlToBuf(opts.user.id);
     if (opts.excludeCredentials) opts.excludeCredentials = opts.excludeCredentials.map(function (c) {

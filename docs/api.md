@@ -4272,6 +4272,8 @@ returned as `***` only when a value is stored — an unset secret comes back as
 
 ### PUT /sites/{site_id}/oidc
 
+For an enabled custom listener, use HTTPS and set an explicit HTTPS `redirect_url` for the site's primary domain or one of its aliases. Its path must match `redirect_path`. Use the externally visible port when a proxy translates the port. This applies to local visitor authentication as well as OIDC.
+
 Update the configuration. Every field is optional; an omitted field keeps its
 value. `claims_to_headers` replaces the whole list when present. Secrets
 follow the mask rules above: sending `***` keeps the stored secret (rejected

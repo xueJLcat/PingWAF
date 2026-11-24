@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Fix visitor passkey enrollment and sign-in in the browser. Both forms consume the WebAuthn options returned by the control plane, and the sign-in page now executes its passkey handler. The JSON finish reply sets the session cookie, and the portal preserves the chosen credential label. Managed authentication validates the external callback before saving.
+
 - Show each eligible node's observed revision, listener binding and deployment status on custom site detail pages.
 
 - Show available per-agent listeners when creating, editing or cloning a site. Administrators can replace the selected agents while updating a custom site.
