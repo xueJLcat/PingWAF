@@ -36,6 +36,13 @@ pub mod trusted_header {
 pub mod sites {
     use super::*;
 
+    pub fn parse_listener(value: &str) -> Option<(u16, &str)> {
+        let (protocol, number) = value.split_once(':')?;
+        let port = number.parse::<u16>().ok()?;
+        (matches!(protocol, "http" | "https") && port > 0 && number == port.to_string())
+            .then_some((port, protocol))
+    }
+
     #[derive(
         Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
     )]
@@ -57,6 +64,8 @@ pub mod sites {
         pub ingress_port: Option<i32>,
         #[serde(skip)]
         pub ingress_protocol: Option<String>,
+        #[serde(default)]
+        pub additional_ingresses: Vec<String>,
         pub status: String,
         pub plan: String,
         /// Disk budget, in MiB, the agents may use for this site's cache.

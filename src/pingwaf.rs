@@ -1778,6 +1778,7 @@ fn merge_config_state(new_toml: &str, prev_toml: &str) -> String {
 /// on ports 80 and 443.
 async fn start_legacy_data_plane(
     rule_cache: Arc<RuleCache>,
+    _host: IngressHost,
 ) -> anyhow::Result<()> {
     // Wait for the agent to receive initial config from the control plane
     for i in 0..30 {
@@ -2046,6 +2047,18 @@ async fn start_legacy_data_plane(
         {
             ps.enable_lets_encrypt();
         }
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &_host {
+            let port = match server_conf.addr.as_str() {
+                "0.0.0.0:80" => Some(80),
+                "0.0.0.0:443" => Some(443),
+                _ => None,
+            };
+            if let Some(port) = port {
+                host.register_default(port, ps, my_server.configuration.clone())?;
+                continue;
+            }
+        }
         let services = ps.run(my_server.configuration.clone())?;
         my_server
             .add_service(services.lb)
@@ -2164,9 +2177,10 @@ type IngressHost = Option<()>;
 
 async fn start_data_plane_agent(
     config: AgentConfig,
+    _embedded: bool,
 ) -> anyhow::Result<(Arc<pingwaf_agent::PingWafAgent>, IngressHost)> {
     #[cfg(target_os = "linux")]
-    if ingress::configured() {
+    if _embedded || ingress::configured() {
         let mut host = None;
         let agent = pingwaf_agent::PingWafAgent::start_with_client(
             config,
@@ -2191,9 +2205,9 @@ async fn run_data_plane(
     // Preconfigured ingress is independent of the legacy proxy, which may
     // be waiting for a site (or fail configuration validation).
     tokio::join!(
-        ingress::run(rule_cache.clone(), control_ports, host),
+        ingress::run(rule_cache.clone(), control_ports, host.clone()),
         async {
-            if let Err(error) = start_legacy_data_plane(rule_cache).await {
+            if let Err(error) = start_legacy_data_plane(rule_cache, host).await {
                 error!(target: LOG_TARGET, %error, "data plane proxy exited with error");
             }
         }
@@ -2416,7 +2430,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
 
             // Start the agent in the background first.
             // It will retry connecting to the server until it comes up.
-            let (agent, host) = match start_data_plane_agent(*agent_config)
+            let (agent, host) = match start_data_plane_agent(*agent_config, true)
                 .await
             {
                 Ok((agent, host)) => (Some(agent), host),
@@ -2473,7 +2487,7 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
         cache_dir = %config.cache_dir,
         "starting PingWAF in Agent mode (data plane only)"
     );
-    let (agent, host) = start_data_plane_agent(config).await?;
+    let (agent, host) = start_data_plane_agent(config, false).await?;
     // Opt-in self-upgrade: follows the control plane's build, then re-execs
     // this process (see `pingwaf_agent::upgrade`).
     let upgrade = pingwaf_agent::upgrade::spawn(Arc::clone(&agent));

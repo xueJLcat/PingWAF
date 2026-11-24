@@ -216,6 +216,8 @@ message IngressListenerStatus {
 
 message IngressListeners {
   repeated IngressListenerStatus listeners = 1;
+  // The agent can bind new IPv4 ports requested by assigned sites.
+  bool dynamic_bind = 2;
 }
 
 // Backend health of one upstream, reported per heartbeat.
@@ -1134,6 +1136,8 @@ message ManagedSite {
   FailoverMode failover_mode = 3;
   // Digest of this site's full envelope with fingerprint fields cleared.
   string site_revision = 4;
+  // Additional sockets sharing the primary ingress's site identity and policy.
+  repeated SiteIngress additional_ingresses = 5;
 }
 
 message SiteIngress {

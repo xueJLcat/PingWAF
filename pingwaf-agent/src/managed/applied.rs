@@ -257,7 +257,10 @@ impl<T> AppliedState<T> {
                     state
                         .listeners
                         .get(&listener)
-                        .is_some_and(Forwarding::is_live)
+                        .is_some_and(|current| current.is_live() &&
+                            Uuid::parse_str(&row.site_id).ok().and_then(|id| current.0.policy.sites().get(&id))
+                                .is_some_and(|site| site.site_revision == row.site_revision &&
+                                    site.additional_ingresses.is_empty()))
                         && bound.listeners.iter().any(|socket| {
                             socket.port == ingress.port
                                 && socket.protocol == ingress.protocol
@@ -280,12 +283,12 @@ impl<T> AppliedState<T> {
             .filter_map(|(id, site)| {
                 let ingress = site.ingress.as_ref()?;
                 if site.site_revision.is_empty()
-                    || !bound.listeners.iter().any(|socket| {
-                        socket.port == ingress.port
-                            && socket.protocol == ingress.protocol
+                    || !std::iter::once(ingress).chain(&site.additional_ingresses).all(|entry| bound.listeners.iter().any(|socket| {
+                        socket.port == entry.port
+                            && socket.protocol == entry.protocol
                             && socket.state()
                                 == pingwaf_proto::IngressBindState::Bound
-                    })
+                    }))
                 {
                     return None;
                 }
@@ -304,6 +307,12 @@ impl<T> AppliedState<T> {
             sites,
             received_sites: Vec::new(),
         })
+    }
+
+    pub fn live_listeners(&self) -> Vec<Listener> {
+        self.lock().listeners.iter().filter_map(|(key, forwarding)| {
+            forwarding.is_live().then_some(*key)
+        }).collect()
     }
 
     pub fn forwarding(&self) -> Option<Forwarding<T>> {

@@ -255,48 +255,79 @@ pub(super) async fn run(
     control_ports: Vec<u16>,
     host: super::IngressHost,
 ) {
-    let endpoints = match std::env::var(LISTENERS_ENV) {
-        Ok(value) if value.trim().is_empty() => return,
-        Ok(value) => parse_list(&value),
-        Err(std::env::VarError::NotPresent) => return,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            warn!(target: LOG_TARGET, "custom ingress list must be UTF-8");
-            Vec::new()
-        },
-    };
-    let mut report = IngressListeners::default();
-    let mut tasks = JoinSet::new();
-    let reserved = if endpoints.is_empty() {
-        BTreeSet::new()
-    } else {
-        reserved_ports(control_ports)
-    };
+    let fixed: BTreeMap<_, _> = parse_list(&std::env::var(LISTENERS_ENV).unwrap_or_default())
+        .into_iter().map(|endpoint| (endpoint.addr.port(), endpoint)).collect();
+    if fixed.is_empty() && host.is_none() { return; }
+    let management_ports: BTreeSet<_> = control_ports.iter().copied().collect();
+    let reserved = reserved_ports(control_ports);
     let (_shutdown, watch) = watch::channel(false);
-    for endpoint in endpoints {
-        let state = if reserved.contains(&endpoint.addr.port()) {
-            warn!(target: LOG_TARGET, addr = %endpoint.addr, "custom ingress port reserved by a default or control-plane listener");
-            IngressBindState::Reserved
-        } else {
-            match start(endpoint, watch.clone(), &mut tasks, host.clone()) {
-                Ok(()) => {
-                    info!(target: LOG_TARGET, addr = %endpoint.addr, protocol = ?endpoint.protocol, "custom ingress TCP socket bound; no site applied");
-                    IngressBindState::Bound
-                },
-                Err(error) => {
-                    warn!(target: LOG_TARGET, addr = %endpoint.addr, protocol = ?endpoint.protocol, %error, "custom ingress could not start");
-                    IngressBindState::BindFailed
-                },
+    let mut running = BTreeMap::<u16, (Endpoint, JoinSet<()>)>::new();
+    let mut previous = None;
+    loop {
+        let mut desired = fixed.clone();
+        let shared_ports: Vec<u16>;
+        #[cfg(target_os = "linux")]
+        { shared_ports = host.as_ref().map(|host| host.shared_ports()).unwrap_or_default(); }
+        #[cfg(not(target_os = "linux"))]
+        { shared_ports = Vec::new(); }
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &host {
+            for &port in &shared_ports {
+                desired.insert(port, Endpoint {
+                    addr: SocketAddr::from(([0, 0, 0, 0], port)),
+                    protocol: if port == 443 { IngressProtocol::Https } else { IngressProtocol::Http },
+                });
             }
-        };
-        report.listeners.push(endpoint.status(state));
-    }
-    cache.set_ingress_listeners(report);
-    if let Some(outcome) = tasks.join_next().await {
-        // serve() does not exit normally. If a task fails, do not keep
-        // claiming readiness for any socket from this stopped task group.
-        warn!(target: LOG_TARGET, ?outcome, "custom ingress task stopped unexpectedly; stopping remaining custom ingress");
-        tasks.shutdown().await;
-        cache.set_ingress_listeners(IngressListeners::default());
+            let mut dynamic = host.live_listeners();
+            dynamic.sort_by_key(|listener| match listener {
+                pingwaf_agent::managed::Listener::Custom { port, .. } => *port,
+                _ => 0,
+            });
+            for listener in dynamic {
+                if let pingwaf_agent::managed::Listener::Custom { port, protocol } = listener {
+                    if desired.len() >= MAX_INGRESS_LISTENERS { break; }
+                    desired.entry(port).or_insert(Endpoint {
+                        addr: SocketAddr::from(([0, 0, 0, 0], port)), protocol,
+                    });
+                }
+            }
+        }
+        // Join retired accept loops before reusing their ports with a different protocol.
+        let retired: Vec<_> = running.iter().filter_map(|(port, (endpoint, _))|
+            (desired.get(port) != Some(endpoint)).then_some(*port)).collect();
+        for port in retired {
+            if let Some((_, mut tasks)) = running.remove(&port) {
+                tasks.shutdown().await;
+            }
+        }
+        let mut report = IngressListeners { dynamic_bind: host.is_some(), listeners: Vec::new() };
+        for (port, endpoint) in desired {
+            let assigned_standard = (!fixed.contains_key(&port) || shared_ports.contains(&port)) && matches!(
+                (port, endpoint.protocol),
+                (80, IngressProtocol::Http) | (443, IngressProtocol::Https)
+            );
+            let state = if management_ports.contains(&port) || (reserved.contains(&port) && !assigned_standard) {
+                IngressBindState::Reserved
+            } else {
+                let (_, tasks) = running.entry(port).or_insert_with(|| (endpoint, JoinSet::new()));
+                let _ = tasks.try_join_next();
+                if tasks.is_empty() {
+                    match start(endpoint, watch.clone(), tasks, host.clone()) {
+                        Ok(()) => IngressBindState::Bound,
+                        Err(_) => IngressBindState::BindFailed,
+                    }
+                } else {
+                    IngressBindState::Bound
+                }
+            };
+            report.listeners.push(endpoint.status(state));
+        }
+        if previous.as_ref() != Some(&report) {
+            info!(target: LOG_TARGET, listeners = ?report.listeners, "ingress inventory changed");
+            previous = Some(report.clone());
+            cache.set_ingress_listeners(report);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

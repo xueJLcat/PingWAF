@@ -308,11 +308,16 @@ pub(crate) async fn check_agent_ingress(
     let session = current_session(tx, agent_id)
         .await?
         .ok_or_else(|| unavailable("agent has no current managed session"))?;
-    if !agents
-        .bound_ingresses(agent_id, session)
-        .await
-        .contains(&(port, protocol))
-    {
+    let inventory = agents.session_ingress(agent_id, session).await
+        .ok_or_else(|| unavailable("node listener inventory is unavailable"))?;
+    let usable = match inventory.listeners.iter().find(|entry| entry.port as i32 == port) {
+        Some(entry) => entry.state() == pingwaf_proto::IngressBindState::Bound
+            && matches!((entry.protocol(), protocol),
+                (pingwaf_proto::IngressProtocol::Http, "http") |
+                (pingwaf_proto::IngressProtocol::Https, "https")),
+        None => inventory.dynamic_bind && inventory.listeners.len() < pingwaf_proto::MAX_INGRESS_LISTENERS,
+    };
+    if !usable || port == i32::from(agents.admin_port) {
         return Err(unavailable(
             "agent has no recent bound listener for the requested port and protocol",
         ));
@@ -324,7 +329,31 @@ pub(crate) async fn check_agent_ingress(
 pub(crate) struct IngressAgentOption {
     id: Uuid,
     name: String,
+    dynamic_bind: bool,
     listeners: Vec<(i32, &'static str)>,
+}
+
+/// Validate all endpoints against the same site's assignment. Older agents
+/// decode only the primary listener, even when their inventory contains all ports.
+pub(crate) async fn check_agent_site(
+    tx: &impl ConnectionTrait,
+    agents: &super::AgentRegistry,
+    id: Uuid,
+    site: &site::Model,
+) -> Result<(), crate::api::error::ApiError> {
+    let (Some(port), Some(protocol)) = (site.ingress_port, site.ingress_protocol.as_deref()) else { return Ok(()); };
+    check_agent_ingress(tx, agents, id, site.user_id, port, protocol).await?;
+    if !site.additional_ingresses.is_empty() {
+        let session = current_session(tx, id).await?.ok_or_else(|| unavailable("node session has ended"))?;
+        if !agents.session_ingress(id, session).await.is_some_and(|report| report.dynamic_bind) {
+            return Err(unavailable("node does not support multiple site listeners"));
+        }
+        for entry in &site.additional_ingresses {
+            let (port, protocol) = site::parse_listener(entry).ok_or_else(|| unavailable("invalid site listener"))?;
+            check_agent_ingress(tx, agents, id, site.user_id, i32::from(port), protocol).await?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn ingress_agent_options(
@@ -338,7 +367,8 @@ pub(crate) async fn ingress_agent_options(
             continue;
         };
         let listeners = registry.bound_ingresses(id, session).await;
-        if listeners.is_empty() {
+        let dynamic_bind = registry.session_ingress(id, session).await.is_some_and(|report| report.dynamic_bind);
+        if listeners.is_empty() && !dynamic_bind {
             continue;
         }
         match authorize(db, id).await {
@@ -348,6 +378,7 @@ pub(crate) async fn ingress_agent_options(
                 options.push(IngressAgentOption {
                     id,
                     name: agent.display_name.unwrap_or(agent.hostname),
+                    dynamic_bind,
                     listeners,
                 });
             },
@@ -461,21 +492,18 @@ pub(crate) async fn check_site_ingress(
     agents: &super::AgentRegistry,
     site: &site::Model,
 ) -> Result<(), crate::api::error::ApiError> {
-    let (Some(port), Some(protocol)) =
-        (site.ingress_port, site.ingress_protocol.as_deref())
-    else {
+    if site.ingress_port.is_none() {
         return Ok(());
-    };
-    check_assigned_ingress(
-        tx,
-        agents,
-        site.id,
-        site.user_id,
-        port,
-        protocol,
-        true,
-    )
-    .await
+    }
+    let assignments = agent_sites::Entity::find()
+        .filter(agent_sites::Column::SiteId.eq(site.id)).all(tx).await?;
+    if assignments.is_empty() {
+        return Err(unavailable("active custom ingress requires an explicitly assigned agent"));
+    }
+    for assignment in assignments {
+        check_agent_site(tx, agents, assignment.agent_id, site).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn check_assigned_ingress(
@@ -831,6 +859,7 @@ pub(super) async fn check_postgres(
         "site.ingress_unavailable"
     );
     let bound = pingwaf_proto::IngressListeners {
+        dynamic_bind: false,
         listeners: vec![pingwaf_proto::IngressListenerStatus {
             port: 81,
             protocol: pingwaf_proto::IngressProtocol::Http as i32,

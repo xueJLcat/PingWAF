@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Sites support multiple HTTP and HTTPS listener rows, certificate assignment at creation and dynamic IPv4 wildcard binding on capable Linux nodes. Legacy and managed sites can share standard wildcard listeners.
+
 - Dashboard and site listener defaults use the IPv4 wildcard. The operator-configured dashboard port is excluded from site assignments and restores.
 
 - Updating one managed listener preserves traffic on other listeners with identical routes and policies, subject to their current session and lease.

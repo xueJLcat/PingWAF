@@ -29,6 +29,9 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sitesApi, siteKeys } from '@/api/sites'
+import { sslApi } from '@/api/ssl'
+import { Select } from '@/components/ui/Select'
+import { validIngressPort } from './sites/ingressForm'
 import { SiteIngressFields } from './sites/SiteIngressFields'
 import { defaultIngress, ingressRequest, siteListener, type IngressDraft } from './sites/ingressForm'
 import { ApiError } from '@/api/client'
@@ -69,6 +72,7 @@ interface SiteFormErrors {
 }
 
 interface SiteFormState {
+  certificateId: string
   ingress: IngressDraft
   name: string
   domain: string
@@ -78,6 +82,7 @@ interface SiteFormState {
 }
 
 const emptyForm: SiteFormState = {
+  certificateId: '',
   ingress: defaultIngress,
   name: '',
   domain: '',
@@ -335,6 +340,13 @@ export function SitesListPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [urlCreateOpen, setUrlCreateOpen] = useState(false)
   const inventorySite = cloneOpen ? undefined : editing?.id
+  const showCertificate = !editing && (!form.ingress.listener ||
+    [form.ingress.listener, ...(form.ingress.additional ?? [])].some(row => row.startsWith('https:')))
+  const certificates = useQuery({
+    queryKey: ['certificates', 'site-creation'],
+    queryFn: () => sslApi.listAll(),
+    enabled: canWrite && showCertificate && (dialogOpen || urlCreateOpen),
+  })
   const ingressInventory = useQuery({
     queryKey: [...siteKeys.all, 'ingress-options', inventorySite ?? null],
     queryFn: () => sitesApi.ingressOptions(inventorySite),
@@ -354,7 +366,7 @@ export function SitesListPage() {
     setCloneSource(site)
     setCloneForm({
       ...emptyForm,
-      ingress: { ...defaultIngress, listener: siteListener(site) },
+      ingress: { ...defaultIngress, listener: siteListener(site), additional: site.additional_ingresses },
       // The suffix is localized ("copy"/"副本"/"コピー").
       name: site.name ? `${site.name} ${t('pages.sites.cloneNameSuffix', 'copy')}` : `${site.domain} ${t('pages.sites.cloneNameSuffix', 'copy')}`,
       alternateDomains: site.alternate_domains ?? [],
@@ -431,6 +443,9 @@ export function SitesListPage() {
       alternateDomains.push(value)
     }
 
+    if (![cloneForm.ingress.listener, ...(cloneForm.ingress.additional ?? [])].every(row => validIngressPort(row, ingressInventory.data?.admin_port))) {
+      errors.top = t('pages.sites.ingressPortInvalid')
+    }
     setCloneErrors(errors)
     if (Object.values(errors).some(Boolean)) return
 
@@ -451,7 +466,7 @@ export function SitesListPage() {
     setEditing(site)
     setForm({
       ...emptyForm,
-      ingress: { ...defaultIngress, listener: siteListener(site) },
+      ingress: { ...defaultIngress, listener: siteListener(site), additional: site.additional_ingresses },
       name: site.name,
       domain: site.domain,
       alternateDomains: site.alternate_domains ?? [],
@@ -537,6 +552,9 @@ export function SitesListPage() {
       errors.top = t('pages.sites.ingressRequireAgent')
     }
 
+    if (![form.ingress.listener, ...(form.ingress.additional ?? [])].every(row => validIngressPort(row, ingressInventory.data?.admin_port))) {
+      errors.top = t('pages.sites.ingressPortInvalid')
+    }
     setFormErrors(errors)
     if (Object.values(errors).some(Boolean)) return
 
@@ -558,6 +576,7 @@ export function SitesListPage() {
       ...ingress,
     }
     if (form.upstreamTls) payload.upstream_tls = true
+    if (showCertificate && form.certificateId) payload.certificate_id = form.certificateId
     createSite.mutate(payload)
   }
 
@@ -978,8 +997,6 @@ export function SitesListPage() {
               {formErrors.top}
             </p>
           )}
-          <SiteIngressFields value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
-            inventory={ingressInventory.data} loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
           <Input
             label={t('common.name')}
             value={form.name}
@@ -1002,6 +1019,14 @@ export function SitesListPage() {
             required
           />
 
+          <SiteIngressFields value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
+            inventory={ingressInventory.data} loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
+          {showCertificate && <Select label={t('pages.sites.ingressCertificate')} value={form.certificateId}
+            onChange={event => setForm(f => ({ ...f, certificateId: event.target.value }))}>
+            <option value="">{t('pages.sites.ingressCertificateLater')}</option>
+            {(certificates.data?.items ?? []).filter(cert => cert.has_certificate && cert.has_private_key).map(cert =>
+              <option key={cert.id} value={cert.id}>{cert.domain}</option>)}
+          </Select>}
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <span className="text-[13px] font-medium text-fg-subtle">

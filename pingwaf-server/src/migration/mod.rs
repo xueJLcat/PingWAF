@@ -112,6 +112,7 @@ mod m20240101_000104_site_ingress;
 mod m20240101_000105_managed_config_order;
 mod m20240101_000106_ingress_tls_policy;
 mod m20240101_000107_enable_site_ingress;
+mod m20240101_000108_site_listeners;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -241,6 +242,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000105_managed_config_order::Migration),
             Box::new(m20240101_000106_ingress_tls_policy::Migration),
             Box::new(m20240101_000107_enable_site_ingress::Migration),
+            Box::new(m20240101_000108_site_listeners::Migration),
         ]
     }
 }

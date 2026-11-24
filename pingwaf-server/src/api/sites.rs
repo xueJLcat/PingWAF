@@ -112,6 +112,7 @@ const MAX_ROUTE_REWRITE_PATH_LEN: usize = 2048;
 /// Public representation of a site.
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteResponse {
+    pub additional_ingresses: Vec<String>,
     pub ingress_port: Option<i32>,
     pub ingress_protocol: Option<String>,
     pub id: Uuid,
@@ -162,6 +163,7 @@ impl From<site::Model> for SiteResponse {
             id: model.id,
             name: model.name,
             ingress_port: model.ingress_port,
+            additional_ingresses: model.additional_ingresses,
             ingress_protocol: model.ingress_protocol,
             domain: model.domain,
             alternate_domains: model.alternate_domains,
@@ -198,6 +200,7 @@ impl From<site::Model> for SiteResponse {
 /// selecting them was pure per-request allocation.
 #[derive(Debug, FromQueryResult)]
 struct SiteListRow {
+    additional_ingresses: Vec<String>,
     ingress_port: Option<i32>,
     ingress_protocol: Option<String>,
     id: Uuid,
@@ -228,6 +231,7 @@ impl From<SiteListRow> for SiteResponse {
             id: row.id,
             name: row.name,
             ingress_port: row.ingress_port,
+            additional_ingresses: row.additional_ingresses,
             ingress_protocol: row.ingress_protocol,
             domain: row.domain,
             alternate_domains: row.alternate_domains,
@@ -360,6 +364,7 @@ pub struct ListQuery {
 /// Missing keys preserve the current ingress; a pair of nulls clears it.
 #[derive(Debug, Deserialize, Default)]
 pub struct IngressFields {
+    additional_ingresses: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     ingress_port: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
@@ -367,6 +372,25 @@ pub struct IngressFields {
 }
 
 impl IngressFields {
+    pub(crate) fn additional(&self, current: Option<&site::Model>, primary: Option<i32>, admin: bool, admin_port: u16) -> Result<Vec<String>, ApiError> {
+        let rows = self.additional_ingresses.clone().unwrap_or_else(|| {
+            current.map(|s| s.additional_ingresses.clone()).unwrap_or_default()
+        });
+        if !admin && self.additional_ingresses.is_some() {
+            if rows.is_empty() && current.is_none_or(|s| s.additional_ingresses.is_empty()) { return Ok(rows); }
+            return Err(ApiError::Forbidden("only administrators may configure site listeners".into()));
+        }
+        if rows.is_empty() { return Ok(rows); }
+        let invalid = || ApiError::BadRequest("invalid or repeated site listening port".into()).with_code("site.ingress_invalid");
+        let mut ports = std::collections::HashSet::from([primary.ok_or_else(invalid)? as u16]);
+        if rows.len() >= pingwaf_proto::MAX_INGRESS_LISTENERS { return Err(invalid()); }
+        for value in &rows {
+            let (port, protocol) = site::parse_listener(value).ok_or_else(invalid)?;
+            if port == admin_port || (port == 80 && protocol != "http") ||
+                (port == 443 && protocol != "https") || !ports.insert(port) { return Err(invalid()); }
+        }
+        Ok(rows)
+    }
     pub(crate) fn resolve(
         &self,
         current: Option<&site::Model>,
@@ -406,6 +430,7 @@ impl IngressFields {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSiteRequest {
+    pub certificate_id: Option<Uuid>,
     #[serde(default)]
     pub ingress_agent_ids: std::collections::BTreeSet<Uuid>,
     #[serde(flatten)]
@@ -1251,6 +1276,7 @@ struct IngressOptionsQuery {
 
 #[derive(Serialize)]
 struct IngressOptions {
+    admin_port: u16,
     writes_enabled: bool,
     agents: Vec<crate::grpc::IngressAgentOption>,
     assigned_agent_ids: Vec<Uuid>,
@@ -1306,6 +1332,7 @@ async fn ingress_options(
         crate::grpc::ingress_agent_options(&tx, &state.agents, owner).await?;
     tx.commit().await?;
     Ok(Json(IngressOptions {
+        admin_port: state.agents.admin_port,
         writes_enabled,
         agents,
         assigned_agent_ids,
@@ -1326,14 +1353,12 @@ async fn write_ingress_assignments(
     site: &site::Model,
     ids: std::collections::BTreeSet<Uuid>,
 ) -> Result<(), ApiError> {
-    let (Some(port), Some(protocol)) =
-        (site.ingress_port, site.ingress_protocol.as_deref())
-    else {
+    if site.ingress_port.is_none() {
         return Err(ApiError::BadRequest(
             "ingress_agent_ids requires a custom ingress".into(),
         )
         .with_code("site.ingress_invalid"));
-    };
+    }
     if site.status == site_status::ACTIVE && ids.is_empty() {
         return Err(ApiError::BadRequest(
             "active custom ingress requires an explicitly assigned agent"
@@ -1346,15 +1371,7 @@ async fn write_ingress_assignments(
         .exec(txn)
         .await?;
     for id in ids {
-        crate::grpc::check_agent_ingress(
-            txn,
-            &state.agents,
-            id,
-            site.user_id,
-            port,
-            protocol,
-        )
-        .await?;
+        crate::grpc::check_agent_site(txn, &state.agents, id, site).await?;
         crate::models::agent_sites::ActiveModel {
             agent_id: Set(id),
             site_id: Set(site.id),
@@ -1419,6 +1436,7 @@ async fn list(
             site::Column::Domain,
             site::Column::IngressPort,
             site::Column::IngressProtocol,
+            site::Column::AdditionalIngresses,
             site::Column::AlternateDomains,
             site::Column::Status,
             site::Column::Plan,
@@ -1520,6 +1538,7 @@ async fn create(
         domain: Set(domain.clone()),
         alternate_domains: Set(alternate_domains),
         ingress_port: Set(port),
+        additional_ingresses: Set(payload.ingress.additional(None, port, current.is_admin(), state.agents.admin_port)?),
         ingress_protocol: Set(protocol),
         status: Set(status),
         plan: Set(plan),
@@ -1603,6 +1622,25 @@ async fn create(
 
     crate::defaults::seed_site_defaults(&txn, id).await?;
 
+    if let Some(cert_id) = payload.certificate_id {
+        let cert = site_certificates::Entity::find_by_id(cert_id).one(&txn).await?
+            .ok_or_else(|| ApiError::NotFound("certificate not found".into()))?;
+        if let Some(owner) = cert.site_id {
+            crate::api::common::load_site(&txn, owner, &current, false).await?;
+        } else {
+            current.require_admin().map_err(ApiError::from)?;
+        }
+        if cert.cert_pem.as_deref().is_none_or(str::is_empty) || cert.key_pem.as_deref().is_none_or(str::is_empty) {
+            return Err(ApiError::BadRequest("selected certificate has no usable TLS material".into()));
+        }
+        let missing = crate::api::ssl::uncovered_site_hostnames(&cert.domain, &model.domain, &model.alternate_domains);
+        if !missing.is_empty() {
+            return Err(ApiError::BadRequest(format!("selected certificate does not cover {}", missing.join(", "))));
+        }
+        certificate_links::ActiveModel { site_id: Set(id), certificate_id: Set(cert_id), linked_at: Set(timestamp) }
+            .insert(&txn).await?;
+    }
+
     // Every new site gets an SSL row with https enabled: without it the data
     // plane's `ssl.enabled` gate stays closed and a later ACME request would
     // sit pending forever - the user would have to know to flip a hidden
@@ -1624,7 +1662,7 @@ async fn create(
         min_tls_version: Set(tls_version::TLS_12.to_string()),
         max_tls_version: Set(None),
         self_signed: Set(false),
-        certificate_id: Set(None),
+        certificate_id: Set(payload.certificate_id),
         mtls_enabled: Set(false),
         mtls_client_ca: Set(None),
         mtls_organization: Set(None),
@@ -1953,6 +1991,7 @@ async fn clone_site(
         timestamp,
     );
     active.ingress_port = Set(port);
+    active.additional_ingresses = Set(payload.ingress.additional(Some(&source), port, current.is_admin(), state.agents.admin_port)?);
     active.ingress_protocol = Set(protocol);
     let model = active
         .insert(&txn)
@@ -2366,8 +2405,8 @@ async fn update(
         current.is_admin(),
         state.agents.admin_port,
     )?;
-    let ingress_changed =
-        port != model.ingress_port || protocol != model.ingress_protocol;
+    let additional = payload.ingress.additional(Some(&model), port, current.is_admin(), state.agents.admin_port)?;
+    let ingress_changed = port != model.ingress_port || protocol != model.ingress_protocol || additional != model.additional_ingresses;
     let activating =
         payload.status.as_deref().map(str::trim) == Some(site_status::ACTIVE);
     let previous_domain = model.domain.clone();
@@ -2376,6 +2415,7 @@ async fn update(
     let mut active: site::ActiveModel = model.into();
     if ingress_changed {
         active.ingress_port = Set(port);
+        active.additional_ingresses = Set(additional);
         active.ingress_protocol = Set(protocol);
     }
     if let Some(name) = non_empty(&payload.name) {
@@ -5767,6 +5807,7 @@ mod tests {
             domain: "source.example.com".to_string(),
             alternate_domains: vec!["alt.example.com".to_string()],
             ingress_port: Some(8443),
+            additional_ingresses: Vec::new(),
             ingress_protocol: Some("https".to_string()),
             status: "active".to_string(),
             plan: "free".to_string(),

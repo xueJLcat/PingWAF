@@ -332,6 +332,9 @@ async fn merge_row<C: ConnectionTrait>(
                 object.remove(field);
             }
         }
+        if columns.contains_key("additional_ingresses") && row.get("additional_ingresses").is_none() {
+            object.insert("additional_ingresses".into(), json!([]));
+        }
     }
     for (field, info) in columns {
         if merged.get(field).is_none() && schema == 1 {
@@ -859,6 +862,8 @@ async fn check_restore_ingress<C: ConnectionTrait>(
         let (port, protocol) = fields
             .resolve(None, true, agents.admin_port)
             .map_err(RestoreError::Ingress)?;
+        let extra = fields.additional(None, port, true, agents.admin_port)
+            .map_err(RestoreError::Ingress)?;
         if let (Some(port), Some(protocol)) = (port, protocol.as_deref()) {
             let id = uuid_field(row, "id").ok_or_else(|| {
                 DbErr::Custom("invalid restored site id".into())
@@ -873,6 +878,13 @@ async fn check_restore_ingress<C: ConnectionTrait>(
                 protocol.to_owned(),
                 row["status"] == crate::models::site_status::ACTIVE,
             ));
+            for entry in extra {
+                let (port, protocol) = crate::models::site::parse_listener(&entry)
+                    .ok_or_else(|| DbErr::Custom("invalid restored listener".into()))?;
+                assignments.push((id, owner, i32::from(port), protocol.to_owned(), row["status"] == crate::models::site_status::ACTIVE));
+                claims.push(json!({"id":id,"domain":row["domain"],"aliases":row["alternate_domains"],
+                    "port":port,"protocol":protocol}));
+            }
         }
         claims.push(json!({"id":row["id"], "domain":row["domain"], "aliases":row["alternate_domains"],
             "port":port, "protocol":protocol}));
@@ -892,7 +904,13 @@ async fn check_restore_ingress<C: ConnectionTrait>(
         ), final_sites AS (
             SELECT * FROM proposed
             UNION ALL
-            SELECT id, domain, alternate_domains, ingress_port, ingress_protocol FROM sites s
+            SELECT s.id, s.domain, s.alternate_domains, listener.port, listener.protocol FROM sites s
+            CROSS JOIN LATERAL (
+                SELECT s.ingress_port AS port, s.ingress_protocol AS protocol
+                UNION ALL
+                SELECT split_part(value, ':', 2)::integer, split_part(value, ':', 1)
+                FROM jsonb_array_elements_text(coalesce(to_jsonb(s)->'additional_ingresses', '[]'::jsonb))
+            ) listener
             WHERE NOT EXISTS (SELECT FROM proposed p WHERE p.id = s.id)
               AND NOT EXISTS (SELECT FROM jsonb_array_elements_text($2) removed WHERE removed.value::uuid = s.id)
         ), final_tls AS (

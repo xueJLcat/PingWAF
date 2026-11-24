@@ -873,6 +873,7 @@ mod tests {
             domain: "*.example.com".to_string(),
             alternate_domains: Vec::new(),
             ingress_port: None,
+            additional_ingresses: Vec::new(),
             ingress_protocol: None,
             status: "active".to_string(),
             plan: "free".to_string(),

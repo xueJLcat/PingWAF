@@ -2279,6 +2279,13 @@ pub(super) async fn assemble_managed_config(
             build_rule_bundle_with_settings(db, row, &settings, Some(&[]))
                 .await?;
         let mut envelope = ManagedSite {
+            additional_ingresses: row.additional_ingresses.iter().map(|value| {
+                let (port, scheme) = site::parse_listener(value)
+                    .ok_or_else(|| DbErr::Custom("invalid additional site listener".into()))?;
+                Ok(SiteIngress { port: port.into(), protocol: if scheme == "https" {
+                    IngressProtocol::Https as i32
+                } else { IngressProtocol::Http as i32 } })
+            }).collect::<Result<Vec<_>, DbErr>>()?,
             site: Some(site_to_proto(row, bundle, &ranges)),
             ingress,
             failover_mode: failover_mode_of(&row.failover_policy) as i32,

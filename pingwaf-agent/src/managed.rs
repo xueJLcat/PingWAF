@@ -326,38 +326,46 @@ fn index(
             FailoverMode::try_from(item.failover_mode).is_ok(),
             "invalid managed failover policy"
         );
-        let listener = match &item.ingress {
-            None => Listener::Default,
-            Some(ingress) => {
-                let port = u16::try_from(ingress.port)
-                    .context("invalid managed port")?;
-                ensure!(!matches!(port, 0 | 80 | 443), "invalid managed port");
-                let protocol = ingress.protocol();
+        ensure!(item.additional_ingresses.is_empty() || item.ingress.is_some(),
+            "additional ingress requires a primary ingress");
+        ensure!(item.ingress.as_ref().is_none_or(|row| !matches!(row.port, 80 | 443)), "invalid managed primary port");
+        ensure!(item.additional_ingresses.len() < pingwaf_proto::MAX_INGRESS_LISTENERS,
+            "too many site listeners");
+        for ingress in std::iter::once(item.ingress.as_ref()).chain(item.additional_ingresses.iter().map(Some)) {
+            let listener = match ingress {
+                None => Listener::Default,
+                Some(ingress) => {
+                    let port = u16::try_from(ingress.port)
+                        .context("invalid managed port")?;
+                    let protocol = ingress.protocol();
+                    ensure!(port != 0 && (port != 80 || protocol == IngressProtocol::Http)
+                        && (port != 443 || protocol == IngressProtocol::Https), "invalid managed port");
+                    ensure!(
+                        matches!(
+                            protocol,
+                            IngressProtocol::Http | IngressProtocol::Https
+                        ),
+                        "invalid managed protocol"
+                    );
+                    ensure!(
+                        protocols
+                            .insert(port, protocol)
+                            .is_none_or(|old| old == protocol),
+                        "conflicting managed listener protocols"
+                    );
+                    Listener::Custom { port, protocol }
+                },
+            };
+            let names = candidate.routes.entry(listener).or_default();
+            for hostname in
+                std::iter::once(&site.domain).chain(&site.alternate_domains)
+            {
+                ensure!(valid_hostname(hostname), "invalid managed hostname");
                 ensure!(
-                    matches!(
-                        protocol,
-                        IngressProtocol::Http | IngressProtocol::Https
-                    ),
-                    "invalid managed protocol"
+                    names.insert(hostname.clone(), id).is_none(),
+                    "conflicting managed hostname"
                 );
-                ensure!(
-                    protocols
-                        .insert(port, protocol)
-                        .is_none_or(|old| old == protocol),
-                    "conflicting managed listener protocols"
-                );
-                Listener::Custom { port, protocol }
-            },
-        };
-        let names = candidate.routes.entry(listener).or_default();
-        for hostname in
-            std::iter::once(&site.domain).chain(&site.alternate_domains)
-        {
-            ensure!(valid_hostname(hostname), "invalid managed hostname");
-            ensure!(
-                names.insert(hostname.clone(), id).is_none(),
-                "conflicting managed hostname"
-            );
+            }
         }
         // Reserve paused names during validation, but do not route to them.
         // Custom delivery normally excludes them altogether.
@@ -477,10 +485,25 @@ mod tests {
     }
 
     #[test]
+    fn standard_pair_and_custom_port_share_one_site() {
+        use IngressProtocol::{Http, Https};
+        let (id, mut site) = managed("combo.example", Some((18085, Http)));
+        site.additional_ingresses = vec![SiteIngress { port: 80, protocol: Http as i32 }, SiteIngress {port: 443, protocol: Https as i32}];
+        let session = Uuid::new_v4();
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        let policy = receiver.receive(snapshot(session, Uuid::new_v4(), 1, vec![site])).unwrap().unwrap();
+        for (port, protocol) in [(80,Http),(443,Https),(18085,Http)] {
+            assert_eq!(policy.site_id(Listener::Custom {port,protocol}, "combo.example"), Some(id));
+        }
+    }
+
+    #[test]
     fn selects_uuid_by_listener_before_hostname_and_never_falls_back() {
         use IngressProtocol::{Http, Https};
         let (default_id, default) = managed("shared.example", None);
-        let (http_id, http) = managed("shared.example", Some((81, Http)));
+        let (http_id, mut http) = managed("shared.example", Some((81, Http)));
+        http.additional_ingresses.push(SiteIngress { port: 8443, protocol: Https as i32 });
         let (https_id, mut https) =
             managed("shared.example", Some((82, Https)));
         https.site.as_mut().unwrap().alternate_domains =
@@ -505,6 +528,7 @@ mod tests {
         for (listener, id) in [
             (Listener::Default, default_id),
             (custom(81, Http), http_id),
+            (custom(8443, Https), http_id),
             (custom(82, Https), https_id),
             (custom(83, Https), mtls_id),
         ] {

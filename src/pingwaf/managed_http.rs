@@ -20,8 +20,10 @@ use super::convert_proxy_config;
 
 #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
 mod tls;
+mod shared;
 
 pub(super) struct Host {
+    shared: std::sync::RwLock<HashMap<u16, Arc<shared::DefaultApp>>>,
     state: pingwaf_agent::managed::AppliedState<Arc<View>>,
     cache: Arc<pingwaf_agent::cache::RuleCache>,
     defaults: std::sync::Mutex<Option<pingwaf_proto::SiteConfig>>,
@@ -29,10 +31,25 @@ pub(super) struct Host {
 }
 
 impl Host {
+    pub(super) fn shared_ports(&self) -> Vec<u16> {
+        self.shared.read().unwrap_or_else(|e| e.into_inner()).keys().copied().collect()
+    }
+
+    pub(super) fn register_default(&self, port: u16, server: Server, conf: Arc<pingora::server::configuration::ServerConf>) -> anyhow::Result<()> {
+        let app = Arc::new(shared::DefaultApp::new(port, server, conf)?);
+        self.shared.write().unwrap_or_else(|e| e.into_inner()).insert(port, app);
+        Ok(())
+    }
+
+    pub(super) fn live_listeners(&self) -> Vec<Listener> {
+        self.state.live_listeners()
+    }
+
     pub(super) fn new(
         cache: Arc<pingwaf_agent::cache::RuleCache>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            shared: Default::default(),
             state: Default::default(),
             cache,
             defaults: Default::default(),
@@ -72,9 +89,28 @@ impl Host {
         listener: Listener,
         shutdown: ShutdownWatch,
     ) {
-        if let Some(forwarding) = self.state.forwarding_for(listener) {
+        let fallback = match listener {
+            Listener::Custom {port, ..} => self.shared.read().unwrap_or_else(|e| e.into_inner()).get(&port).cloned(),
+            _ => None,
+        };
+        let mut stream = super::ingress::downstream_stream(tcp);
+        let forwarding = self.state.forwarding_for(listener);
+        if let Some(fallback) = fallback {
+            let managed = match &forwarding {
+                None => false,
+                Some(handle) => {
+                    let Ok(Ok(hostname)) = tokio::time::timeout(std::time::Duration::from_secs(10), fallback.hostname(&mut stream)).await else { return; };
+                    handle.run(|view| async move { view.rules.select(listener, &hostname).is_some() }).await.unwrap_or(false)
+                }
+            };
+            if !managed {
+                let _ = fallback.serve(stream, shutdown).await;
+                return;
+            }
+        }
+        if let Some(forwarding) = forwarding {
             let _ =
-                serve_http(forwarding, tcp, listener, shutdown, false).await;
+                serve_http_stream(forwarding, stream, listener, shutdown, false).await;
         }
     }
 }
@@ -184,7 +220,7 @@ impl View {
             .sites()
             .iter()
             .filter(|(_, site)| {
-                site.ingress.as_ref().is_some_and(|ingress| {
+                site.ingress.iter().chain(&site.additional_ingresses).any(|ingress| {
                     ingress.protocol() == pingwaf_proto::IngressProtocol::Https
                 })
             })
@@ -410,9 +446,20 @@ impl HttpServerApp for AuthorizedProxy {
     }
 }
 
+#[cfg(test)]
 async fn serve_http(
     forwarding: Forwarding<Arc<View>>,
     tcp: tokio::net::TcpStream,
+    listener: Listener,
+    shutdown: ShutdownWatch,
+    h2c: bool,
+) -> Option<anyhow::Result<()>> {
+    serve_http_stream(forwarding, super::ingress::downstream_stream(tcp), listener, shutdown, h2c).await
+}
+
+async fn serve_http_stream(
+    forwarding: Forwarding<Arc<View>>,
+    stream: pingora::protocols::l4::stream::Stream,
     listener: Listener,
     shutdown: ShutdownWatch,
     h2c: bool,
@@ -427,7 +474,6 @@ async fn serve_http(
     let forwarding = Arc::new(forwarding);
     forwarding
         .run(|view| async {
-            let stream = super::ingress::downstream_stream(tcp);
             let (stream, tls_site): (pingora::protocols::Stream, _) =
                 match protocol {
                     pingwaf_proto::IngressProtocol::Http => {
@@ -883,6 +929,7 @@ mod tests {
                 site.site_revision = "ab".repeat(32);
             }
             rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
+                dynamic_bind: false,
                 listeners: endpoints
                     .iter()
                     .map(|(addr, _, _)| pingwaf_proto::IngressListenerStatus {

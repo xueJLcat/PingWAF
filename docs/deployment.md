@@ -484,19 +484,18 @@ are listed against it below; the dash in a table entry means the setting has no
 
 ### Experimental TCP Listener Diagnostics
 
-For isolated development only, set `PINGWAF_INGRESS_LISTENERS` on the agent or
-all-in-one process to a comma-separated list such as
-`http@127.0.0.1:81,http@[::1]:83,https@127.0.0.1:8443`. Use an IP literal and a
-nonzero port, one declaration per port, at most 32 entries. `[::]` is
-dual-stack; other IPv6 literals are IPv6-only. Port `80`, port `443`, overrides
-for the default data-plane listeners, and the all-in-one management and gRPC
-ports are reserved. An unavailable port does not stop the other entries; a
-change or retry requires a process restart. A `Bound` heartbeat entry reports the socket state.
-Linux agents configured with these listeners negotiate the managed protocol. Use
-a control plane that supports ordered snapshots. Default-ingress sites continue
-through the default proxy. An assigned custom site uses its own HTTP or TLS
-configuration after initial upstream checks. Session loss or lease expiry
-withdraws its view and cancels in-flight forwarding. Migration 000107 enables custom site creation. Rolling back this migration requires a database with no custom sites. Restore a pre-upgrade backup to revert a deployment that already serves custom sites.
+On Linux, the all-in-one node supports dynamic listeners. To enable managed
+snapshots on a standalone agent, configure static listeners with
+`PINGWAF_INGRESS_LISTENERS`, for example `http@127.0.0.1:81,http@[::1]:83`.
+Use one IP literal per port, up to 32 declarations. The node retries failed
+binds and reports socket state separately from site application status.
+
+Under Sites, add HTTP or HTTPS listener rows, select the target agent and
+associate a certificate for HTTPS. Dynamic listeners bind to all IPv4
+interfaces. Default wildcard HTTP/80 and HTTPS/443 can share their sockets
+with managed sites. Management and gRPC ports are reserved. Migration 108
+stores additional listeners. Back up the database before upgrading and
+restore that backup together with the previous binaries when rolling back.
 
 ## Deployment Modes
 

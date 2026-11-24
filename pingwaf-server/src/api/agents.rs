@@ -645,19 +645,7 @@ async fn update_sites(
                     site.domain
                 )));
             }
-            if let (Some(port), Some(protocol)) =
-                (site.ingress_port, site.ingress_protocol.as_deref())
-            {
-                crate::grpc::check_agent_ingress(
-                    &txn,
-                    &state.agents,
-                    id,
-                    site.user_id,
-                    port,
-                    protocol,
-                )
-                .await?;
-            }
+            crate::grpc::check_agent_site(&txn, &state.agents, id, &site).await?;
             agent_sites::ActiveModel {
                 agent_id: Set(id),
                 site_id: Set(*site_id),

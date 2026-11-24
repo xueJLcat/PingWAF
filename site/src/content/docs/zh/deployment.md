@@ -23,7 +23,7 @@ minutes: 10
 
 `GET /healthz` 在 HTTP 与 HTTPS 下都会响应，适合作为 compose 健康检查与负载均衡探针；其余路径一律跳转 HTTPS。
 
-Linux 的 Agent 和 all-in-one 配置有效的 `PINGWAF_INGRESS_LISTENERS` 后使用受管快照，自定义 HTTP/HTTPS 入口仅在已应用快照的租约有效时转发分派站点。默认未设置。
+Linux 的一体化节点支持动态监听；独立 Agent 通过有效的 `PINGWAF_INGRESS_LISTENERS` 配置启用受管快照。在站点表单中填写域名，添加 HTTP 或 HTTPS 端口行，为 HTTPS 选择证书。动态端口监听所有 IPv4 接口，站点禁止占用管理端口。
 
 旧版 Agent 协议只下发默认入口站点。TCP 绑定上报不代表节点获准转发自定义入口流量。
 迁移 000107 开放自定义入口写入。库中有自定义站点时降级会被拒绝；回到旧版须恢复事先验证的升级前备份。

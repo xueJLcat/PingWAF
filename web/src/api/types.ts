@@ -115,6 +115,7 @@ export type SiteStatus = 'active' | 'paused' | 'pending'
 
 /** `api::sites::SiteResponse` */
 export interface Site {
+  additional_ingresses?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
   id: string
@@ -290,6 +291,8 @@ export interface SiteDetail {
 }
 
 export interface CreateSiteRequest {
+  certificate_id?: string
+  additional_ingresses?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
   ingress_agent_ids?: string[]
@@ -311,6 +314,7 @@ export interface CreateSiteRequest {
 
 /** `POST /sites/{site_id}/clone` — duplicate a site under a new primary domain. */
 export interface CloneSiteRequest {
+  additional_ingresses?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
   /** New primary hostname; must not collide with any existing site. */
@@ -323,6 +327,7 @@ export interface CloneSiteRequest {
 
 export interface UpdateSiteRequest {
   ingress_agent_ids?: string[]
+  additional_ingresses?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
   name?: string

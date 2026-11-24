@@ -337,9 +337,13 @@ pub(crate) async fn query_rows<C: ConnectionTrait>(
     // Preserve the legacy snapshot shape when both columns are unset. Older
     // readers reject unknown columns, even if the stored values are null.
     let row = if spec.name == "sites" {
-        "CASE WHEN to_jsonb(t)->>'ingress_port' IS NULL AND \
-         to_jsonb(t)->>'ingress_protocol' IS NULL THEN \
-         to_jsonb(t) - 'ingress_port' - 'ingress_protocol' ELSE to_jsonb(t) END"
+        r#"CASE
+            WHEN to_jsonb(t)->>'ingress_port' IS NULL AND to_jsonb(t)->>'ingress_protocol' IS NULL
+                THEN to_jsonb(t) - 'ingress_port' - 'ingress_protocol' - 'additional_ingresses'
+            WHEN to_jsonb(t)->'additional_ingresses' = '[]'::jsonb
+                THEN to_jsonb(t) - 'additional_ingresses'
+            ELSE to_jsonb(t)
+        END"#
     } else {
         "to_jsonb(t)"
     };

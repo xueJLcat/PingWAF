@@ -53,7 +53,7 @@ fn tls_version(value: &str, default: u8) -> anyhow::Result<u8> {
 /// Read just enough for the existing TLS parser to extract SNI, then replay
 /// the exact bytes to the selected backend. The outer timeout also bounds
 /// the backend handshake, and its verifier remains authoritative.
-async fn read_sni(stream: &mut Stream) -> anyhow::Result<String> {
+pub(super) async fn read_sni(stream: &mut Stream) -> anyhow::Result<Option<String>> {
     let mut parser = rustls::server::Acceptor::default();
     let mut buffered = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -73,8 +73,7 @@ async fn read_sni(stream: &mut Stream) -> anyhow::Result<String> {
                 let name = accepted
                     .client_hello()
                     .server_name()
-                    .context("managed HTTPS requires SNI")?
-                    .to_owned();
+                    .map(str::to_owned);
                 stream.rewind(&buffered);
                 return Ok(name);
             }
@@ -87,7 +86,7 @@ pub(super) async fn accept(
     view: &View,
     listener: Listener,
 ) -> anyhow::Result<(Transport, Uuid)> {
-    let sni = read_sni(&mut stream).await?;
+    let sni = read_sni(&mut stream).await?.context("managed HTTPS requires SNI")?;
     let (id, _) = view
         .rules
         .select(listener, &sni)

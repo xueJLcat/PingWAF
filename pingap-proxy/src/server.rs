@@ -762,6 +762,34 @@ impl Server {
     /// - Sets up TLS if enabled
     /// - Initializes HTTP/2 support
     /// - Configures thread pool
+    pub fn shared_tls_settings(&self) -> Result<(GlobalCertificate, pingora::listeners::tls::TlsSettings)> {
+        let cert = GlobalCertificate::new(self.certificate_provider.clone());
+        let settings = cert.new_tls_settings(&TlsSettingParams {
+            server_name: self.name.clone(),
+            enabled_h2: self.enabled_h2,
+            http1_enabled: self.http1_enabled,
+            cipher_list: self.tls_cipher_list.clone(),
+            cipher_suites: self.tls_ciphersuites.clone(),
+            tls_min_version: self.tls_min_version.clone(),
+            tls_max_version: self.tls_max_version.clone(),
+            client_ca_pem: self.client_ca_pem.clone(),
+        }).map_err(|e| Error::Common { category: "tls".into(), message: e.to_string() })?;
+        Ok((cert, settings))
+    }
+
+    pub fn into_shared_http(self, conf: Arc<configuration::ServerConf>) -> HttpProxy<Self> {
+        let h2 = self.new_h2_options();
+        let mut options = HttpServerOptions::default();
+        options.h2c = !self.global_certificates && self.enabled_h2;
+        options.h2_idle_timeout = self.h2_idle_timeout;
+        options.keepalive_request_limit = self.keepalive_request_limit;
+        let mut app = HttpProxy::new(self, conf);
+        app.handle_init_modules();
+        app.server_options = Some(options);
+        app.h2_options = h2;
+        app
+    }
+
     pub fn run(
         self,
         conf: Arc<configuration::ServerConf>,

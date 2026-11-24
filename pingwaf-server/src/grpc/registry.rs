@@ -623,6 +623,14 @@ impl AgentRegistry {
             .collect()
     }
 
+    pub(super) async fn session_ingress(&self, id: Uuid, session: Uuid) -> Option<IngressListeners> {
+        let inner = self.inner.read().await;
+        let (at, report) = inner.connected.get(&id)
+            .filter(|connection| connection.session == Some(session))?
+            .ingress.as_ref()?;
+        (at.elapsed() < Duration::from_secs(60)).then(|| report.clone())
+    }
+
     pub(super) async fn bound_ingresses(
         &self,
         id: Uuid,
@@ -1407,6 +1415,7 @@ mod tests {
         let (stream, _) =
             registry.connect_session(agent, sender, Some(session)).await;
         let bound = IngressListeners {
+            dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,
                 protocol: IngressProtocol::Http as i32,
@@ -1467,6 +1476,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let (first, _) = registry.connect(agent, sender).await;
         let mut report = IngressListeners {
+            dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,
                 protocol: IngressProtocol::Http as i32,

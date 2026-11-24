@@ -13,7 +13,7 @@ pub mod config;
 pub mod control_plane;
 mod managed;
 pub(crate) use managed::{
-    check_agent_ingress, check_assigned_ingress, check_site_ingress,
+    check_agent_site, check_assigned_ingress, check_site_ingress,
     ingress_agent_options, site_deployment, IngressAgentOption, SiteDeployment,
 };
 pub mod registry;

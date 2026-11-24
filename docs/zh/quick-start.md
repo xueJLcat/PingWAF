@@ -27,7 +27,7 @@ export PINGWAF_SECRET_KEY="$(openssl rand -hex 32)"     # 静态加密主密钥�
 - 主密钥/JWT 密钥/数据库口令等应放在权限 `600` 的 `.env` 或 secret manager 中，不要提交到版本库。
 - 默认管理员 `admin@pingwaf.local`，口令为部署时设置/安装器生成的随机口令（仅裸二进制未设 `PINGWAF_ADMIN_PASSWORD` 时回退到 `pingwaf123`）；首次登录会被强制改密。
 - 安装器默认把控制台 `127.0.0.1:9080` 与 gRPC `127.0.0.1:9090` 绑定；只有需要反向代理或远程 agent 时才用 `--listen-public`（或 `PINGWAF_LISTEN_PUBLIC=1`）显式开放，并且先修改管理员口令。
-- Linux 的 Agent 和 all-in-one 配置有效的 `PINGWAF_INGRESS_LISTENERS` 后使用受管快照，自定义 HTTP/HTTPS 入口仅在已应用快照的租约有效时转发分派站点。默认未设置。
+- Linux 的一体化节点支持动态监听；独立 Agent 通过有效的 `PINGWAF_INGRESS_LISTENERS` 配置启用受管快照。在站点表单中填写域名，添加 HTTP 或 HTTPS 端口行，为 HTTPS 选择证书。动态端口监听所有 IPv4 接口，站点禁止占用管理端口。
 
 ## 3. 打开控制台
 
