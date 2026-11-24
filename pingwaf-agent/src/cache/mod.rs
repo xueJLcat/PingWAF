@@ -485,7 +485,7 @@ fn failover_registry_from(
 ///
 /// Exact hits cost a single lookup and no allocation; the wildcard walk
 /// only runs on a miss and reuses one buffer.
-fn lookup_with_wildcard<'a, K, V>(
+pub(crate) fn lookup_with_wildcard<'a, K, V>(
     map: &'a HashMap<K, V>,
     domain: &str,
 ) -> Option<&'a V>

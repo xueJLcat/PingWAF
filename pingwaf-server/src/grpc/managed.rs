@@ -99,8 +99,7 @@ async fn build_in_view(
     let (agent, owner_id) = authorize(tx, agent_id).await?;
     let sites = visible_sites(tx, &agent, owner_id).await?;
     let config = assemble_managed_config(tx, &sites).await?;
-    // Tonic's default decoding limit is 4 MiB; reserve space for the envelope.
-    if config.encoded_len() > 4 * 1024 * 1024 - 1024 {
+    if config.encoded_len() > pingwaf_proto::MAX_MANAGED_CONFIG_BYTES {
         return Err(BuildError::TooLarge);
     }
     let config = config.encode_to_vec();

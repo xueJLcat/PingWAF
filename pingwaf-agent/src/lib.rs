@@ -5,6 +5,7 @@ pub mod cert_status;
 pub mod client;
 pub mod config;
 pub mod heartbeat;
+pub mod managed;
 pub mod probe;
 pub mod upgrade;
 pub mod upstream_health;

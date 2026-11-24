@@ -39,6 +39,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+prost = { workspace = true }
+hex = { workspace = true }
 prost-types = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
