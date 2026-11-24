@@ -678,9 +678,20 @@ impl ControlPlaneTrait for ControlPlaneService {
         let session_id = managed_session_id(&claims)?.ok_or_else(|| {
             Status::permission_denied("managed protocol was not negotiated")
         })?;
-        managed::build_snapshot(&self.db, agent_id, session_id)
-            .await
-            .map(Response::new)
+        let mut snapshot =
+            managed::build_snapshot(&self.db, agent_id, session_id).await?;
+        // Never grant a lease beyond the issuing credential's expiry. Client
+        // time spent in transit is charged against, not added to, this bound.
+        let remaining = claims
+            .exp
+            .saturating_sub(Utc::now().timestamp())
+            .saturating_sub(1);
+        if remaining <= 0 {
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        }
+        snapshot.lease_seconds = pingwaf_proto::MAX_MANAGED_LEASE_SECONDS
+            .min(u32::try_from(remaining).unwrap_or(u32::MAX));
+        Ok(Response::new(snapshot))
     }
 
     type HeartbeatStream = BoxedStream<ServerCommand>;

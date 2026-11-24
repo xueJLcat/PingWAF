@@ -176,6 +176,7 @@ async fn build_in_view(
         config_hash: hex::encode(Sha256::digest(&config)),
         config,
         session_id: session_id.to_string(),
+        lease_seconds: 0, // Only the authenticated RPC grants forwarding.
     })
 }
 
@@ -439,6 +440,10 @@ pub(super) async fn check_postgres(
         ManagedSiteConfig::decode(snapshot.config.as_slice()).unwrap()
     };
     let first = fetch(token.clone()).await.unwrap();
+    assert_eq!(
+        first.lease_seconds,
+        pingwaf_proto::MAX_MANAGED_LEASE_SECONDS
+    );
     let session = Uuid::parse_str(&first.session_id).unwrap();
     assert_eq!(first.session_id, managed.managed_session_id);
     assert_eq!(

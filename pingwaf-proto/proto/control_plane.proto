@@ -1153,6 +1153,9 @@ message ManagedSnapshot {
   string config_hash = 3;
   bytes config = 4; // Serialized ManagedSiteConfig
   string session_id = 5; // Registration session, carried in the agent JWT
+  // Permission to serve this exact applied version, measured from the start
+  // of the authenticated request on the agent. Zero grants no permission.
+  uint32 lease_seconds = 6;
 }
 
 message Site {

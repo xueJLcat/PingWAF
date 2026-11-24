@@ -1,5 +1,5 @@
-//! Validation and indexing of managed configuration candidates. This module
-//! does not apply rules, persist snapshots, or grant forwarding permission.
+//! Validation and indexing of managed configuration candidates. A lease is
+//! independent of receipt: it only permits forwarding for an applied version.
 
 use std::collections::HashMap;
 
@@ -13,6 +13,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::cache::lookup_with_wildcard;
+
+#[cfg(target_os = "linux")]
+mod lease;
+#[cfg(target_os = "linux")]
+pub use lease::{Lease, PullWindow, Received};
 
 /// Trusted listener identity, supplied by the owner of the accepting socket.
 /// The default pair of listeners share one hostname namespace.

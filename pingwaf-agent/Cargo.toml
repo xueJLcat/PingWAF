@@ -56,5 +56,11 @@ rand = { workspace = true }
 # CIDR matching for control-plane block commands that target a whole range.
 ipnet = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Tokio's standard clock excludes suspend; timerfd and the hot-path check
+# must use the same clock that includes it.
+rustix = { version = "1.1.6", features = ["time"] }
+tokio = { workspace = true, features = ["net"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
