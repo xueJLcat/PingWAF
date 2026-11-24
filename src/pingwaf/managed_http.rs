@@ -16,7 +16,6 @@ use pingwaf_agent::managed::{
 };
 use uuid::Uuid;
 
-use super::convert_proxy_config;
 
 #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
 mod tls;
@@ -212,7 +211,8 @@ impl View {
             })
             .map(|(id, site, ingress)| {
                 let oidc = managed_oidc(&rules, id, site, ingress)?;
-                Ok((id, build_site(site, oidc, cache_dir)?))
+                let envelope = &candidate.sites()[&id];
+                Ok((id, build_site(site, oidc, cache_dir, envelope.handler.as_ref())?))
             })
             .collect::<anyhow::Result<_>>()?;
         #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
@@ -308,9 +308,47 @@ fn build_site(
     site: &CompiledSite,
     oidc_listener_port: Option<u16>,
     cache_dir: &Path,
+    handler: Option<&pingwaf_proto::managed_site::Handler>,
 ) -> anyhow::Result<ManagedRequestSite> {
+    use pingwaf_proto::managed_site::Handler;
+    let handler = match handler {
+        Some(Handler::Redirect(spec)) => {
+            anyhow::ensure!(matches!(spec.status, 301 | 302 | 307 | 308), "invalid redirect status");
+            let mut conf = pingap_config::PluginConf::new();
+            conf.insert("category".into(), "redirect".into());
+            conf.insert("target".into(), spec.target.clone().into());
+            conf.insert("status".into(), i64::from(spec.status).into());
+            conf.insert("preserve_path".into(), spec.preserve_path.into());
+            conf.insert("preserve_query".into(), spec.preserve_query.into());
+            Some(conf)
+        }
+        Some(Handler::StaticRelease(spec)) => {
+            anyhow::ensure!(spec.digest.len() == 64 && spec.digest.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "invalid static release digest");
+            let site_id = uuid::Uuid::parse_str(&site.rules.site_id)?;
+            let content = std::env::var_os("PINGWAF_SITE_CONTENT_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| "/var/lib/pingwaf/site-content".into());
+            anyhow::ensure!(content.is_absolute(), "site content directory must be absolute");
+            let root = content.join(site_id.to_string()).join(&spec.digest);
+            if !spec.directory_id.is_empty() {
+                pingwaf_agent::static_dirs::prepare_registered(&spec.directory_id, &spec.digest, &root)?;
+            }
+            anyhow::ensure!(root.join("index.html").is_file(), "static release is not prepared");
+            let mut conf = pingap_config::PluginConf::new();
+            conf.insert("category".into(), "directory".into());
+            conf.insert("path".into(), root.to_string_lossy().into_owned().into());
+            conf.insert("follow_symlinks".into(), false.into());
+            conf.insert("autoindex".into(), false.into());
+            Some(conf)
+        }
+        None => None,
+    };
+    let rules = site.translation_input();
+    if handler.is_some() {
+        anyhow::ensure!(site.rules.upstreams.iter().all(|pool| pool.peers.is_empty()) && site.rules.routes.is_empty(), "terminal site cannot have origins or origin routes");
+    }
     let (mut config, mut names) =
-        convert_proxy_config(&site.translation_input(), cache_dir, false);
+        super::convert_proxy_config_with_handler(&rules, cache_dir, false, handler.as_ref());
     if let Some(port) = oidc_listener_port {
         use anyhow::Context;
         let id = site.rules.site_id.as_ref();
@@ -929,6 +967,7 @@ mod tests {
                 site.site_revision = "ab".repeat(32);
             }
             rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
+                supports_site_handlers: false,
                 static_directories: Default::default(),
                 dynamic_bind: false,
                 listeners: endpoints

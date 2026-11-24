@@ -327,7 +327,7 @@ async fn merge_row<C: ConnectionTrait>(
     {
         // Legacy snapshots (and current default sites) omit the ingress
         // fields; restoring one must not inherit a live custom ingress.
-        for field in ["ingress_port", "ingress_protocol"] {
+        for field in ["ingress_port", "ingress_protocol", "site_handler"] {
             if row.get(field).is_none() {
                 object.remove(field);
             }
@@ -1466,6 +1466,7 @@ pub async fn apply_restore(
     )
     .await?;
     // Report skipped validation rows, without implying the caller's
+    crate::models::site_handler::check_redirects(txn).await?;
     // transaction has committed (deferred constraints can still fail).
     let restored: usize = report.rows_by_table.values().sum();
     tracing::info!(

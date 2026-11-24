@@ -12,12 +12,13 @@ interface Props {
   loadError: boolean
   clone?: boolean
   canPause: boolean
+  terminal?: boolean
 }
 
-export function SiteIngressFields({ value, onChange, inventory, loadError, clone, canPause }: Props) {
+export function SiteIngressFields({ value, onChange, inventory, loadError, clone, canPause, terminal }: Props) {
   const { t } = useTranslation()
   const rows = value.listener ? [value.listener, ...(value.additional ?? [])] : ['http:80', 'https:443']
-  const candidates = (rows: string[]) => (inventory?.agents ?? []).filter(agent => rows.every(listener => {
+  const candidates = (rows: string[]) => (inventory?.agents ?? []).filter(agent => (!terminal || agent.supports_site_handlers) && rows.every(listener => {
     const [scheme, port] = listener.split(':')
     const bound = agent.listeners.find(([number]) => number === Number(port))
     return bound ? bound[1] === scheme : agent.dynamic_bind
@@ -25,7 +26,7 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
   const selected = value.agents ?? inventory?.assigned_agent_ids ?? []
   const eligible = candidates(rows)
   function changeRows(next: string[]) {
-    const usual = next.length === 2 && next.includes('http:80') && next.includes('https:443')
+    const usual = !terminal && next.length === 2 && next.includes('http:80') && next.includes('https:443')
     const agents = candidates(next)
     const kept = selected.filter(id => agents.some(agent => agent.id === id))
     onChange({ ...value, listener: usual ? '' : next[0], additional: usual ? [] : next.slice(1),
@@ -58,6 +59,8 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
     {value.listener.startsWith('http:') && <p className="text-xs text-fg-subtle">{t('pages.sites.ingressHsts')}</p>}
     {value.listener && !clone && <fieldset className="space-y-1.5 text-sm">
       <legend className="mb-1 text-fg-subtle">{t('pages.sites.ingressAgents')}</legend>
+      {terminal && inventory?.agents.filter(agent => !agent.supports_site_handlers).map(agent =>
+        <p key={agent.id} className="text-xs text-fg-subtle">{agent.name} · {t('pages.sites.handlerUpgrade')}</p>)}
       {eligible.map(agent => <label key={agent.id} className="flex items-center gap-2">
         <input type="checkbox" checked={selected.includes(agent.id)} onChange={() => toggle(agent.id)} />{agent.name}
       </label>)}

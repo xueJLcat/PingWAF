@@ -918,6 +918,15 @@ fn convert_proxy_config(
     cache_dir: &Path,
     include_default_listeners: bool,
 ) -> (PingapConfig, Vec<String>) {
+    convert_proxy_config_with_handler(cached, cache_dir, include_default_listeners, None)
+}
+
+fn convert_proxy_config_with_handler(
+    cached: &CachedRules,
+    cache_dir: &Path,
+    include_default_listeners: bool,
+    handler: Option<&PluginConf>,
+) -> (PingapConfig, Vec<String>) {
     // The cache plugin carries no per-site settings of its own — rules,
     // namespaces and quotas all flow from the agent's rule cache at request
     // time. It only earns a slot in the config when some site actually has
@@ -1232,12 +1241,17 @@ fn convert_proxy_config(
             &mut plugins,
         ));
 
-        if let Some(key) = fallback_key {
+        if let Some(handler) = handler {
+            let name = format!("{site_id}_handler");
+            plugins.insert(name.clone(), handler.clone());
+            site_plugins.push(name);
+        }
+        if fallback_key.is_some() || handler.is_some() {
             let loc_name = format!("{site_id}_loc");
             locations.insert(
                 loc_name.clone(),
                 LocationConf {
-                    upstream: Some(key),
+                    upstream: fallback_key,
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
                     plugins: Some(site_plugins.clone()),

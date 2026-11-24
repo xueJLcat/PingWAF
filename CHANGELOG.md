@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Managed sites can serve an approved node directory or a fixed redirect on their assigned listeners. Directory snapshots are verified by content digest and redirect destinations are checked for cycles. Existing sites keep their reverse-proxy configuration.
+
 - Added owner-scoped static ZIP drafts, sandboxed single-file preview and Linux
   node inventory of registered static roots. Fixed-destination redirect plugins
   can independently preserve paths and query strings. Site-mode publication is pending.

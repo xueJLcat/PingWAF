@@ -112,6 +112,7 @@ const MAX_ROUTE_REWRITE_PATH_LEN: usize = 2048;
 /// Public representation of a site.
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteResponse {
+    pub site_handler: Option<serde_json::Value>,
     pub additional_ingresses: Vec<String>,
     pub ingress_port: Option<i32>,
     pub ingress_protocol: Option<String>,
@@ -161,6 +162,7 @@ impl From<site::Model> for SiteResponse {
     fn from(model: site::Model) -> Self {
         Self {
             id: model.id,
+            site_handler: model.site_handler,
             name: model.name,
             ingress_port: model.ingress_port,
             additional_ingresses: model.additional_ingresses,
@@ -200,6 +202,7 @@ impl From<site::Model> for SiteResponse {
 /// selecting them was pure per-request allocation.
 #[derive(Debug, FromQueryResult)]
 struct SiteListRow {
+    site_handler: Option<serde_json::Value>,
     additional_ingresses: Vec<String>,
     ingress_port: Option<i32>,
     ingress_protocol: Option<String>,
@@ -229,6 +232,7 @@ impl From<SiteListRow> for SiteResponse {
     fn from(row: SiteListRow) -> Self {
         Self {
             id: row.id,
+            site_handler: row.site_handler,
             name: row.name,
             ingress_port: row.ingress_port,
             additional_ingresses: row.additional_ingresses,
@@ -397,6 +401,10 @@ impl IngressFields {
         is_admin: bool,
         admin_port: u16,
     ) -> Result<(Option<i32>, Option<String>), ApiError> {
+        self.resolve_for_site(current, is_admin, admin_port, current.is_some_and(|s| s.site_handler.is_some()))
+    }
+
+    fn resolve_for_site(&self, current: Option<&site::Model>, is_admin: bool, admin_port: u16, terminal: bool) -> Result<(Option<i32>, Option<String>), ApiError> {
         let invalid = |reason: &str| {
             ApiError::BadRequest(reason.to_owned())
                 .with_code("site.ingress_invalid")
@@ -405,13 +413,16 @@ impl IngressFields {
             (None, None) => return Ok((current.and_then(|s| s.ingress_port), current.and_then(|s| s.ingress_protocol.clone()))),
             (Some(None), Some(None)) => None,
             (Some(Some(port)), Some(Some(protocol))) => {
-                let value = port.as_u64().filter(|p| (1..=65535).contains(p) && !matches!(p, 80 | 443))
-                    .ok_or_else(|| invalid("ingress_port must be an integer from 1 to 65535 other than 80 or 443"))?;
+                let value = port.as_u64().filter(|p| (1..=65535).contains(p) && (terminal || !matches!(p, 80 | 443)))
+                    .ok_or_else(|| invalid("invalid primary ingress port"))?;
                 if value == u64::from(admin_port) {
                     return Err(invalid("the site ingress port is reserved for the management console"));
                 }
                 let protocol = protocol.as_str().filter(|p| matches!(*p, "http" | "https"))
                     .ok_or_else(|| invalid("ingress_protocol must be http or https"))?;
+                if (value == 80 && protocol != "http") || (value == 443 && protocol != "https") {
+                    return Err(invalid("standard port and protocol do not match"));
+                }
                 Some((value as i32, protocol.to_owned()))
             }
             _ => return Err(invalid("ingress_port and ingress_protocol must both be supplied, both null, or both omitted")),
@@ -430,6 +441,7 @@ impl IngressFields {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSiteRequest {
+    pub site_handler: Option<crate::models::site_handler::SiteHandler>,
     pub certificate_id: Option<Uuid>,
     #[serde(default)]
     pub ingress_agent_ids: std::collections::BTreeSet<Uuid>,
@@ -442,6 +454,7 @@ pub struct CreateSiteRequest {
     pub alternate_domains: Option<Vec<String>>,
     /// Origin the site proxies to — a CDN/WAF hostname or the application
     /// itself. Required: a site without an origin cannot serve traffic.
+    #[serde(default)]
     pub upstream_address: String,
     // `upstream_name` was removed with the node-name API change; unknown
     // fields are ignored, so existing clients keep working.
@@ -457,6 +470,7 @@ pub struct CreateSiteRequest {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateSiteRequest {
+    pub site_handler: Option<crate::models::site_handler::SiteHandler>,
     #[serde(default)]
     pub ingress_agent_ids: Option<std::collections::BTreeSet<Uuid>>,
     #[serde(flatten)]
@@ -1451,6 +1465,7 @@ async fn list(
             site::Column::OriginVerifyCert,
             site::Column::DownstreamTimeoutSecs,
             site::Column::ResponseReplace,
+            site::Column::SiteHandler,
             site::Column::CreatedAt,
             site::Column::UpdatedAt,
         ])
@@ -1483,10 +1498,11 @@ async fn create(
             "name must be 1-100 characters".to_string(),
         ));
     }
-    let (port, protocol) = payload.ingress.resolve(
+    let (port, protocol) = payload.ingress.resolve_for_site(
         None,
         current.is_admin(),
         state.agents.admin_port,
+        payload.site_handler.is_some(),
     )?;
     let domain = normalise_domain(&payload.domain)?;
     let alternate_domains = normalise_domain_list(
@@ -1499,8 +1515,17 @@ async fn create(
         .await
         .map_err(site_domain_conflict)?;
 
-    let upstream_address = normalize_origin_address(&payload.upstream_address)?;
-    validate_upstream(&upstream_address, default_weight())?;
+    let upstream_address = if let Some(handler) = &payload.site_handler {
+        handler.to_proto().map_err(ApiError::BadRequest)?;
+        if port.is_none() || !payload.upstream_address.is_empty() || payload.upstream_tls.is_some() {
+            return Err(ApiError::BadRequest("terminal sites require explicit listeners and cannot have an origin".into()));
+        }
+        None
+    } else {
+        let address = normalize_origin_address(&payload.upstream_address)?;
+        validate_upstream(&address, default_weight())?;
+        Some(address)
+    };
 
     // New sites are live immediately; the dashboard toggles them between
     // active and paused afterwards.
@@ -1557,6 +1582,7 @@ async fn create(
         downstream_timeout_secs: Set(downstream_timeout_secs),
         // Nothing is replaced until the operator configures a policy.
         response_replace: Set(None),
+        site_handler: Set(payload.site_handler.as_ref().map(serde_json::to_value).transpose().map_err(ApiError::internal)?),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -1575,6 +1601,7 @@ async fn create(
     }
     // Every site starts with a default origin pool; the first origin node
     // goes into it.
+    if let Some(upstream_address) = &upstream_address {
     let defaults = PoolHealthCheck::default_values();
     let pool = site_upstream_pools::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -1620,6 +1647,7 @@ async fn create(
     .insert(&txn)
     .await?;
 
+    }
     crate::defaults::seed_site_defaults(&txn, id).await?;
 
     if let Some(cert_id) = payload.certificate_id {
@@ -1677,9 +1705,13 @@ async fn create(
     }
     .insert(&txn)
     .await?;
+    crate::models::site_handler::check_redirects(&txn).await.map_err(|e| match e {
+        DbErr::Custom(message) => ApiError::BadRequest(message),
+        other => ApiError::from(other),
+    })?;
     txn.commit().await.map_err(map_site_domain_conflict)?;
 
-    tracing::info!(%id, %domain, upstream = %upstream_address, owner = %current.id, "site created");
+    tracing::info!(%id, %domain, upstream = ?upstream_address, owner = %current.id, "site created");
     notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(SiteResponse::from(model))).into_response())
@@ -2324,6 +2356,10 @@ async fn clone_site(
     // same grouping semantics.
     clone_site_rules(&txn, source_id, new_id, timestamp).await?;
 
+    crate::models::site_handler::check_redirects(&txn).await.map_err(|e| match e {
+        DbErr::Custom(message) => ApiError::BadRequest(message),
+        other => ApiError::from(other),
+    })?;
     txn.commit().await.map_err(map_site_domain_conflict)?;
 
     tracing::info!(
@@ -2413,6 +2449,15 @@ async fn update(
     let previous_alternates = model.alternate_domains.clone();
 
     let mut active: site::ActiveModel = model.into();
+    let handler_changed = payload.site_handler.is_some();
+    if let Some(handler) = payload.site_handler {
+        require_write(&current)?;
+        if active.site_handler.clone().unwrap().is_none() {
+            return Err(ApiError::BadRequest("create a terminal site to configure a site handler".into()));
+        }
+        handler.to_proto().map_err(ApiError::BadRequest)?;
+        active.site_handler = Set(Some(serde_json::to_value(handler).map_err(ApiError::internal)?));
+    }
     if ingress_changed {
         active.ingress_port = Set(port);
         active.additional_ingresses = Set(additional);
@@ -2556,10 +2601,14 @@ async fn update(
         require_write(&current)?;
         write_ingress_assignments(&txn, &state, &updated, ids).await?;
     } else if updated.status == site_status::ACTIVE
-        && (ingress_changed || activating)
+        && (ingress_changed || activating || handler_changed)
     {
         crate::grpc::check_site_ingress(&txn, &state.agents, &updated).await?;
     }
+    crate::models::site_handler::check_redirects(&txn).await.map_err(|e| match e {
+        DbErr::Custom(message) => ApiError::BadRequest(message),
+        other => ApiError::from(other),
+    })?;
     txn.commit().await.map_err(map_site_domain_conflict)?;
     tracing::info!(%id, "site updated");
     notify_config_changed(&state, id, Some(&current.email)).await;
@@ -2613,7 +2662,9 @@ async fn create_upstream(
     Json(payload): Json<CreateUpstreamRequest>,
 ) -> Result<Response, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    if load_site_write(&state.db, id, &current).await?.site_handler.is_some() {
+        return Err(ApiError::BadRequest("terminal sites cannot use origin pools or routes".into()));
+    }
 
     let address = normalize_origin_address(&payload.address)?;
     validate_upstream(&address, payload.weight)?;
@@ -2821,7 +2872,9 @@ async fn create_pool(
     Json(payload): Json<CreatePoolRequest>,
 ) -> Result<Response, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    if load_site_write(&state.db, id, &current).await?.site_handler.is_some() {
+        return Err(ApiError::BadRequest("terminal sites cannot use origin pools or routes".into()));
+    }
 
     let name = payload.name.trim().to_string();
     let lb_algorithm = payload.lb_algorithm.trim().to_string();
@@ -3062,7 +3115,9 @@ async fn create_route(
     Json(payload): Json<CreateRouteRequest>,
 ) -> Result<Response, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    load_site_write(&state.db, id, &current).await?;
+    if load_site_write(&state.db, id, &current).await?.site_handler.is_some() {
+        return Err(ApiError::BadRequest("terminal sites cannot use origin pools or routes".into()));
+    }
 
     let name = payload.name.trim().to_string();
     let match_type = payload.match_type.trim().to_string();
@@ -5824,6 +5879,7 @@ mod tests {
             origin_verify_cert: Some(true),
             downstream_timeout_secs: 30,
             response_replace: None,
+            site_handler: None,
             created_at: timestamp,
             updated_at: timestamp,
         };

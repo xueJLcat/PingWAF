@@ -24,10 +24,11 @@ pub(super) async fn build_snapshot(
     db: &DatabaseConnection,
     agent_id: Uuid,
     session_id: Uuid,
+    supports_site_handlers: bool,
 ) -> Result<ManagedSnapshot, Status> {
     const MAX_ATTEMPTS: usize = 3;
     for _ in 0..MAX_ATTEMPTS {
-        match build_once(db, agent_id, session_id).await {
+        match build_once(db, agent_id, session_id, supports_site_handlers).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(BuildError::Forbidden) => {
                 return Err(Status::permission_denied(
@@ -207,11 +208,12 @@ async fn build_once(
     db: &DatabaseConnection,
     agent_id: Uuid,
     session_id: Uuid,
+    supports_site_handlers: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     let tx = db
         .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
         .await?;
-    let snapshot = build_in_view(&tx, agent_id, session_id).await?;
+    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers).await?;
     tx.commit().await?;
     Ok(snapshot)
 }
@@ -220,10 +222,12 @@ async fn build_in_view(
     tx: &DatabaseTransaction,
     agent_id: Uuid,
     session_id: Uuid,
+    supports_site_handlers: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     require_session(tx, agent_id, session_id).await?;
     let (agent, owner_id) = authorize(tx, agent_id).await?;
-    let sites = visible_sites(tx, &agent, owner_id).await?;
+    let mut sites = visible_sites(tx, &agent, owner_id).await?;
+    if !supports_site_handlers { sites.retain(|site| site.site_handler.is_none()); }
     let config = assemble_managed_config(tx, &sites).await?;
     if config.encoded_len() > pingwaf_proto::MAX_MANAGED_CONFIG_BYTES {
         return Err(BuildError::TooLarge);
@@ -327,6 +331,7 @@ pub(crate) async fn check_agent_ingress(
 
 #[derive(serde::Serialize)]
 pub(crate) struct IngressAgentOption {
+    supports_site_handlers: bool,
     static_directories: std::collections::HashMap<String, String>,
     id: Uuid,
     name: String,
@@ -344,6 +349,18 @@ pub(crate) async fn check_agent_site(
 ) -> Result<(), crate::api::error::ApiError> {
     let (Some(port), Some(protocol)) = (site.ingress_port, site.ingress_protocol.as_deref()) else { return Ok(()); };
     check_agent_ingress(tx, agents, id, site.user_id, port, protocol).await?;
+    if let Some(value) = &site.site_handler {
+        let session = current_session(tx, id).await?.ok_or_else(|| unavailable("node session has ended"))?;
+        let report = agents.session_ingress(id, session).await.unwrap_or_default();
+        if !report.supports_site_handlers {
+            return Err(unavailable(&format!("node {id} does not support this site handler")));
+        }
+        if let Some(dir) = value.get("directory_id").and_then(|v| v.as_str()) {
+            if report.static_directories.get(dir).map(String::as_str) != value.get("digest").and_then(|v| v.as_str()) {
+                return Err(unavailable(&format!("registered directory {dir} is unavailable or differs on node {id}")));
+            }
+        }
+    }
     if !site.additional_ingresses.is_empty() {
         let session = current_session(tx, id).await?.ok_or_else(|| unavailable("node session has ended"))?;
         if !agents.session_ingress(id, session).await.is_some_and(|report| report.dynamic_bind) {
@@ -378,6 +395,7 @@ pub(crate) async fn ingress_agent_options(
                 if key_owner == owner && agent.site_scope == "selected" =>
             {
                 options.push(IngressAgentOption {
+                    supports_site_handlers: inventory.supports_site_handlers,
                     static_directories: inventory.static_directories,
                     id,
                     name: agent.display_name.unwrap_or(agent.hostname),
@@ -693,6 +711,7 @@ pub(super) async fn check_postgres(
     let fetch = |token: String| async move {
         service
             .get_managed_snapshot(Request::new(GetManagedSnapshotRequest {
+                supports_site_handlers: false,
                 agent_token: token,
             }))
             .await
@@ -862,6 +881,7 @@ pub(super) async fn check_postgres(
         "site.ingress_unavailable"
     );
     let bound = pingwaf_proto::IngressListeners {
+        supports_site_handlers: false,
         static_directories: Default::default(),
         dynamic_bind: false,
         listeners: vec![pingwaf_proto::IngressListenerStatus {
@@ -996,7 +1016,7 @@ pub(super) async fn check_postgres(
     )
     .await;
     let Err(BuildError::Storage(stale)) =
-        build_in_view(&ready, id, session).await
+        build_in_view(&ready, id, session, false).await
     else {
         panic!("a stale view must not get a generation after newer content");
     };

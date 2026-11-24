@@ -1419,6 +1419,7 @@ mod tests {
         let (stream, _) =
             registry.connect_session(agent, sender, Some(session)).await;
         let bound = IngressListeners {
+            supports_site_handlers: false,
             static_directories: Default::default(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
@@ -1481,6 +1482,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let (first, _) = registry.connect(agent, sender).await;
         let mut report = IngressListeners {
+            supports_site_handlers: false,
             static_directories: Default::default(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {

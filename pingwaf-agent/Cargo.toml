@@ -57,6 +57,7 @@ rand = { workspace = true }
 ipnet = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+tempfile = { workspace = true }
 # Tokio's standard clock excludes suspend; timerfd and the hot-path check
 # must use the same clock that includes it.
 rustix = { version = "1.1.6", features = ["time", "fs"] }

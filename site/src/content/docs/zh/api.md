@@ -108,3 +108,9 @@ Webhook 通知通过 `PINGWAF_WEBHOOK_URL` 配置，通知路由可以从控制�
 - **配置可复盘** —— 每次变更后用 `GET /config-versions` 生成快照，并在应急脚本中用 `POST /config-versions/{id}/rollback` 回滚。
 - **在 CI 中纳管边缘节点** —— `POST /agents/enroll` 返回安装命令，因此流水线本身不需要保存 API Key。
 - **日志外送** —— 轮询 `/logs/security` 获取被拦截请求，或开启 Elasticsearch 上报后直接查询。
+
+### 受管静态目录和重定向站点
+
+创建站点时可设置 `site_handler`。已有反向代理使用空值。重定向示例为 `{"kind":"redirect","target":"https://www.example.org","status":302,"preserve_path":true,"preserve_query":true}`。预置目录站点使用 `{"kind":"static","directory_id":"public","digest":"<节点报告的 SHA-256>"}`。两种模式都需要显式配置监听端口，启用时须选择支持该类型的节点。站点管理端口保留规则继续生效。
+
+在节点的 `/etc/pingwaf/static-roots.json` 登记目录，例如 `{"public":"/srv/www/public"}`。目录需要包含 `index.html`。控制台显示目录标识和内容摘要，发布时节点验证并复制到 `/var/lib/pingwaf/site-content`。通过 `PINGWAF_STATIC_ROOTS_FILE` 和 `PINGWAF_SITE_CONTENT_DIR` 可指定其他位置。确保运行服务的账户能读取源目录、写入版本目录。

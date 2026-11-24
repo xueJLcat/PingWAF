@@ -114,7 +114,22 @@ export interface UpdateProfileRequest {
 export type SiteStatus = 'active' | 'paused' | 'pending'
 
 /** `api::sites::SiteResponse` */
+export interface RedirectHandler {
+  kind: 'redirect'
+  target: string
+  status: 301 | 302 | 307 | 308
+  preserve_path: boolean
+  preserve_query: boolean
+}
+
+export interface StaticDirectoryHandler {
+  kind: 'static'
+  directory_id: string
+  digest: string
+}
+
 export interface Site {
+  site_handler?: RedirectHandler | StaticDirectoryHandler | null
   additional_ingresses?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
@@ -291,6 +306,7 @@ export interface SiteDetail {
 }
 
 export interface CreateSiteRequest {
+  site_handler?: RedirectHandler | StaticDirectoryHandler
   certificate_id?: string
   additional_ingresses?: string[]
   ingress_port?: number | null
@@ -304,7 +320,7 @@ export interface CreateSiteRequest {
    * Origin the site proxies to — a CDN/WAF hostname or the application itself.
    * Required: a site without an origin cannot serve traffic.
    */
-  upstream_address: string
+  upstream_address?: string
   upstream_tls?: boolean
   status?: string
   plan?: string
@@ -326,6 +342,7 @@ export interface CloneSiteRequest {
 }
 
 export interface UpdateSiteRequest {
+  site_handler?: RedirectHandler | StaticDirectoryHandler
   ingress_agent_ids?: string[]
   additional_ingresses?: string[]
   ingress_port?: number | null

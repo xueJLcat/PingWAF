@@ -121,6 +121,7 @@ impl Session<'_> {
         let response = tokio::time::timeout(
             PULL_TIMEOUT,
             client.get_managed_snapshot(proto::GetManagedSnapshotRequest {
+                supports_site_handlers: true,
                 agent_token: token.to_string(),
             }),
         )

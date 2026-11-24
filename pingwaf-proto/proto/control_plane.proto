@@ -220,6 +220,7 @@ message IngressListeners {
   bool dynamic_bind = 2;
   // Registered static roots. An empty digest means unreadable or invalid.
   map<string, string> static_directories = 3;
+  bool supports_site_handlers = 4;
 }
 
 // Backend health of one upstream, reported per heartbeat.
@@ -1140,6 +1141,25 @@ message ManagedSite {
   string site_revision = 4;
   // Additional sockets sharing the primary ingress's site identity and policy.
   repeated SiteIngress additional_ingresses = 5;
+  // A terminal handler uses the same site routing and security context as a proxy.
+  oneof handler {
+    SiteRedirect redirect = 6;
+    StaticRelease static_release = 7;
+  }
+}
+
+message SiteRedirect {
+  string target = 1;
+  uint32 status = 2;
+  bool preserve_path = 3;
+  bool preserve_query = 4;
+}
+
+message StaticRelease {
+  // The archive SHA-256 for uploaded content, or tree digest for a registered directory.
+  string digest = 1;
+  // Empty for uploaded archives. A directory identifier never contains a filesystem path.
+  string directory_id = 2;
 }
 
 message SiteIngress {
@@ -1169,6 +1189,7 @@ message ManagedSiteApplication {
 
 message GetManagedSnapshotRequest {
   string agent_token = 1;
+  bool supports_site_handlers = 2;
 }
 
 // Hash the bytes exactly as transmitted, not a re-encoded protobuf with maps.

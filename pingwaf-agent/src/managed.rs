@@ -328,7 +328,8 @@ fn index(
         );
         ensure!(item.additional_ingresses.is_empty() || item.ingress.is_some(),
             "additional ingress requires a primary ingress");
-        ensure!(item.ingress.as_ref().is_none_or(|row| !matches!(row.port, 80 | 443)), "invalid managed primary port");
+        ensure!(item.handler.is_some() || item.ingress.as_ref().is_none_or(|row| !matches!(row.port, 80 | 443)), "invalid managed primary port");
+        ensure!(item.handler.is_none() || item.ingress.is_some(), "terminal site needs an explicit listener");
         ensure!(item.additional_ingresses.len() < pingwaf_proto::MAX_INGRESS_LISTENERS,
             "too many site listeners");
         for ingress in std::iter::once(item.ingress.as_ref()).chain(item.additional_ingresses.iter().map(Some)) {

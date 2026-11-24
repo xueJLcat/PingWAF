@@ -2180,6 +2180,12 @@ async fn assemble_site_config(
                 row.ingress_port.unwrap_or_default(),
                 row.ingress_protocol.as_deref().unwrap_or_default()
             );
+            if !row.additional_ingresses.is_empty() {
+                let _ = write!(config.config_hash, ":{:?}", row.additional_ingresses);
+            }
+            if let Some(handler) = &row.site_handler {
+                let _ = write!(config.config_hash, ":{handler}");
+            }
         }
         // A deployment-wide history marker may contain thousands of sites;
         // keep the stored hash the same size as a legacy fingerprint.
@@ -2260,7 +2266,7 @@ pub(super) async fn assemble_managed_config(
                 (
                     Some(port @ 1..=65535),
                     Some(protocol @ ("http" | "https")),
-                ) if !matches!(port, 80 | 443) => Some(SiteIngress {
+                ) if row.site_handler.is_some() || !matches!(port, 80 | 443) => Some(SiteIngress {
                     port: port as u32,
                     protocol: if protocol == "http" {
                         IngressProtocol::Http as i32
@@ -2279,6 +2285,11 @@ pub(super) async fn assemble_managed_config(
             build_rule_bundle_with_settings(db, row, &settings, Some(&[]))
                 .await?;
         let mut envelope = ManagedSite {
+            handler: row.site_handler.clone().map(|v| {
+                let spec = serde_json::from_value::<crate::models::site_handler::SiteHandler>(v)
+                    .map_err(|e| DbErr::Custom(e.to_string()))?;
+                spec.to_proto().map_err(DbErr::Custom)
+            }).transpose()?,
             additional_ingresses: row.additional_ingresses.iter().map(|value| {
                 let (port, scheme) = site::parse_listener(value)
                     .ok_or_else(|| DbErr::Custom("invalid additional site listener".into()))?;

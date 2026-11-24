@@ -209,7 +209,7 @@ async fn site_ingress_migration_postgres() {
         "23514",
         Some("sites_custom_ingress_disabled"),
     );
-    Migrator::up(&db, Some(2)).await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
 
     for port in [81, 82, 83] {
         db.execute_unprepared(&insert("app.test", "{}", port, "http"))
@@ -555,6 +555,7 @@ async fn site_ingress_migration_postgres() {
     db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses=ARRAY['http:18085'] WHERE id='{a}'")).await.unwrap();
     let overlap = db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses=ARRAY['https:18085'] WHERE id='{b}'")).await.unwrap_err();
     assert_db_error(&overlap, "23505", Some("sites_ingress_protocol_conflict"));
+    Migrator::down(&db, Some(2)).await.unwrap(); // handlers and private upload drafts
     assert!(Migrator::down(&db, Some(1)).await.unwrap_err().to_string().contains("remove additional site listeners"));
     db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses='{{}}' WHERE id='{a}'")).await.unwrap();
     Migrator::down(&db, Some(1)).await.unwrap();

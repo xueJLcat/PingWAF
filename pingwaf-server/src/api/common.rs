@@ -890,6 +890,7 @@ mod tests {
             origin_verify_cert: None,
             downstream_timeout_secs: 60,
             response_replace: None,
+            site_handler: None,
             created_at: timestamp,
             updated_at: timestamp,
         };

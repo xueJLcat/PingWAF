@@ -53,6 +53,8 @@ import type {
   CreateSiteRequest,
   Site,
   SiteStatus,
+  RedirectHandler,
+  StaticDirectoryHandler,
   UpdateSiteRequest,
 } from '@/api/types'
 
@@ -72,6 +74,8 @@ interface SiteFormErrors {
 }
 
 interface SiteFormState {
+  directory: StaticDirectoryHandler | null
+  handler: RedirectHandler | null
   certificateId: string
   ingress: IngressDraft
   name: string
@@ -82,6 +86,8 @@ interface SiteFormState {
 }
 
 const emptyForm: SiteFormState = {
+  handler: null,
+  directory: null,
   certificateId: '',
   ingress: defaultIngress,
   name: '',
@@ -100,6 +106,18 @@ const DOMAIN_PATTERN = /^(?=.{1,253}$)(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[
 /** Drops a pasted scheme/trailing path and lower-cases the hostname. */
 function normaliseDomainInput(value: string): string {
   return value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+}
+
+function redirectPreview(handler: RedirectHandler) {
+  try {
+    const target = new URL(handler.target)
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) return ''
+    if (handler.preserve_path) target.pathname = target.pathname.replace(/\/+$/, '') + '/example'
+    if (handler.preserve_query) target.search += target.search ? '&page=1' : '?page=1'
+    return target.href
+  } catch {
+    return ''
+  }
 }
 
 export function SitesListPage() {
@@ -466,6 +484,8 @@ export function SitesListPage() {
     setEditing(site)
     setForm({
       ...emptyForm,
+      handler: site.site_handler?.kind === 'redirect' ? site.site_handler : null,
+      directory: site.site_handler?.kind === 'static' ? site.site_handler : null,
       ingress: { ...defaultIngress, listener: siteListener(site), additional: site.additional_ingresses },
       name: site.name,
       domain: site.domain,
@@ -519,6 +539,13 @@ export function SitesListPage() {
     }))
   }
 
+  const activeHandler = form.directory ?? form.handler
+  const selectedAgents = form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []
+  const directoryNodes = (ingressInventory.data?.agents ?? []).filter(node => selectedAgents.includes(node.id))
+  const directories = Object.entries(directoryNodes[0]?.static_directories ?? {}).filter(([id, digest]) =>
+    digest && directoryNodes.length === selectedAgents.length && directoryNodes.every(node => node.static_directories?.[id] === digest))
+  const mismatchedDirectories = [...new Set(directoryNodes.flatMap(node => Object.keys(node.static_directories ?? {})))]
+    .filter(id => !directories.some(([available]) => available === id))
   const submit = () => {
     const domain = normaliseDomainInput(form.domain)
     const name = form.name.trim()
@@ -542,11 +569,14 @@ export function SitesListPage() {
       alternateDomains.push(value)
     }
 
-    if (!editing && !form.upstreamAddress.trim()) {
+    if (!editing && !activeHandler && !form.upstreamAddress.trim()) {
       errors.upstream = t('pages.sites.upstreamRequired')
     }
 
     const ingress = ingressRequest(form.ingress, siteListener(editing))
+    if (form.directory && !directories.some(([id, digest]) => id === form.directory?.directory_id && digest === form.directory.digest))
+      errors.top = t('pages.sites.selectDirectory')
+    if (form.handler && !redirectPreview(form.handler)) errors.upstream = t('pages.sites.redirectInvalid')
     if (form.ingress.listener && !form.ingress.paused && (!editing || editing.status === 'active') &&
         (form.ingress.agents !== null || !editing) && !form.ingress.agents?.length) {
       errors.top = t('pages.sites.ingressRequireAgent')
@@ -561,7 +591,7 @@ export function SitesListPage() {
     if (editing) {
       updateSite.mutate({
         id: editing.id,
-        data: { name, domain, alternate_domains: alternateDomains, ...ingress },
+        data: { name, domain, alternate_domains: alternateDomains, ...ingress, site_handler: activeHandler ?? undefined },
       })
       return
     }
@@ -572,10 +602,10 @@ export function SitesListPage() {
       name,
       domain,
       alternate_domains: alternateDomains,
-      upstream_address: upstreamAddress,
+      ...(activeHandler ? { site_handler: activeHandler } : { upstream_address: upstreamAddress }),
       ...ingress,
     }
-    if (form.upstreamTls) payload.upstream_tls = true
+    if (!activeHandler && form.upstreamTls) payload.upstream_tls = true
     if (showCertificate && form.certificateId) payload.certificate_id = form.certificateId
     createSite.mutate(payload)
   }
@@ -1019,8 +1049,43 @@ export function SitesListPage() {
             required
           />
 
-          <SiteIngressFields value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
-            inventory={ingressInventory.data} loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
+          <Select label={t('pages.sites.siteMode')} disabled={!!editing} value={activeHandler?.kind ?? 'proxy'}
+            onChange={event => setForm(f => event.target.value !== 'proxy' ? {
+              ...f, directory: event.target.value === 'static' ? { kind: 'static', directory_id: '', digest: '' } : null,
+              handler: event.target.value === 'redirect' ? { kind: 'redirect', target: '', status: 302, preserve_path: true, preserve_query: true } : null,
+              ingress: { ...f.ingress, listener: f.ingress.listener || 'http:80', additional: f.ingress.listener ? f.ingress.additional : ['https:443'], agents: [] },
+            } : { ...f, directory: null, handler: null, ingress: defaultIngress })}>
+            <option value="proxy">{t('pages.sites.modeProxy')}</option>
+            <option value="static">{t('pages.sites.modeDirectory')}</option>
+            <option value="redirect">{t('pages.sites.modeRedirect')}</option>
+          </Select>
+          <SiteIngressFields terminal={!!activeHandler} value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
+            inventory={ingressInventory.data}
+            loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
+          {form.directory && <Select label={t('pages.sites.selectDirectory')} value={form.directory.directory_id}
+            onChange={e => setForm(f => ({ ...f, directory: { kind: 'static', directory_id: e.target.value,
+              digest: directories.find(([id]) => id === e.target.value)?.[1] ?? '' } }))}>
+            <option value="">{t('pages.sites.selectDirectory')}</option>
+            {directories.map(([id]) => <option key={id} value={id}>{id}</option>)}
+          </Select>}
+          {form.directory && mismatchedDirectories.map(id =>
+            <details key={id} className="text-xs text-fg-subtle">
+              <summary>{id} · {t('pages.sites.directoryMismatch')}</summary>
+              {directoryNodes.map(node => <p key={node.id} className="break-all">{node.name} · {node.static_directories?.[id] || t('pages.sites.directoryMissing')}</p>)}
+            </details>)}
+          {form.handler && <div className="flex flex-col gap-3">
+            <Input label={t('pages.sites.redirectTarget')} value={form.handler.target} error={formErrors.upstream}
+              placeholder="https://example.com/" onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, target: e.target.value } }))}/>
+            <Select label={t('pages.sites.redirectStatus')} value={form.handler.status}
+              onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, status: Number(e.target.value) as RedirectHandler['status'] } }))}>
+              {[301,302,307,308].map(code => <option key={code} value={code}>{code}</option>)}
+            </Select>
+            {(['preserve_path','preserve_query'] as const).map(key =>
+              <Switch key={key} label={t(key === 'preserve_path' ? 'pages.sites.keepPath' : 'pages.sites.keepQuery')}
+                checked={form.handler![key]} onCheckedChange={value => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, [key]: value } }))}/>
+            )}
+            {redirectPreview(form.handler) && <p className="break-all text-sm">{t('pages.sites.redirectExample')} <code>{redirectPreview(form.handler)}</code></p>}
+          </div>}
           {showCertificate && <Select label={t('pages.sites.ingressCertificate')} value={form.certificateId}
             onChange={event => setForm(f => ({ ...f, certificateId: event.target.value }))}>
             <option value="">{t('pages.sites.ingressCertificateLater')}</option>
@@ -1080,7 +1145,7 @@ export function SitesListPage() {
             <p className="text-xs text-fg-subtle">{t('pages.sites.alternateDomainsHint')}</p>
           </div>
 
-          {!editing && (
+          {!editing && !activeHandler && (
             <>
               <Input
                 label={t('pages.sites.upstream')}
@@ -1161,7 +1226,7 @@ export function SitesListPage() {
               {cloneErrors.top}
             </p>
           )}
-          <SiteIngressFields value={cloneForm.ingress} onChange={ingress => setCloneForm(f => ({ ...f, ingress }))}
+          <SiteIngressFields terminal={!!cloneSource?.site_handler} value={cloneForm.ingress} onChange={ingress => setCloneForm(f => ({ ...f, ingress }))}
             inventory={ingressInventory.data} loadError={ingressInventory.isError} clone canPause={false} />
           <Input
             label={t('common.name')}

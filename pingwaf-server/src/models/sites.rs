@@ -66,6 +66,9 @@ pub mod sites {
         pub ingress_protocol: Option<String>,
         #[serde(default)]
         pub additional_ingresses: Vec<String>,
+        /// NULL for a reverse proxy, including all sites created before migration 110.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub site_handler: Option<Json>,
         pub status: String,
         pub plan: String,
         /// Disk budget, in MiB, the agents may use for this site's cache.
