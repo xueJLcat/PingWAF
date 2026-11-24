@@ -1513,6 +1513,27 @@ impl ControlPlaneClient {
     }
 
     #[cfg(target_os = "linux")]
+    pub async fn approved_page(&self, site: uuid::Uuid, rule: &proto::PageIntegrityRule) -> anyhow::Result<Vec<u8>> {
+        let mut client = ProtoClient::new(self.create_channel().await?);
+        let req = proto::PageIntegrityRead { agent_token: self.require_agent_token()?, site_id: site.to_string(), rule_id: rule.id.clone() };
+        let rules = tokio::time::timeout(std::time::Duration::from_secs(8), client.read_page_integrity(req)).await??.into_inner().rules;
+        let current = rules.into_iter().next().ok_or_else(|| anyhow::anyhow!("approved page revoked"))?;
+        anyhow::ensure!(current.id == rule.id && current.version == rule.version && current.digest == rule.digest &&
+            current.content_type == rule.content_type && current.approved.len() <= pingwaf_content::protection::MAX_PAGE_BYTES,
+            "approved page changed during publication");
+        Ok(current.approved)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn report_page(&self, site: uuid::Uuid, event: pingwaf_content::protection::Observation, count:u32) -> anyhow::Result<()> {
+        let mut client=ProtoClient::new(self.create_channel().await?);
+        let request=proto::PageIntegrityObservation { agent_token:self.require_agent_token()?,site_id:site.to_string(),rule_id:event.rule,
+            category:event.category.into(),detail:event.detail,content_type:event.media_type,candidate:event.candidate,count };
+        tokio::time::timeout(std::time::Duration::from_secs(5),client.observe_page_integrity(request)).await??;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     pub async fn download_site_archive(&self, site_id: uuid::Uuid, digest: &str) -> anyhow::Result<Vec<u8>> {
         let token = self.require_agent_token()?;
         let mut client = ProtoClient::new(self.create_channel().await?);

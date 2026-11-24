@@ -576,6 +576,26 @@ Read one draft entry using its preview ticket. Relative stylesheets and images c
 
 Return the site's ZIP and registered-directory versions with digest, directory identifier (null for ZIP), and publication time. Use the existing site update operation with a previously published digest to roll back. A registered directory rollback sets `rollback: true` and can select a snapshot still held by every assigned node. Nodes download ZIP content in chunks of up to 256 KiB for explicitly assigned active sites.
 
+### GET /sites/{id}/integrity
+
+List exact paths registered for public-page integrity monitoring, the latest candidate digest and approved version. Site read permission is required.
+
+### POST /sites/{id}/integrity
+
+Register an exact path with `{"path":"/index.html"}` on a managed proxy or static site. The initial mode is alert. A duplicate path returns 409. Each site supports up to 32 paths. The node compares public text resources up to 512 KiB after decoding identity, gzip, deflate or Brotli.
+
+### GET /sites/{id}/integrity/{rule}
+
+Read the candidate and approved representation as Base64 bytes inside JSON, their media types and digests, approval metadata and the most recent 100 aggregated events. Render previews as untrusted data.
+
+### POST /sites/{id}/integrity/{rule}/approve
+
+Submit the previewed `digest`, `content_type` and `mode` (`alert` or `trusted_copy`). Approval checks both values and the stored bytes under a row lock. A stale preview returns 409.
+
+### DELETE /sites/{id}/integrity/{rule}
+
+Remove a rule together with its stored candidate, approved versions and events.
+
 ### DELETE /static-drafts/{id}
 
 Discard an owned draft. Returns 204.

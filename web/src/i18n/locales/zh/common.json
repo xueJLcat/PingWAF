@@ -1896,6 +1896,7 @@
       "event_config_sync_failed": "配置同步失败",
       "event_site_failover_changed": "断连策略变更",
       "event_site_upstream_offline": "站点上游离线",
+      "event_site_page_integrity": "网页防篡改",
       "event_site_upstream_abnormal": "站点上游异常",
       "event_auth_login_anomaly": "异地登录",
       "event_site_oidc_login_failed": "OIDC 登录失败",

@@ -21,6 +21,7 @@ use uuid::Uuid;
 #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
 mod tls;
 mod shared;
+mod integrity;
 
 #[derive(Debug)]
 struct ContentFailure(&'static str);
@@ -76,7 +77,11 @@ impl Host {
         pending: pingwaf_agent::managed::Pending,
     ) -> anyhow::Result<()> {
         let dir = self.cache.cache_dir().to_owned();
+        let mut policies = HashMap::new();
         for (id, envelope) in pending.candidate().sites() {
+            if !envelope.protected_pages.is_empty() {
+                policies.insert(*id, integrity::prepare(*id, &envelope.protected_pages).await?);
+            }
             if let Some(pingwaf_proto::managed_site::Handler::StaticRelease(spec)) = &envelope.handler {
                 if spec.directory_id.is_empty() {
                     let target = pingwaf_agent::static_dirs::release_path(*id, &spec.digest)?;
@@ -90,7 +95,7 @@ impl Host {
             }
         }
         let (pending, view) = tokio::task::spawn_blocking(move || {
-            View::build(pending.candidate(), &dir)
+            View::with_policies(pending.candidate(), &dir, policies)
                 .map(|view| (pending, Arc::new(view)))
         })
         .await??;
@@ -226,7 +231,12 @@ impl View {
         Ok(())
     }
 
+    #[cfg(test)]
     fn build(candidate: &Candidate, cache_dir: &Path) -> anyhow::Result<Self> {
+        Self::with_policies(candidate, cache_dir, HashMap::new())
+    }
+
+    fn with_policies(candidate: &Candidate, cache_dir: &Path, mut policies: HashMap<Uuid, Arc<pingwaf_content::protection::Policy>>) -> anyhow::Result<Self> {
         let rules = candidate.compile()?;
         let sites = rules
             .sites()
@@ -236,7 +246,7 @@ impl View {
             .map(|(id, site, ingress)| {
                 let oidc = managed_oidc(&rules, id, site, ingress)?;
                 let envelope = &candidate.sites()[&id];
-                Ok((id, build_site(site, oidc, cache_dir, envelope.handler.as_ref())?))
+                Ok((id, build_site(site, oidc, cache_dir, envelope.handler.as_ref(), policies.remove(&id))?))
             })
             .collect::<anyhow::Result<_>>()?;
         #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
@@ -333,6 +343,7 @@ fn build_site(
     oidc_listener_port: Option<u16>,
     cache_dir: &Path,
     handler: Option<&pingwaf_proto::managed_site::Handler>,
+    policy: Option<Arc<pingwaf_content::protection::Policy>>,
 ) -> anyhow::Result<ManagedRequestSite> {
     use pingwaf_proto::managed_site::Handler;
     let handler = match handler {
@@ -363,6 +374,12 @@ fn build_site(
             conf.insert("path".into(), root.to_string_lossy().into_owned().into());
             conf.insert("follow_symlinks".into(), false.into());
             conf.insert("autoindex".into(), false.into());
+            if let Some(policy) = &policy {
+                conf.insert("chunk_size".into(), "512 KiB".into());
+                let mut paths: Vec<_> = policy.paths.keys().cloned().collect();
+                paths.sort();
+                conf.insert("public_pages".into(), toml::Value::try_from(paths)?);
+            }
             Some(conf)
         }
         None => None,
@@ -441,6 +458,7 @@ fn build_site(
     let plugins = crate::plugin::isolated_plugins(config.plugins)?;
     let trust = &site.rules.proxy_trust;
     Ok(ManagedRequestSite {
+        policy,
         context: ManagedSiteContext {
             id: site.rules.site_id.clone(),
             rules: site.rules.clone(),

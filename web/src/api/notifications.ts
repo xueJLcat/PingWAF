@@ -40,6 +40,7 @@ export interface NotificationSettings {
   notify_site_failover_changed: boolean
   /** Gates both site.upstream_offline and site.upstream_abnormal. */
   notify_site_upstream: boolean
+  notify_page_integrity: boolean
   notify_auth_login_anomaly: boolean
   /** Gates both site.oidc_login_failed and site.oidc_idp_unavailable. */
   notify_site_oidc_auth: boolean
@@ -70,6 +71,7 @@ export const NOTIFICATION_EVENT_TYPES = [
   'site.failover_changed',
   'site.upstream_offline',
   'site.upstream_abnormal',
+  'site.page_integrity',
   'auth.login_anomaly',
   'site.oidc_login_failed',
   'site.oidc_idp_unavailable',

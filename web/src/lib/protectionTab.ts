@@ -14,6 +14,7 @@ export type ProtectionTab =
   | 'custom'
   | 'paths'
   | 'cc'
+  | 'integrity'
 
 /**
  * Tabs accepted from `?tab=`, in display order. Every entry must stay in this
@@ -28,6 +29,7 @@ export const PROTECTION_TABS: ProtectionTab[] = [
   'custom',
   'paths',
   'cc',
+  'integrity',
 ]
 
 /**

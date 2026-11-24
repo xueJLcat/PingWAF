@@ -46,6 +46,7 @@ unwrap_used = "deny"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+pingwaf-content = { path = "pingwaf-content" }
 pingwaf-system = { path = "pingwaf-system" }
 ahash = { workspace = true }
 arc-swap = { workspace = true }

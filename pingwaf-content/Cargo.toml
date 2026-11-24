@@ -6,6 +6,11 @@ license = "Apache-2.0"
 description = "Validated static site archive preparation"
 
 [dependencies]
+brotli.workspace = true
+flate2.workspace = true
+http.workspace = true
+hex.workspace = true
+sha2.workspace = true
 zip = { workspace = true }
 
 [dev-dependencies]

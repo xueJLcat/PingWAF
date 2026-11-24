@@ -474,6 +474,7 @@ pub trait ManagedSiteSelector: Send + Sync {
 
 #[derive(Clone)]
 pub struct ManagedRequestSite {
+    pub policy: Option<Arc<pingwaf_content::protection::Policy>>,
     pub context: pingap_core::ManagedSiteContext,
     pub route: Arc<pingap_location::ServerLocationRoute>,
     pub trust: ProxyTrust,
@@ -1198,6 +1199,7 @@ impl Server {
                 })
                 .unwrap_or_default(),
         );
+        crate::integrity::select(session, site.policy.as_ref());
         let extensions = session.req_header_mut().extensions_mut();
         extensions.insert(site.context.clone());
         extensions.insert(ManagedUpstreams(site.upstreams.clone()));
@@ -1423,10 +1425,13 @@ impl Server {
                     RequestPluginResult::Skipped => {
                         continue;
                     },
-                    RequestPluginResult::Respond(resp) => {
+                    RequestPluginResult::Respond(mut resp) => {
                         record_time("request plugin create new response");
                         // ignore status >= 900
                         if resp.status.as_u16() < 900 {
+                            if name.ends_with("_handler") {
+                                crate::integrity::local(session, &mut resp)?;
+                            }
                             ctx.state.status = Some(resp.status);
                             resp.send(session).await?;
                         }
@@ -2179,7 +2184,11 @@ impl ProxyHttp for Server {
             }
         }
 
-        self.handle_standard_request(session, ctx).await
+        let result = self.handle_standard_request(session, ctx).await;
+        if crate::integrity::selected(session).is_some() && session.cache.enabled() {
+            session.cache.disable(NoCacheReason::Custom("page integrity"));
+        }
+        result
     }
 
     /// Filters requests before sending to upstream.
@@ -2719,6 +2728,7 @@ impl ProxyHttp for Server {
         // Ahead of the plugins: whatever they do with the response, the gzip
         // fallback decides first whether this body reaches the client encoded.
         self.apply_upstream_gzip_fallback(ctx, upstream_response);
+        crate::integrity::start(session, ctx, upstream_response);
         self.handle_upstream_response_plugin(session, ctx, upstream_response)?;
         ctx.upstream.stripped_managed_set_cookie |=
             strip_managed_response_cookies(upstream_response)?;
@@ -2775,6 +2785,9 @@ impl ProxyHttp for Server {
 
         // Ahead of the plugins: they have to see the plaintext this produces.
         self.handle_upstream_gzip_decode(session, ctx, body, end_of_stream)?;
+        if let Some(handler) = ctx.get_modify_body_handler("page_integrity") {
+            handler.handle(session, body, end_of_stream)?;
+        }
 
         self.handle_upstream_response_body_plugin(
             session,
@@ -2832,9 +2845,11 @@ impl ProxyHttp for Server {
     {
         debug!(target: LOG_TARGET, "--> fail to proxy");
         defer!(debug!(target: LOG_TARGET, "<-- fail to proxy"););
-        let server_session = session.as_mut();
-
         let (code, client_gone) = classify_proxy_error(e);
+        if matches!(code, 502..=504) {
+            crate::integrity::unavailable(session);
+        }
+        let server_session = session.as_mut();
         let error_type = e.etype().as_str();
         // A final response header is already out (pingora counts a 101 as
         // final too): the status the client saw stays on record, and no
@@ -3468,6 +3483,7 @@ value = 'proxy_set_headers = ["name:value"]'
         }
         let server = new_server();
         let selector = Selector(ManagedRequestSite {
+            policy: None,
             context: pingap_core::ManagedSiteContext {
                 id: Arc::from("site-on-this-listener"),
                 rules: Arc::new(()),
@@ -3558,6 +3574,7 @@ value = 'proxy_set_headers = ["name:value"]'
                 up.run_health_check().await.unwrap();
             }
             let selector = Selector(ManagedRequestSite {
+            policy: None,
                 context: pingap_core::ManagedSiteContext {
                     id: Arc::from(body),
                     rules: Arc::new(()),

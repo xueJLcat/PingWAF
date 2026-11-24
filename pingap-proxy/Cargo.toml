@@ -11,6 +11,7 @@ description = "Proxy for pingap"
 
 
 [dependencies]
+pingwaf-content = { path = "../pingwaf-content" }
 ahash = { workspace = true }
 async-trait = { workspace = true }
 bstr = { workspace = true }

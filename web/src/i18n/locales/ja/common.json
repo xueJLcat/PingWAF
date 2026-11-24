@@ -1896,6 +1896,7 @@
       "event_config_sync_failed": "設定同期失敗",
       "event_site_failover_changed": "フェイルオーバー設定変更",
       "event_site_upstream_offline": "サイト上流オフライン",
+      "event_site_page_integrity": "公開ページの改ざん検知",
       "event_site_upstream_abnormal": "サイト上流の縮退",
       "event_auth_login_anomaly": "不審なログイン地域",
       "event_site_oidc_login_failed": "OIDC ログイン失敗",

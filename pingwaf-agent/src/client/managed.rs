@@ -123,6 +123,7 @@ impl Session<'_> {
             client.get_managed_snapshot(proto::GetManagedSnapshotRequest {
                 supports_site_handlers: true,
                 supports_site_archives: true,
+                supports_page_integrity: true,
                 agent_token: token.to_string(),
             }),
         )

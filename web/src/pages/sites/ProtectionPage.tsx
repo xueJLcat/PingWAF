@@ -36,6 +36,7 @@ import { ManagedRulesPanel } from './ManagedRulesPanel'
 import { CustomRulesPanel } from './CustomRulesPanel'
 import { MitigationPanel } from './MitigationPanel'
 import { PathExceptionsPanel } from './PathExceptionsPanel'
+import { PageIntegrityPanel } from './PageIntegrityPanel'
 import {
   BODY_STAGE_TIMEOUT_DEFAULT,
   BODY_STAGE_TIMEOUT_MAX,
@@ -128,6 +129,7 @@ export function ProtectionPage() {
     custom: t('pages.protection.tabCustom'),
     paths: t('pages.protection.tabPaths'),
     cc: t('pages.protection.tabCc'),
+    integrity: '网页防篡改',
   }
 
   return (
@@ -208,10 +210,12 @@ export function ProtectionPage() {
             label: tabLabels.cc,
             icon: <Cloud weight="duotone" className="h-4 w-4" />,
           },
+          { value: 'integrity', label: tabLabels.integrity, icon: <Eye className="h-4 w-4" /> },
         ]}
       />
 
       {/* ── Overview: posture, high-risk switch, recent changes ──────────── */}
+      {tab === 'integrity' && <PageIntegrityPanel key={siteId} siteId={siteId} canWrite={canWrite} />}
       {tab === 'overview' && (
         <div role="tabpanel" aria-label={tabLabels.overview} className="flex flex-col gap-5">
           <PostureOverview siteId={siteId} onNavigate={handlePostureNavigate} />

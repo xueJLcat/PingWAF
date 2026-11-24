@@ -54,7 +54,9 @@ pub mod event_type {
     /// of the site is unreachable.
     pub const SITE_OIDC_IDP_UNAVAILABLE: &str = "site.oidc_idp_unavailable";
 
-    pub const ALL: [&str; 14] = [
+    pub const PAGE_INTEGRITY: &str = "site.page_integrity";
+    pub const ALL: [&str; 15] = [
+        PAGE_INTEGRITY,
         AGENT_OFFLINE,
         AGENT_ONLINE,
         AGENT_RESOURCE,

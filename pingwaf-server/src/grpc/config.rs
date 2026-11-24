@@ -2285,6 +2285,7 @@ pub(super) async fn assemble_managed_config(
             build_rule_bundle_with_settings(db, row, &settings, Some(&[]))
                 .await?;
         let mut envelope = ManagedSite {
+            protected_pages: super::managed::page_rules(db,row.id,None).await?,
             handler: row.site_handler.clone().map(|v| {
                 let spec = serde_json::from_value::<crate::models::site_handler::SiteHandler>(v)
                     .map_err(|e| DbErr::Custom(e.to_string()))?;

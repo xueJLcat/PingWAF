@@ -372,6 +372,7 @@ pub struct UpdateSettingsRequest {
     pub notify_site_failover_changed: Option<bool>,
     /// Gates `site.upstream_offline` and `site.upstream_abnormal` together.
     pub notify_site_upstream: Option<bool>,
+    pub notify_page_integrity: Option<bool>,
     pub notify_auth_login_anomaly: Option<bool>,
     /// Deliver OIDC authentication alerts.
     #[serde(default)]
@@ -425,6 +426,9 @@ async fn update_settings(
     }
     if let Some(value) = payload.notify_site_failover_changed {
         settings.notify_site_failover_changed = value;
+    }
+    if let Some(value) = payload.notify_page_integrity {
+        settings.notify_page_integrity = value;
     }
     if let Some(value) = payload.notify_site_upstream {
         settings.notify_site_upstream = value;

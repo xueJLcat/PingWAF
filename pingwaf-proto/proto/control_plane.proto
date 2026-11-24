@@ -31,6 +31,8 @@ service ControlPlane {
   // not authorize forwarding; a snapshot is not an ingress lease.
   rpc GetManagedSnapshot(GetManagedSnapshotRequest) returns (ManagedSnapshot);
   rpc ReadSiteContent(ReadSiteContentRequest) returns (SiteContentChunk);
+  rpc ReadPageIntegrity(PageIntegrityRead) returns (PageIntegrityRules);
+  rpc ObservePageIntegrity(PageIntegrityObservation) returns (PageIntegrityAck);
 
   // Visitor authentication.
   //
@@ -1150,6 +1152,7 @@ message ManagedSite {
     SiteRedirect redirect = 6;
     StaticRelease static_release = 7;
   }
+  repeated PageIntegrityRule protected_pages = 8;
 }
 
 message SiteRedirect {
@@ -1172,6 +1175,35 @@ message ReadSiteContentRequest {
   string digest = 3;
   uint32 offset = 4;
 }
+
+message PageIntegrityRead {
+  string agent_token = 1;
+  string site_id = 2;
+  string rule_id = 3; // Empty lists descriptors. A single rule includes its approved bytes.
+}
+message PageIntegrityRules {
+  repeated PageIntegrityRule rules = 1;
+}
+message PageIntegrityRule {
+  string id = 1;
+  string path = 2;
+  string mode = 3;
+  int64 version = 4;
+  string digest = 5;
+  string content_type = 6;
+  bytes approved = 7;
+}
+message PageIntegrityObservation {
+  string agent_token = 1;
+  string site_id = 2;
+  string rule_id = 3;
+  string category = 4;
+  string detail = 5;
+  string content_type = 6;
+  optional bytes candidate = 7;
+  uint32 count = 8;
+}
+message PageIntegrityAck {}
 
 message SiteContentChunk {
   bytes data = 1;
@@ -1208,6 +1240,7 @@ message GetManagedSnapshotRequest {
   string agent_token = 1;
   bool supports_site_handlers = 2;
   bool supports_site_archives = 3;
+  bool supports_page_integrity = 4;
 }
 
 // Hash the bytes exactly as transmitted, not a re-encoded protobuf with maps.

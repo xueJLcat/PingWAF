@@ -1896,6 +1896,7 @@
       "event_config_sync_failed": "Config sync failed",
       "event_site_failover_changed": "Failover policy changed",
       "event_site_upstream_offline": "Site upstream offline",
+      "event_site_page_integrity": "Public page integrity",
       "event_site_upstream_abnormal": "Site upstream degraded",
       "event_auth_login_anomaly": "Unusual login location",
       "event_site_oidc_login_failed": "OIDC login failed",

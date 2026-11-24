@@ -18,6 +18,7 @@ use std::sync::Arc;
 mod cache;
 mod error_template;
 mod headers;
+mod integrity;
 mod server;
 mod server_conf;
 #[cfg(feature = "tracing")]

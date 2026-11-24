@@ -151,6 +151,13 @@ pub struct ControlPlaneService {
 }
 
 impl ControlPlaneService {
+    fn page_scope(&self, token: &str, site: &str) -> Result<(Uuid, Uuid, Uuid), Status> {
+        let claims = self.agent_claims(token)?;
+        let agent = claims.subject_id().map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        let session = managed_session_id(&claims)?.ok_or_else(|| Status::permission_denied("managed session required"))?;
+        let site = Uuid::parse_str(site).map_err(|_| Status::invalid_argument("invalid site id"))?;
+        Ok((agent, session, site))
+    }
     pub fn new(
         db: DatabaseConnection,
         config: Arc<ServerConfig>,
@@ -698,6 +705,25 @@ impl ControlPlaneTrait for ControlPlaneService {
             .await.map(Response::new)
     }
 
+    async fn read_page_integrity(&self, request: Request<pingwaf_proto::PageIntegrityRead>)
+        -> Result<Response<pingwaf_proto::PageIntegrityRules>, Status> {
+        let request = request.into_inner();
+        let (agent, session, site) = self.page_scope(&request.agent_token, &request.site_id)?;
+        let rule = if request.rule_id.is_empty() { None } else {
+            Some(Uuid::parse_str(&request.rule_id).map_err(|_| Status::invalid_argument("invalid rule id"))?)
+        };
+        managed::read_pages(&self.db, agent, session, site, rule).await.map(Response::new)
+    }
+
+    async fn observe_page_integrity(&self, request: Request<pingwaf_proto::PageIntegrityObservation>)
+        -> Result<Response<pingwaf_proto::PageIntegrityAck>, Status> {
+        let event = request.into_inner();
+        let (agent, session, site) = self.page_scope(&event.agent_token, &event.site_id)?;
+        let rule = Uuid::parse_str(&event.rule_id).map_err(|_| Status::invalid_argument("invalid rule id"))?;
+        managed::observe_page(&self.db,agent,session,site,rule,event).await?;
+        Ok(Response::new(pingwaf_proto::PageIntegrityAck {}))
+    }
+
     async fn get_managed_snapshot(
         &self,
         request: Request<GetManagedSnapshotRequest>,
@@ -711,7 +737,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             Status::permission_denied("managed protocol was not negotiated")
         })?;
         let mut snapshot =
-            managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers, request.supports_site_archives).await?;
+            managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers, request.supports_site_archives, request.supports_page_integrity).await?;
         // Never grant a lease beyond the issuing credential's expiry. Client
         // time spent in transit is charged against, not added to, this bound.
         let remaining = claims

@@ -49,6 +49,7 @@ pub mod site_failover;
 pub mod site_oidc;
 pub mod sites;
 mod static_drafts;
+mod page_integrity;
 pub mod ssl;
 pub mod state;
 pub mod system;
@@ -184,6 +185,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(auth::routes())
         .merge(sites::routes())
         .merge(static_drafts::routes())
+        .merge(page_integrity::routes())
         .merge(ai_crawl::routes())
         .merge(site_basic_auth::routes())
         .merge(site_oidc::routes())

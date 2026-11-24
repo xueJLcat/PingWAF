@@ -204,6 +204,7 @@ pub struct Directory {
     // If None or 0, defaults to 4096 bytes
     // Files smaller than chunk_size are sent in single response
     chunk_size: Option<usize>,
+    public_pages: Vec<String>,
 
     // Cache-Control max-age directive in seconds
     // Controls how long browsers should cache the response
@@ -408,6 +409,7 @@ impl TryFrom<&PluginConf> for Directory {
             index,
             path,
             chunk_size,
+            public_pages: get_str_slice_conf(value, "public_pages"),
             max_age,
             charset,
             cache_private,
@@ -670,6 +672,16 @@ impl Plugin for Directory {
                 true,
             );
         self.apply_custom_headers(&file, &mut headers);
+        let request = session.req_header();
+        if self.cache_private != Some(true)
+            && self.public_pages.iter().any(|path| path == request.uri.path())
+            && request.uri.query().is_none()
+            && !request.headers.contains_key(header::COOKIE)
+            && !request.headers.contains_key(header::AUTHORIZATION)
+            && !headers.iter().any(|(name, _)| name == header::CACHE_CONTROL)
+        {
+            headers.push((header::CACHE_CONTROL, HeaderValue::from_static("no-cache")));
+        }
 
         let range_header = session
             .req_header()

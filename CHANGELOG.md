@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Managed sites can register exact public resource paths, preview candidates and approve versioned trusted copies. Page integrity events record changes, skips and detection failures separately. The default action is to report the change.
+
 - Managed sites can serve an approved node directory or a fixed redirect on their assigned listeners. Directory snapshots are verified by content digest and redirect destinations are checked for cycles. Existing sites keep their reverse-proxy configuration.
 
 - Static ZIP sites support authenticated draft preview, chunked delivery to assigned nodes, digest verification and rollback to a saved site version. While a content-only update is prepared, the previous version continues serving under its listener's authorization. The deployment view distinguishes download and validation failures.

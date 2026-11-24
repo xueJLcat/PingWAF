@@ -139,6 +139,8 @@ pub struct NotificationSettings {
     /// `site.upstream_abnormal` share this switch, like the cert pair).
     #[serde(default = "default_true")]
     pub notify_site_upstream: bool,
+    #[serde(default = "default_true")]
+    pub notify_page_integrity: bool,
     /// Deliver anomalous-login alerts.
     #[serde(default = "default_true")]
     pub notify_auth_login_anomaly: bool,
@@ -176,6 +178,7 @@ impl Default for NotificationSettings {
             notify_config_sync_failed: true,
             notify_site_failover_changed: true,
             notify_site_upstream: true,
+            notify_page_integrity: true,
             notify_auth_login_anomaly: true,
             notify_site_oidc_auth: true,
             cert_expiry_warn_days: 30,
@@ -209,6 +212,7 @@ impl NotificationSettings {
             event_type::SITE_UPSTREAM_OFFLINE
             | event_type::SITE_UPSTREAM_ABNORMAL => self.notify_site_upstream,
             event_type::AUTH_LOGIN_ANOMALY => self.notify_auth_login_anomaly,
+            event_type::PAGE_INTEGRITY => self.notify_page_integrity,
             event_type::SITE_OIDC_LOGIN_FAILED
             | event_type::SITE_OIDC_IDP_UNAVAILABLE => {
                 self.notify_site_oidc_auth
