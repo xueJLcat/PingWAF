@@ -582,6 +582,7 @@
         "pending": "Awaiting application",
         "unknown": "Application unknown",
         "withdrawn": "Withdrawn",
+        "received": "Received",
         "revoking": "Awaiting withdrawal",
         "bound": "Listener bound",
         "unbound": "Listener not bound",

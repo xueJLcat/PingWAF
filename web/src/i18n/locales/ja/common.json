@@ -582,6 +582,7 @@
         "pending": "適用待ち",
         "unknown": "適用状態不明",
         "withdrawn": "撤回済み",
+        "received": "受信済み",
         "revoking": "撤回待ち",
         "bound": "バインド済み",
         "unbound": "未バインド",

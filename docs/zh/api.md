@@ -238,6 +238,8 @@
 
 ## Site Upstream Pools（上游池）
 
+`GET /sites/{site_id}/deployment` 返回逐节点部署状态。节点确认接收与期望版本相同的站点配置后显示 `received`；对应监听已绑定并发布有效代理配置后显示 `applied`。回报按当前会话、世代、站点 UUID 和版本核对。
+
 ### GET /sites/{site_id}/upstream-pools
 
 列出站点源站池，默认池在前。每个池：

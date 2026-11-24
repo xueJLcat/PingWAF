@@ -582,6 +582,7 @@
         "pending": "待应用",
         "unknown": "应用状态未知",
         "withdrawn": "已撤销",
+        "received": "已接收",
         "revoking": "待撤销",
         "bound": "监听已绑定",
         "unbound": "监听未绑定",

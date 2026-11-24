@@ -313,7 +313,9 @@ pub(crate) async fn check_agent_ingress(
         .await
         .contains(&(port, protocol))
     {
-        return Err(unavailable("agent has no recent bound listener for the requested port and protocol"));
+        return Err(unavailable(
+            "agent has no recent bound listener for the requested port and protocol",
+        ));
     }
     Ok(())
 }
@@ -420,8 +422,9 @@ pub(crate) async fn site_deployment(
             },
             None => (None, None),
         };
-        let (observed_at, applied_revision) =
-            report.map(|(at, rev)| (Some(at), rev)).unwrap_or_default();
+        let (observed_at, applied_revision, received_revision) = report
+            .map(|(at, rev, receipt)| (Some(at), rev, receipt))
+            .unwrap_or_default();
         let state = match (
             result.desired_revision.as_ref(),
             applied_revision.as_ref(),
@@ -432,6 +435,11 @@ pub(crate) async fn site_deployment(
             (None, None, _, Some(_)) => "withdrawn",
             (Some(want), Some(have), Some(true), _) if want == have => {
                 "applied"
+            },
+            (Some(want), _, _, Some(_))
+                if received_revision.as_ref() == Some(want) =>
+            {
+                "received"
             },
             (_, _, None, _) | (_, _, _, None) => "unknown",
             _ => "pending",
@@ -633,9 +641,9 @@ pub(super) async fn check_postgres(
     custom: &site::Model,
 ) {
     use pingwaf_proto::{
-        control_plane_server::ControlPlane, GetManagedSnapshotRequest,
-        GetSiteConfigRequest, ManagedSiteConfig, RegisterAgentRequest,
-        SyncRulesRequest, MANAGED_PROTOCOL_VERSION,
+        GetManagedSnapshotRequest, GetSiteConfigRequest,
+        MANAGED_PROTOCOL_VERSION, ManagedSiteConfig, RegisterAgentRequest,
+        SyncRulesRequest, control_plane_server::ControlPlane,
     };
     use tonic::{Code, Request};
 
@@ -829,10 +837,12 @@ pub(super) async fn check_postgres(
             state: pingwaf_proto::IngressBindState::Bound as i32,
         }],
     };
-    assert!(ingress_agent_options(&tx, &registry, custom.user_id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        ingress_agent_options(&tx, &registry, custom.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     registry.record_ingress(id, stream, Some(&bound)).await;
     let options = ingress_agent_options(&tx, &registry, custom.user_id)
         .await
@@ -840,21 +850,18 @@ pub(super) async fn check_postgres(
     assert_eq!(options.len(), 1);
     assert_eq!(options[0].id, id);
     assert_eq!(options[0].listeners, [(81, "http")]);
-    assert!(ingress_agent_options(&tx, &registry, Uuid::new_v4())
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        ingress_agent_options(&tx, &registry, Uuid::new_v4())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     check_site_ingress(&tx, &registry, custom).await.unwrap();
-    assert!(check_agent_ingress(
-        &tx,
-        &registry,
-        id,
-        custom.user_id,
-        81,
-        "https"
-    )
-    .await
-    .is_err());
+    assert!(
+        check_agent_ingress(&tx, &registry, id, custom.user_id, 81, "https")
+            .await
+            .is_err()
+    );
     let stored = site::Entity::find_by_id(custom.id)
         .one(&tx)
         .await
@@ -865,6 +872,7 @@ pub(super) async fn check_postgres(
     assert_eq!(initial.nodes[0].state, "unknown");
     let wanted = initial.desired_revision.unwrap();
     let mut report = pingwaf_proto::ManagedApplyReport {
+        received_sites: Vec::new(),
         session_id: session.to_string(),
         authority_epoch: first.authority_epoch.clone(),
         generation: 1,
@@ -897,25 +905,44 @@ pub(super) async fn check_postgres(
         assert_eq!(view.nodes[0].state, state);
         assert_eq!(view.nodes[0].bound, Some(true));
     }
+    report.authority_epoch = first.authority_epoch.clone();
+    report.sites[0].site_revision = wanted.clone();
+    report.received_sites = std::mem::take(&mut report.sites);
+    registry
+        .record_application(
+            id,
+            stream,
+            Some(session),
+            &[custom.id],
+            Some(&report),
+        )
+        .await;
+    let received = site_deployment(&tx, &registry, &stored).await.unwrap();
+    assert_eq!(received.nodes[0].state, "received");
+    assert!(received.nodes[0].applied_revision.is_none());
     let (sender, _rx) = tokio::sync::mpsc::channel(1);
     let (replacement, _) = registry
         .connect_session(id, sender, Some(Uuid::new_v4()))
         .await;
     registry.record_ingress(id, replacement, Some(&bound)).await;
-    assert!(ingress_agent_options(&tx, &registry, custom.user_id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        ingress_agent_options(&tx, &registry, custom.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(check_site_ingress(&tx, &registry, custom).await.is_err());
     tx.commit().await.unwrap();
     let assigned = fetch(token.clone()).await.unwrap();
     assert_eq!(heartbeat_scope(db, id, session).await.unwrap(), [custom.id]);
     let row = service.authorize(&token).await.unwrap();
-    assert!(service
-        .legacy_delivery_sites(&row)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        service
+            .legacy_delivery_sites(&row)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(assigned.generation > latest.generation);
     assert_eq!(assigned.authority_epoch, first.authority_epoch);
     let config = decode(&assigned);
@@ -1016,14 +1043,13 @@ async fn check_stream<F, Fut>(
     Fut: std::future::Future<Output = pingwaf_proto::RegisterAgentResponse>,
 {
     use pingwaf_proto::{
-        control_plane_client::ControlPlaneClient,
+        AgentHeartbeat, control_plane_client::ControlPlaneClient,
         control_plane_server::ControlPlaneServer, server_command::Payload,
-        AgentHeartbeat,
     };
     use tokio::{
         net::TcpListener,
         sync::mpsc,
-        time::{timeout, Duration},
+        time::{Duration, timeout},
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 
@@ -1060,9 +1086,11 @@ async fn check_stream<F, Fut>(
             .await
             .unwrap()
             .into_inner();
-        assert!(super::repush_agent_config(db, &stream_registry, id)
-            .await
-            .unwrap());
+        assert!(
+            super::repush_agent_config(db, &stream_registry, id)
+                .await
+                .unwrap()
+        );
         assert!(matches!(
             stream.message().await.unwrap().unwrap().payload,
             Some(Payload::ManagedConfigChanged(_))

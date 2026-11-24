@@ -1,8 +1,8 @@
-use anyhow::{ensure, Context};
-use pingwaf_proto::{ManagedSnapshot, MAX_MANAGED_LEASE_SECONDS};
+use anyhow::{Context, ensure};
+use pingwaf_proto::{MAX_MANAGED_LEASE_SECONDS, ManagedSnapshot};
 use rustix::time::{
-    clock_gettime, timerfd_create, timerfd_settime, ClockId, Itimerspec,
-    TimerfdClockId, TimerfdFlags, TimerfdTimerFlags, Timespec,
+    ClockId, Itimerspec, TimerfdClockId, TimerfdFlags, TimerfdTimerFlags,
+    Timespec, clock_gettime, timerfd_create, timerfd_settime,
 };
 use tokio::io::unix::AsyncFd;
 use uuid::Uuid;
@@ -23,6 +23,7 @@ pub struct Received {
 
 /// In-memory permission for exactly one version. The caller must still check
 /// listener/UUID membership in the applied view and cancel on revocation.
+#[derive(Clone)]
 pub struct Lease {
     version: Version,
     deadline: Timespec,
@@ -178,13 +179,15 @@ mod tests {
             started: at(tv_sec),
         };
         for seconds in [0, MAX_MANAGED_LEASE_SECONDS + 1] {
-            assert!(pull(100)
-                .receive_at(
-                    &mut receiver,
-                    empty(session, authority, 1, seconds),
-                    at(101)
-                )
-                .is_err());
+            assert!(
+                pull(100)
+                    .receive_at(
+                        &mut receiver,
+                        empty(session, authority, 1, seconds),
+                        at(101)
+                    )
+                    .is_err()
+            );
         }
         let snapshot = empty(session, authority, 1, 10);
         let received = pull(100)
@@ -201,10 +204,12 @@ mod tests {
             },
             at(109)
         ));
-        assert!(pull(108)
-            .receive_at(&mut receiver, snapshot, at(109))
-            .unwrap()
-            .is_none());
+        assert!(
+            pull(108)
+                .receive_at(&mut receiver, snapshot, at(109))
+                .unwrap()
+                .is_none()
+        );
         let delayed = pull(90)
             .receive_at(
                 &mut receiver,
@@ -214,14 +219,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(delayed.candidate.sites().is_empty());
-        assert!(!delayed
-            .lease
-            .permits_at(delayed.candidate.version(), at(100)));
+        assert!(
+            !delayed
+                .lease
+                .permits_at(delayed.candidate.version(), at(100))
+        );
         let next = Uuid::new_v4();
         receiver.set_session(Some(next));
-        assert!(pull(110)
-            .receive_at(&mut receiver, empty(next, authority, 3, 10), at(111))
-            .is_err());
+        assert!(
+            pull(110)
+                .receive_at(
+                    &mut receiver,
+                    empty(next, authority, 3, 10),
+                    at(111)
+                )
+                .is_err()
+        );
         assert!(!received.lease.permits_at(
             Version {
                 session: next,

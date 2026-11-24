@@ -1150,6 +1150,9 @@ message ManagedApplyReport {
   string authority_epoch = 2;
   int64 generation = 3;
   repeated ManagedSiteApplication sites = 4;
+  // Verified and still leased while a replacement proxy view is being built.
+  // An older control plane sees no applied sites for a pending view.
+  repeated ManagedSiteApplication received_sites = 5;
 }
 
 message ManagedSiteApplication {

@@ -25,12 +25,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use pingwaf_proto::control_plane::{
-    server_command::Payload, CommandType, IngressBindState, IngressListeners,
-    IngressProtocol, ManagedConfigChangedCommand, ServerCommand,
-};
 use pingwaf_proto::MAX_INGRESS_LISTENERS;
-use tokio::sync::{mpsc, RwLock};
+use pingwaf_proto::control_plane::{
+    CommandType, IngressBindState, IngressListeners, IngressProtocol,
+    ManagedConfigChangedCommand, ServerCommand, server_command::Payload,
+};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 /// Buffer depth of the per-agent command channel.
@@ -69,6 +69,7 @@ pub struct ApplicationObservation {
     pub authority_epoch: Uuid,
     pub generation: i64,
     pub sites: Vec<SiteApplication>,
+    pub received_sites: Vec<SiteApplication>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -448,7 +449,10 @@ impl AgentRegistry {
                 || conn.session != session
                 || Uuid::parse_str(&report.session_id).ok()? != session?
                 || report.generation <= 0
-                || report.sites.len() > visible.len()
+                || (!report.sites.is_empty()
+                    && !report.received_sites.is_empty())
+                || report.sites.len().max(report.received_sites.len())
+                    > visible.len()
             {
                 return None;
             }
@@ -459,8 +463,14 @@ impl AgentRegistry {
             let permitted: std::collections::HashSet<_> =
                 visible.iter().copied().collect();
             let mut seen = std::collections::HashSet::new();
-            let mut sites = Vec::with_capacity(report.sites.len());
-            for row in &report.sites {
+            let receiving = !report.received_sites.is_empty();
+            let rows = if receiving {
+                &report.received_sites
+            } else {
+                &report.sites
+            };
+            let mut sites = Vec::with_capacity(rows.len());
+            for row in rows {
                 let site_id = Uuid::parse_str(&row.site_id).ok()?;
                 let ingress = row.ingress.as_ref()?;
                 if !permitted.contains(&site_id)
@@ -469,11 +479,12 @@ impl AgentRegistry {
                     || !row.site_revision.bytes().all(|c| {
                         c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
                     })
-                    || !bound.iter().any(|s| {
-                        s.port == ingress.port
-                            && s.protocol == ingress.protocol
-                            && s.state() == IngressBindState::Bound
-                    })
+                    || (!receiving
+                        && !bound.iter().any(|s| {
+                            s.port == ingress.port
+                                && s.protocol == ingress.protocol
+                                && s.state() == IngressBindState::Bound
+                        }))
                 {
                     return None;
                 }
@@ -495,6 +506,11 @@ impl AgentRegistry {
                     observed_at: Utc::now(),
                     authority_epoch,
                     generation: report.generation,
+                    received_sites: if receiving {
+                        std::mem::take(&mut sites)
+                    } else {
+                        Vec::new()
+                    },
                     sites,
                 },
             ))
@@ -526,7 +542,10 @@ impl AgentRegistry {
         protocol: &str,
         site: Uuid,
         epoch: Uuid,
-    ) -> (Option<bool>, Option<(DateTime<Utc>, Option<String>)>) {
+    ) -> (
+        Option<bool>,
+        Option<(DateTime<Utc>, Option<String>, Option<String>)>,
+    ) {
         let inner = self.inner.read().await;
         let Some(conn) = inner
             .connected
@@ -558,12 +577,21 @@ impl AgentRegistry {
                 at.elapsed() < fresh && report.authority_epoch == epoch
             })
             .map(|(_, report)| {
-                let row = report.sites.iter().find(|r| {
-                    r.site_id == site
-                        && i32::from(r.port) == port
-                        && r.protocol == protocol
-                });
-                (report.observed_at, row.map(|r| r.site_revision.clone()))
+                let revision = |sites: &[SiteApplication]| {
+                    sites
+                        .iter()
+                        .find(|r| {
+                            r.site_id == site
+                                && i32::from(r.port) == port
+                                && r.protocol == protocol
+                        })
+                        .map(|r| r.site_revision.clone())
+                };
+                (
+                    report.observed_at,
+                    revision(&report.sites),
+                    revision(&report.received_sites),
+                )
             });
         (bound, applied)
     }
@@ -1366,6 +1394,7 @@ mod tests {
             }],
         };
         let report = ManagedApplyReport {
+            received_sites: Vec::new(),
             session_id: session.to_string(),
             authority_epoch: Uuid::new_v4().to_string(),
             generation: 3,
@@ -1401,10 +1430,12 @@ mod tests {
                     .contains_key(&agent),
                 accepted
             );
-            assert!(registry
-                .application_observations(Duration::ZERO)
-                .await
-                .is_empty());
+            assert!(
+                registry
+                    .application_observations(Duration::ZERO)
+                    .await
+                    .is_empty()
+            );
         }
     }
 

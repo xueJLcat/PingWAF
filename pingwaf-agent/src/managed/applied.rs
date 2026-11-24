@@ -1,4 +1,4 @@
-use std::future::{poll_fn, Future};
+use std::future::{Future, poll_fn};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
@@ -14,6 +14,7 @@ pub struct AppliedState<T>(Mutex<State<T>>);
 struct State<T> {
     session: Option<Uuid>,
     latest: Option<Version>,
+    receipt: Option<(Lease, pingwaf_proto::ManagedApplyReport)>,
     active: Option<Arc<Applied<T>>>,
 }
 
@@ -54,6 +55,7 @@ impl<T> Default for AppliedState<T> {
         Self(Mutex::new(State {
             session: None,
             latest: None,
+            receipt: None,
             active: None,
         }))
     }
@@ -61,6 +63,7 @@ impl<T> Default for AppliedState<T> {
 
 impl<T> State<T> {
     fn revoke(&mut self) {
+        self.receipt = None;
         if let Some(active) = self.active.take() {
             active.authorization.send_modify(|a| a.revoked = true);
         }
@@ -127,7 +130,32 @@ impl<T> AppliedState<T> {
             }
         }
         state.revoke();
-        Ok(pending.filter(|p| p.received.lease.permits(version)))
+        let pending = pending.filter(|p| p.received.lease.permits(version));
+        if let Some(p) = &pending {
+            let received_sites = p
+                .candidate()
+                .sites()
+                .iter()
+                .filter_map(|(id, site)| {
+                    Some(pingwaf_proto::ManagedSiteApplication {
+                        site_id: id.to_string(),
+                        site_revision: site.site_revision.clone(),
+                        ingress: Some(site.ingress.clone()?),
+                    })
+                })
+                .collect();
+            state.receipt = Some((
+                p.received.lease.clone(),
+                pingwaf_proto::ManagedApplyReport {
+                    session_id: version.session.to_string(),
+                    authority_epoch: version.authority.to_string(),
+                    generation: version.generation,
+                    received_sites,
+                    sites: Vec::new(),
+                },
+            ));
+        }
+        Ok(pending)
     }
 
     /// A timer must be armed before publishing; a timer error is fail-closed.
@@ -148,6 +176,7 @@ impl<T> AppliedState<T> {
             revoked: false,
         });
         watch_expiry(authorization.clone(), version, timer);
+        state.receipt = None;
         state.active = Some(Arc::new(Applied {
             policy: pending.received.candidate,
             view,
@@ -162,6 +191,9 @@ impl<T> AppliedState<T> {
         bound: &pingwaf_proto::IngressListeners,
     ) -> Option<pingwaf_proto::ManagedApplyReport> {
         let state = self.lock();
+        if let Some((lease, receipt)) = &state.receipt {
+            return lease.permits(lease.version()).then(|| receipt.clone());
+        }
         let active = state.active.as_ref()?;
         let auth = active.authorization.borrow();
         if !auth.is_live() {
@@ -197,6 +229,7 @@ impl<T> AppliedState<T> {
             authority_epoch: version.authority.to_string(),
             generation: version.generation,
             sites,
+            received_sites: Vec::new(),
         })
     }
 
@@ -474,9 +507,11 @@ mod tests {
             .prepare(received(&mut receiver, session, epoch, 1, 10))
             .unwrap()
             .unwrap();
-        assert!(state
-            .publish(pending, origin.local_addr().unwrap())
-            .unwrap());
+        assert!(
+            state
+                .publish(pending, origin.local_addr().unwrap())
+                .unwrap()
+        );
         let forwarding = state.forwarding().unwrap();
         let mut client = TcpStream::connect(ingress.local_addr().unwrap())
             .await
@@ -537,6 +572,40 @@ mod tests {
             }],
         }
         .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn pending_site_receipt_ends_with_its_session() {
+        let state = AppliedState::<()>::default();
+        let (session, epoch, id) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        state.start_session(session);
+        let mut wire =
+            ManagedSiteConfig::decode(config(id, "rules", 1).as_slice())
+                .unwrap();
+        wire.sites[0].ingress = Some(pingwaf_proto::SiteIngress {
+            port: 81,
+            protocol: pingwaf_proto::IngressProtocol::Http as i32,
+        });
+        wire.sites[0].site_revision = "ab".repeat(32);
+        let next = receive_config(
+            &mut receiver,
+            session,
+            epoch,
+            1,
+            10,
+            wire.encode_to_vec(),
+        );
+        let pending = state.prepare(next).unwrap().unwrap();
+        let report = state.application_report(&Default::default()).unwrap();
+        assert!(report.sites.is_empty());
+        assert_eq!(report.received_sites.len(), 1);
+        assert_eq!(report.received_sites[0].site_id, id.to_string());
+        state.end_session(session);
+        assert!(state.application_report(&Default::default()).is_none());
+        assert!(!state.publish(pending, ()).unwrap());
     }
 
     #[tokio::test]

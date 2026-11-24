@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Managed ingress deployment now reports a verified, current per-site receipt while a node prepares its proxy view.
+
 - Enable custom site ingress writes in migration 000107. Downgrading to the previous write gate requires a database with no custom sites.
 
 - Fix visitor passkey enrollment and sign-in in the browser. Both forms consume the WebAuthn options returned by the control plane, and the sign-in page now executes its passkey handler. The JSON finish reply sets the session cookie, and the portal preserves the chosen credential label. Managed authentication validates the external callback before saving.

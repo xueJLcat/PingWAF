@@ -28,7 +28,7 @@ interface SiteDeployment {
     bound: boolean | null
     observed_at: string | null
     applied_revision: string | null
-    state: 'applied' | 'pending' | 'unknown' | 'withdrawn' | 'revoking'
+    state: 'applied' | 'received' | 'pending' | 'unknown' | 'withdrawn' | 'revoking'
   }[]
 }
 
