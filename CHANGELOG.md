@@ -12,6 +12,11 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Managed HTTPS site assembly now configures visitor authentication for local
+  passwords and for sites that also offer OIDC. Both gates share the selected
+  site and external origin. A validated local session satisfies the combined
+  gate and marks authenticated requests for cache exclusion.
+
 - Managed visitor account and passkey RPCs now authorize the assigned HTTPS
   site. Managed WebAuthn ceremonies bind their state to its UUID and external
   origin. Visitor portal sessions support listener-bound keys and per-site

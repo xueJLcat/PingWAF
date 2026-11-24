@@ -89,8 +89,8 @@ fn managed_oidc(
         return Ok(None);
     };
     ensure!(
-        matches!(oidc.auth_mode.trim(), "" | "oidc"),
-        "visitor authentication is not yet supported by managed ingress"
+        matches!(oidc.auth_mode.trim(), "" | "oidc" | "local" | "both"),
+        "unknown managed authentication mode"
     );
     ensure!(
         ingress.protocol() == pingwaf_proto::IngressProtocol::Https,
@@ -105,6 +105,15 @@ fn managed_oidc(
     ensure!(
         url.scheme() == "https" && !host.ends_with('.'),
         "managed OIDC requires a canonical HTTPS callback URL"
+    );
+    let callback_path = if oidc.redirect_path.is_empty() {
+        "/oauth2/callback"
+    } else {
+        &oidc.redirect_path
+    };
+    ensure!(
+        url.path() == callback_path,
+        "managed authentication callback path mismatch"
     );
     let listener = Listener::Custom {
         port,
@@ -131,18 +140,57 @@ fn build_site(
     if let Some(port) = oidc_listener_port {
         use anyhow::Context;
         let id = site.rules.site_id.as_ref();
-        let plugin = config
-            .plugins
-            .get_mut(&format!("{id}_oidc"))
-            .context("managed OIDC plugin missing")?;
-        plugin.insert(
-            "managed_site_id".into(),
-            toml::Value::String(id.to_string()),
-        );
-        plugin.insert(
-            "managed_listener_port".into(),
-            toml::Value::Integer(port.into()),
-        );
+        let auth = site
+            .rules
+            .oidc
+            .as_ref()
+            .context("missing site authentication settings")?;
+        let mode = auth.auth_mode.trim();
+        let required: &[&str] = match mode {
+            "local" => &["visitor_auth"],
+            "both" => &["visitor_auth", "oidc"],
+            _ => &["oidc"],
+        };
+        for kind in required {
+            let plugin = config
+                .plugins
+                .get_mut(&format!("{id}_{kind}"))
+                .with_context(|| {
+                    format!("managed {kind} plugin missing for site {id}")
+                })?;
+            plugin.insert(
+                "managed_site_id".into(),
+                toml::Value::String(id.to_string()),
+            );
+            plugin.insert(
+                "managed_listener_port".into(),
+                toml::Value::Integer(port.into()),
+            );
+            plugin.insert(
+                "redirect_url".into(),
+                toml::Value::String(auth.redirect_url.clone()),
+            );
+            if mode == "both" && *kind == "visitor_auth" {
+                // The visitor gate derives the managed OIDC cookie name from the site UUID.
+                plugin.insert(
+                    "oidc_cookie_name".into(),
+                    toml::Value::String("oidc".into()),
+                );
+                let callback = if auth.redirect_path.is_empty() {
+                    "/oauth2/callback"
+                } else {
+                    &auth.redirect_path
+                };
+                let mut paths = vec![callback.into()];
+                if !auth.logout_path.is_empty() {
+                    paths.push(auth.logout_path.clone().into());
+                }
+                plugin.insert(
+                    "delegated_paths".into(),
+                    toml::Value::Array(paths),
+                );
+            }
+        }
     }
     // Stable sort preserves the same generated order for equal weights.
     names.sort_by_key(|name| Reverse(config.locations[name].get_weight()));
@@ -450,7 +498,7 @@ mod tests {
             }
 
             let cache = tempfile::tempdir().unwrap();
-            let (state, _) = apply(sites, cache.path());
+            let (state, _) = apply(sites.clone(), cache.path());
             for name in ["shared.example", "other.example"] {
                 let upstream = state.forwarding().unwrap().run(|view| {
                     let id = view.rules.select(listener, name).unwrap().0;
@@ -474,16 +522,16 @@ mod tests {
                 config.alpn_protocols.push(alpn.to_vec());
                 TlsConnector::from(Arc::new(config))
             };
-            let connect = |client: TlsConnector, name: &'static str| {
+            let connect = |client: TlsConnector, name: &'static str, forwarding_state: Arc<AppliedState<Arc<View>>>| {
                 let proxy = &proxy;
-                let state = &state;
+
                 async move {
                     let join = tokio::spawn({
                         let io = TcpStream::connect(addr).await.unwrap();
                         async move { client.connect(ServerName::try_from(name).unwrap(), io).await }
                     });
                     let (tcp, _) = proxy.accept().await.unwrap();
-                    let forwarding = state.forwarding().unwrap();
+                    let forwarding = forwarding_state.forwarding().unwrap();
                     let server = tokio::spawn(async move {
                         let (_shutdown, watch) = tokio::sync::watch::channel(false);
                         serve_http(forwarding, tcp, listener, watch, false).await.unwrap()
@@ -493,7 +541,7 @@ mod tests {
             };
 
             for (identity, name, sni) in [(None, "shared.example", true), (Some(1), "shared.example", true), (Some(0), "unknown.example", true), (Some(0), "shared.example", false)] {
-                let (client, server) = connect(config(identity, b"http/1.1", sni, false), name).await;
+                let (client, server) = connect(config(identity, b"http/1.1", sni, false), name, state.clone()).await;
                 // TLS 1.3 clients may finish their side before seeing the
                 // server's rejection; assert at the accepting server.
                 assert!(server.await.unwrap().is_err());
@@ -504,14 +552,14 @@ mod tests {
                 ("shared.example", config(Some(0), b"http/1.1", true, true)),
                 ("other.example", config(Some(1), b"h2", true, false)),
             ] {
-                let (client, server) = connect(config, name).await;
+                let (client, server) = connect(config, name, state.clone()).await;
                 assert!(server.await.unwrap().is_err());
                 drop(client);
             }
 
             let reusable_client = config(Some(0), b"http/1.1", true, false);
             for _ in 0..2 {
-                let (client, server) = connect(reusable_client.clone(), "shared.example").await;
+                let (client, server) = connect(reusable_client.clone(), "shared.example", state.clone()).await;
                 let mut client = client.unwrap();
                 let session = client.get_ref().1;
                 assert_eq!(session.alpn_protocol(), Some(&b"http/1.1"[..]));
@@ -524,7 +572,7 @@ mod tests {
                 assert!(response.contains("\r\n\r\n"));
             }
 
-            let (client, server) = connect(config(Some(0), b"h2", true, false), "shared.example").await;
+            let (client, server) = connect(config(Some(0), b"h2", true, false), "shared.example", state.clone()).await;
             let client = client.unwrap();
             assert_eq!(client.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
             let (mut sender, connection) = h2::client::handshake(client).await.unwrap();
@@ -553,7 +601,7 @@ mod tests {
                 ("/logout", "other.example:8443", 405, "allow: POST"),
                 ("/route", "other.example:8443", 200, "other.example"),
             ] {
-                let (client, server) = connect(config(Some(1), b"http/1.1", true, false), "other.example").await;
+                let (client, server) = connect(config(Some(1), b"http/1.1", true, false), "other.example", state.clone()).await;
                 let mut client = client.unwrap();
                 assert_eq!(client.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_2));
                 client.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-Host: other.example:8443\r\nX-Forwarded-Proto: https\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
@@ -562,6 +610,26 @@ mod tests {
                 server.await.unwrap().unwrap();
                 assert!(response.starts_with(&format!("HTTP/1.1 {status}")), "{response}");
                 assert!(response.to_ascii_lowercase().contains(&expected.to_ascii_lowercase()), "{response}");
+            }
+
+            for mode in ["local", "both"] {
+                let mut rows = sites.clone();
+                let auth = rows.iter_mut().find_map(|row| row.site.as_mut()?.rules.as_mut()?.oidc.as_mut()).unwrap();
+                auth.auth_mode = mode.into();
+                let (scoped, _) = apply(rows, cache.path());
+                for (path, host, expected) in [
+                    ("/private", "other.example:8443", 401),
+                    ("/private", "other.example:9443", 403),
+                    ("/_pingwaf/logout", "other.example:8443", 403),
+                    ("/oauth2/callback", "other.example:8443", if mode == "both" { 400 } else { 401 }),
+                ] {
+                    let (client, server) = connect(config(Some(1), b"http/1.1", true, false), "other.example", scoped.clone()).await;
+                    let mut client = client.unwrap();
+                    client.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                    let response = read_closed_tls_response(&mut client).await;
+                    server.await.unwrap().unwrap();
+                    assert!(response.starts_with(&format!("HTTP/1.1 {expected}")), "{mode} {path}: {response}");
+                }
             }
             while let Some(result) = tasks.join_next().await {
                 result.unwrap();
@@ -628,7 +696,7 @@ mod tests {
 
     async fn request(addr: std::net::SocketAddr, host: &str) -> String {
         let mut client = TcpStream::connect(addr).await.unwrap();
-        client.write_all(format!("GET /route HTTP/1.1\r\nHost: {host}\r\nCookie: __pingwaf_managed_clearance_test=client; theme=blue\r\nCookie: __pingwaf_managed_oidc_test=client\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        client.write_all(format!("GET /route HTTP/1.1\r\nHost: {host}\r\nCookie: __pingwaf_managed_clearance_test=client; theme=blue\r\nCookie: __pingwaf_managed_oidc_test=client; __pingwaf_managed_visitor_test=visitor\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         response

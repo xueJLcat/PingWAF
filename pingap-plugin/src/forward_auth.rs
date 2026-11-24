@@ -250,7 +250,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let io = Builder::new().read(b"GET / HTTP/1.1\r\nHost: app.example\r\nCookie: __pingwaf_managed_clearance_a=pass; theme=dark\r\nCookie: __pingwaf_managed_oidc_a=session\r\n\r\n").build();
+        let io = Builder::new().read(b"GET / HTTP/1.1\r\nHost: app.example\r\nCookie: __pingwaf_managed_clearance_a=pass; theme=dark\r\nCookie: __pingwaf_managed_oidc_a=session; __pingwaf_managed_visitor_a=visitor\r\n\r\n").build();
         let mut session = Session::new_h1(Box::new(io));
         session.read_request().await.unwrap();
         let mut ctx = Ctx::default();

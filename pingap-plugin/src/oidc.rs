@@ -1798,6 +1798,18 @@ impl Plugin for Oidc {
         }
         // Not what a client without a session gets to say of itself.
         strip_claim_headers(session.req_header_mut(), &self.own_headers);
+        if self.auth_mode == AuthMode::Both
+            && path != PROVIDER_ENTRY_PATH
+            && self.managed.as_ref().is_some_and(|scope| {
+                session
+                    .req_header()
+                    .extensions
+                    .get::<crate::visitor_auth::VerifiedManagedVisitor>()
+                    .is_some_and(|visitor| visitor.0 == scope.site_id)
+            })
+        {
+            return Ok(RequestPluginResult::Continue);
+        }
         // A site that offers both sends the browser to the local login page
         // first, and that page links to `PROVIDER_ENTRY_PATH` for the
         // provider. That path is the one exception: without it the provider
@@ -1928,6 +1940,38 @@ Xy9d98XlTMj+HdE8reX0ymEIpLbCDnS5WhaUEhNcxGGHktUH/3e9BlrR
         };
         let callback = "https://app.test:8443/oauth2/callback";
         let a = make(A, 81, callback).unwrap();
+        let both = new_plugin(&format!("auth_mode='both'\nmanaged_site_id='{A}'\nmanaged_listener_port=81\nredirect_url='{callback}'")).unwrap();
+        for (verified, allowed) in [(A, true), (B, false)] {
+            let mut session = new_session(
+                "GET /private HTTP/1.1\r\nHost: app.test:8443\r\n\r\n",
+            )
+            .await;
+            let ext = session.req_header_mut().extensions_mut();
+            ext.insert(ManagedSiteContext {
+                id: A.into(),
+                rules: Arc::new(()),
+            });
+            ext.insert(ManagedAuthority {
+                hostname: "app.test".into(),
+                port: Some(8443),
+                scheme: None,
+                trailing_dot: false,
+            });
+            ext.insert(crate::visitor_auth::VerifiedManagedVisitor(
+                uuid::Uuid::parse_str(verified).unwrap(),
+            ));
+            let mut ctx = Ctx::default();
+            ctx.conn.server_port = Some(81);
+            ctx.conn.tls_version = Some("TLSv1.3".into());
+            let result = both
+                .handle_request(PluginStep::Request, &mut session, &mut ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                matches!(result, RequestPluginResult::Continue),
+                allowed
+            );
+        }
         let b = make(B, 81, callback).unwrap();
         let moved = make(A, 82, callback).unwrap();
         let origin_changed =

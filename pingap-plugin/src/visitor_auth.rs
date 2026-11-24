@@ -143,6 +143,10 @@ const SESSION_TTL_SECONDS: i64 = 43_200;
 /// The cookie the session lives in.
 const SESSION_COOKIE: &str = "pingwaf_visitor";
 
+/// Set only after the control plane validates this request's visitor session.
+#[derive(Clone)]
+pub(crate) struct VerifiedManagedVisitor(pub(crate) uuid::Uuid);
+
 /// A signed-in visitor, as carried in the cookie.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct VisitorSession {
@@ -1550,6 +1554,18 @@ impl Plugin for VisitorAuth {
                     "Use the portal at the configured site.",
                 )));
             },
+            None if session
+                .req_header()
+                .extensions
+                .get::<pingap_core::ManagedSiteContext>()
+                .is_some() =>
+            {
+                return Ok(RequestPluginResult::Respond(error_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Visitor authentication unavailable",
+                    "The managed site has no visitor configuration.",
+                )));
+            },
             None => Self::site_host(session),
         };
         let Some(site_host) = site_host else {
@@ -1577,13 +1593,16 @@ impl Plugin for VisitorAuth {
         // Otherwise the provider's callback would be gated (the code could
         // never be exchanged) and a visitor holding an OIDC session would be
         // sent back to the local login page on every request.
-        if is_delegated(&path, &self.delegated_paths) {
+        if (self.managed.is_none() || self.oidc_cookie_name.is_some())
+            && is_delegated(&path, &self.delegated_paths)
+        {
             return Ok(RequestPluginResult::Skipped);
         }
         // On a `both` site the OIDC gate is public outside its scope; this
         // plugin is first in the chain, so it has to honour the same scope.
         if let Some(scope) = &self.scope
             && !scope.matches(&path)
+            && (self.managed.is_none() || !owns_path(&path))
         {
             return Ok(RequestPluginResult::Skipped);
         }
@@ -1591,6 +1610,13 @@ impl Plugin for VisitorAuth {
             if let Some(data) = self.session(session, &site_host, now)
                 && self.session_is_live(&data).await
             {
+                if let Some(scope) = &self.managed {
+                    ctx.state.user_identity = Some(data.visitor_id);
+                    session
+                        .req_header_mut()
+                        .extensions_mut()
+                        .insert(VerifiedManagedVisitor(scope.site_id));
+                }
                 return Ok(RequestPluginResult::Continue);
             }
             // An OIDC session is the other way in. Its presence is enough to
@@ -1632,6 +1658,20 @@ impl Plugin for VisitorAuth {
         // Signing out works with or without a session, so a stale cookie can
         // always be cleared.
         if path == LOGOUT_PATH {
+            if self.managed.is_some()
+                && let Some(data) = self.session(session, &site_host, now)
+                && let Some(agent) = Self::agent()
+                && let Err(error) = agent
+                    .visitor_auth()
+                    .visitor_logout(
+                        &agent.agent_id(),
+                        &data.visitor_id,
+                        &site_host,
+                    )
+                    .await
+            {
+                warn!(category = CATEGORY, %error, "could not report visitor logout");
+            }
             return Ok(RequestPluginResult::Respond(
                 self.signed_out_response(secure),
             ));
