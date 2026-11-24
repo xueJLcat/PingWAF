@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/authStore'
 
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { ProtectionReportsPage } from '@/pages/ProtectionReportsPage'
 import { SitesListPage } from '@/pages/SitesListPage'
 import { SiteDetailPage } from '@/pages/SiteDetailPage'
 import { RateLimitingPage } from '@/pages/RateLimitingPage'
@@ -78,6 +79,8 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <DashboardPage /> },
+      { path: 'reports', element: <ProtectionReportsPage /> },
+      { path: 'live-protection', element: <ProtectionReportsPage live /> },
       { path: 'sites', element: <SitesListPage /> },
       {
         path: 'sites/:siteId',

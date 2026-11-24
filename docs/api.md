@@ -584,6 +584,26 @@ List exact paths registered for public-page integrity monitoring, the latest can
 
 Register an exact path with `{"path":"/index.html"}` on a managed proxy or static site. The initial mode is alert. A duplicate path returns 409. Each site supports up to 32 paths. The node compares public text resources up to 512 KiB after decoding identity, gzip, deflate or Brotli.
 
+### GET /reports
+
+List the authenticated user's report jobs and their generation status.
+
+### POST /reports
+
+Queue a fixed statistics snapshot. Supply `sites` (up to 16 authorized site UUIDs),
+`from` and `to` (timestamps spanning at most seven days), and an IANA `timezone`.
+The response contains the job UUID. A full queue returns HTTP 409.
+
+### GET /reports/{id}/{format}
+
+Download the completed snapshot as a Chinese PDF or UTF-8 CSV. Use `pdf` or `csv`
+as the format. Downloads require the job owner and current access to the sites.
+
+### POST /reports/live
+
+Supply `sites` and `timezone` to obtain the recent trend, site metrics and assigned
+node heartbeat times. Missing observations have nullable counts. Clients refresh every 15 seconds.
+
 ### GET /sites/{id}/integrity/{rule}
 
 Read the candidate and approved representation as Base64 bytes inside JSON, their media types and digests, approval metadata and the most recent 100 aggregated events. Render previews as untrusted data.

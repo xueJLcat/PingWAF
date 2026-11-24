@@ -10,6 +10,9 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Add site-scoped, immutable protection reports with offline Chinese PDF and
+  CSV exports, plus a read-only live dashboard showing coverage and node health.
+
 ### Changed
 
 - Managed sites can register exact public resource paths, preview candidates and approve versioned trusted copies. Page integrity events record changes, skips and detection failures separately. The default action is to report the change.

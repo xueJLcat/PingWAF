@@ -74,6 +74,7 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
   skipAuth?: boolean
   /** Return the response body as text without attempting JSON.parse. */
   rawText?: boolean
+  rawBlob?: boolean
 }
 
 function buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -162,7 +163,7 @@ async function send(
   options: RequestOptions,
   token: string | null,
 ): Promise<Response> {
-  const { body, query, skipAuth: _skipAuth, rawText: _rawText, headers, ...rest } = options
+  const { body, query, skipAuth: _skipAuth, rawText: _rawText, rawBlob: _rawBlob, headers, ...rest } = options
 
   // FormData (multipart uploads) passes through untouched: the browser must
   // generate the Content-Type with its own multipart boundary.
@@ -269,6 +270,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   if (options.rawText) return (await response.text()) as T
+  if (options.rawBlob) return (await response.blob()) as T
   if (response.status === 204) return undefined as T
   const text = await response.text()
   if (!text) return undefined as T

@@ -237,6 +237,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
         Arc::new(tls::ControlPlaneTls::new(shared_config.tls_enabled));
 
     let state = AppState {
+        live_reports: Default::default(),
         db: db.clone(),
         config: shared_config.clone(),
         agents: agents.clone(),
@@ -292,6 +293,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     notify_manager.reload().await;
     let _notify_reload_handle = start_notify_reload_loop(state.clone());
     let _self_monitor_handle = notify::self_monitor::start(state.clone());
+    let _reports = api::reports::start(state.clone());
 
     if control_tls.is_enabled() {
         match api::system_tls::load_active_certificate(&state).await {

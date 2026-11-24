@@ -676,6 +676,11 @@ pub async fn purge_logs(
 ) -> Result<PurgeOutcome, ApiError> {
     let access_cutoff = Utc::now() - Duration::days(access_days);
     let security_cutoff = Utc::now() - Duration::days(security_days);
+    // Invalidate completeness before deleting source rows, including partial sweeps.
+    use sea_orm::ConnectionTrait as _;
+    db.execute(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+        "DELETE FROM report_coverage WHERE minute<$1 AND ($2::uuid IS NULL OR site_id=$2)",
+        [access_cutoff.max(security_cutoff).into(),site_id.into()])).await?;
 
     let mut deleted_access = 0_u64;
     loop {
