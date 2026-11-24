@@ -50,7 +50,7 @@ pub const CONFIG_REPUSH_COOLDOWN_MAX: Duration = Duration::from_secs(600);
 
 struct Connection {
     sender: mpsc::Sender<ServerCommand>,
-    managed: bool,
+    session: Option<Uuid>,
     connected_at: DateTime<Utc>,
     /// Monotonic per-registry stream id. Teardown only removes the entry
     /// when this id still matches, so a stale stream finishing after the
@@ -242,7 +242,7 @@ impl AgentRegistry {
         &self,
         agent_id: Uuid,
         sender: mpsc::Sender<ServerCommand>,
-        managed: bool,
+        session: Option<Uuid>,
     ) -> (u64, VecDeque<ServerCommand>) {
         let mut inner = self.inner.write().await;
         inner.next_generation = inner.next_generation.wrapping_add(1);
@@ -251,7 +251,7 @@ impl AgentRegistry {
             agent_id,
             Connection {
                 sender,
-                managed,
+                session,
                 connected_at: Utc::now(),
                 generation,
                 ingress: None,
@@ -264,7 +264,7 @@ impl AgentRegistry {
         inner.metrics.remove(&agent_id);
         inner.apply_errors.remove(&agent_id);
         let mut drained = inner.pending.remove(&agent_id).unwrap_or_default();
-        if managed {
+        if session.is_some() {
             // The initial pull is authoritative; queued config is obsolete.
             drained.retain(|command| !is_config_command(command));
             inner.config.remove(&agent_id);
@@ -285,7 +285,7 @@ impl AgentRegistry {
         agent_id: Uuid,
         sender: mpsc::Sender<ServerCommand>,
     ) -> (u64, VecDeque<ServerCommand>) {
-        self.connect_session(agent_id, sender, false).await
+        self.connect_session(agent_id, sender, None).await
     }
 
     pub(super) async fn is_current_stream(
@@ -308,7 +308,10 @@ impl AgentRegistry {
         agent_id: &Uuid,
     ) -> Option<bool> {
         let inner = self.inner.read().await;
-        let connection = inner.connected.get(agent_id).filter(|c| c.managed)?;
+        let connection = inner
+            .connected
+            .get(agent_id)
+            .filter(|c| c.session.is_some())?;
         let hint = config_changed(ServerCommand {
             command_id: Uuid::new_v4().to_string(),
             issued_at: super::config::now_timestamp(),
@@ -441,7 +444,8 @@ impl AgentRegistry {
         };
         conn.application = (|| {
             let report = report?;
-            if !conn.managed
+            if conn.session.is_none()
+                || conn.session != session
                 || Uuid::parse_str(&report.session_id).ok()? != session?
                 || report.generation <= 0
                 || report.sites.len() > visible.len()
@@ -511,6 +515,34 @@ impl AgentRegistry {
                 (at.elapsed() < freshness).then(|| (*id, report.clone()))
             })
             .collect()
+    }
+
+    pub(super) async fn has_bound_ingress(
+        &self,
+        id: Uuid,
+        session: Uuid,
+        port: i32,
+        protocol: &str,
+    ) -> bool {
+        let inner = self.inner.read().await;
+        let Some((at, report)) = inner
+            .connected
+            .get(&id)
+            .filter(|connection| connection.session == Some(session))
+            .and_then(|connection| connection.ingress.as_ref())
+        else {
+            return false;
+        };
+        at.elapsed() < Duration::from_secs(60)
+            && report.listeners.iter().any(|listener| {
+                listener.port as i32 == port
+                    && listener.state() == IngressBindState::Bound
+                    && matches!(
+                        (protocol, listener.protocol()),
+                        ("http", IngressProtocol::Http)
+                            | ("https", IngressProtocol::Https)
+                    )
+            })
     }
 
     /// Latest validated TCP inventory on this stream. Callers must supply a
@@ -664,7 +696,11 @@ impl AgentRegistry {
             return;
         };
         let mut inner = self.inner.write().await;
-        if inner.connected.get(agent_id).is_some_and(|c| c.managed) {
+        if inner
+            .connected
+            .get(agent_id)
+            .is_some_and(|c| c.session.is_some())
+        {
             return;
         }
         if let Some(queue) = inner.pending.get_mut(agent_id) {
@@ -726,7 +762,7 @@ impl AgentRegistry {
             inner
                 .connected
                 .get(agent_id)
-                .map(|c| (c.sender.clone(), c.managed))
+                .map(|c| (c.sender.clone(), c.session.is_some()))
         };
 
         if let Some((sender, managed)) = connection {
@@ -771,7 +807,7 @@ impl AgentRegistry {
             inner
                 .connected
                 .get(agent_id)
-                .map(|c| (c.sender.clone(), c.managed))
+                .map(|c| (c.sender.clone(), c.session.is_some()))
         };
         match connection {
             Some((sender, true)) if is_config_command(&command) => {
@@ -851,8 +887,9 @@ mod tests {
         }
         assert!(!registry.send_command(&agent, restart("operator")).await);
         let (sender, mut receiver) = mpsc::channel(1);
-        let (stream, queued) =
-            registry.connect_session(agent, sender, true).await;
+        let (stream, queued) = registry
+            .connect_session(agent, sender, Some(Uuid::new_v4()))
+            .await;
         assert!(registry.is_current_stream(agent, stream).await);
         assert_eq!(queued.len(), 1);
         assert!(matches!(queued[0].payload, Some(Payload::RestartAgent(_))));
@@ -1259,7 +1296,8 @@ mod tests {
         let (agent, session, site) =
             (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let (sender, _) = mpsc::channel(1);
-        let (stream, _) = registry.connect_session(agent, sender, true).await;
+        let (stream, _) =
+            registry.connect_session(agent, sender, Some(session)).await;
         let bound = IngressListeners {
             listeners: vec![IngressListenerStatus {
                 port: 81,

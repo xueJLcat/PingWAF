@@ -606,59 +606,58 @@ async fn update_sites(
     let scope = payload.scope.trim();
     validate_site_scope(scope)?;
 
-    let mut site_ids: Vec<Uuid> = Vec::new();
-    if scope == "selected" {
-        let mut seen = std::collections::HashSet::new();
-        for site_id in payload.site_ids {
-            if !seen.insert(site_id) {
-                continue;
-            }
-            let site = site::Entity::find_by_id(site_id)
-                .one(&state.db)
-                .await?
-                .ok_or_else(|| {
-                    ApiError::NotFound(format!("site {site_id} not found"))
-                })?;
-            // The agent's key owner is the security boundary; the caller's
-            // read permission is checked separately for non-admin accounts.
-            let key_id = row.api_key_id.ok_or_else(|| {
-                ApiError::BadRequest(
-                    "agent has no API key; cannot assign sites".to_string(),
-                )
+    let site_ids: std::collections::BTreeSet<Uuid> = if scope == "selected" {
+        payload.site_ids.into_iter().collect()
+    } else {
+        Default::default()
+    };
+    let txn = state
+        .db
+        .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
+        .await?;
+    let mut active: agent::ActiveModel = row.into();
+    active.site_scope = Set(scope.to_string());
+    active.site_id = Set(None);
+    let updated = active.update(&txn).await?;
+    agent_sites::Entity::delete_many()
+        .filter(agent_sites::Column::AgentId.eq(id))
+        .exec(&txn)
+        .await?;
+    if !site_ids.is_empty() {
+        let key_id = updated.api_key_id.ok_or_else(|| {
+            ApiError::BadRequest(
+                "agent has no API key; cannot assign sites".into(),
+            )
+        })?;
+        let key = api_key::Entity::find_by_id(key_id)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest("agent API key no longer exists".into())
             })?;
-            let key = api_key::Entity::find_by_id(key_id)
-                .one(&state.db)
-                .await?
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "agent API key no longer exists".to_string(),
-                    )
-                })?;
+        for site_id in &site_ids {
+            let site =
+                crate::api::common::load_site(&txn, *site_id, &current, false)
+                    .await?;
             if site.user_id != key.user_id {
                 return Err(ApiError::BadRequest(format!(
                     "agent API key does not own site {}",
                     site.domain
                 )));
             }
-            if !current.is_admin() {
-                load_site_read(&state.db, site_id, &current).await?;
+            if let (Some(port), Some(protocol)) =
+                (site.ingress_port, site.ingress_protocol.as_deref())
+            {
+                crate::grpc::check_agent_ingress(
+                    &txn,
+                    &state.agents,
+                    id,
+                    site.user_id,
+                    port,
+                    protocol,
+                )
+                .await?;
             }
-            site_ids.push(site_id);
-        }
-    }
-
-    let txn = state.db.begin().await?;
-    let mut active: agent::ActiveModel = row.into();
-    active.site_scope = Set(scope.to_string());
-    // The legacy single binding is superseded by the explicit scope.
-    active.site_id = Set(None);
-    active.update(&txn).await?;
-    agent_sites::Entity::delete_many()
-        .filter(agent_sites::Column::AgentId.eq(id))
-        .exec(&txn)
-        .await?;
-    if scope == "selected" {
-        for site_id in &site_ids {
             agent_sites::ActiveModel {
                 agent_id: Set(id),
                 site_id: Set(*site_id),

@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Validate paired site ingress fields, explicit agent assignments and current listener sessions in site writes. Custom listener clones require independent TLS credentials. Production custom writes remain gated by the database migration.
+
 - Show the explicit ingress address in site management. MCP site listings include the protocol and port, and domain-based status changes require a UUID when multiple visible sites match.
 
 - Managed agents report the individual revisions served on bound custom

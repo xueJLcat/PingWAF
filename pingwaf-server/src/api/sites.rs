@@ -61,7 +61,11 @@ const DOMAIN_CONFLICT_CODE: &str = "site.domain_conflict";
 /// variant therefore tags exactly the conflicts, without string-sniffing.
 fn site_domain_conflict(err: ApiError) -> ApiError {
     match err {
-        ApiError::BadRequest(_) => err.with_code(DOMAIN_CONFLICT_CODE),
+        ApiError::BadRequest(_) => ApiError::BadRequest(
+            "domain or alternate_domains is already served on this ingress"
+                .into(),
+        )
+        .with_code(DOMAIN_CONFLICT_CODE),
         other => other,
     }
 }
@@ -72,6 +76,25 @@ fn site_domain_conflict(err: ApiError) -> ApiError {
 /// A non-conflict database error keeps its default code: `map_domain_conflict`
 /// passes it through `From<DbErr>`, which never produces a `BadRequest`.
 pub(crate) fn map_site_domain_conflict(err: DbErr) -> ApiError {
+    if let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
+        sea_orm::sqlx::Error::Database(db),
+    ))
+    | DbErr::Query(sea_orm::RuntimeErr::SqlxError(
+        sea_orm::sqlx::Error::Database(db),
+    )) = &err
+    {
+        if db.code().as_deref() == Some("40001") {
+            return ApiError::Conflict(
+                "site configuration changed concurrently; retry the request"
+                    .into(),
+            );
+        }
+        match db.constraint() {
+            Some("sites_custom_ingress_disabled") => return ApiError::BadRequest("custom ingress writes are disabled by the installed database migration".into()).with_code("site.ingress_unavailable"),
+            Some("sites_ingress_protocol_conflict") => return ApiError::BadRequest("this port already uses a different protocol".into()).with_code("site.ingress_invalid"),
+            _ => {}
+        }
+    }
     site_domain_conflict(map_domain_conflict(err))
 }
 
@@ -334,8 +357,55 @@ pub struct ListQuery {
     pub status: Option<String>,
 }
 
+/// Missing keys preserve the current ingress; a pair of nulls clears it.
+#[derive(Debug, Deserialize, Default)]
+pub struct IngressFields {
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    ingress_port: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    ingress_protocol: Option<Option<serde_json::Value>>,
+}
+
+impl IngressFields {
+    fn resolve(
+        &self,
+        current: Option<&site::Model>,
+        is_admin: bool,
+    ) -> Result<(Option<i32>, Option<String>), ApiError> {
+        let invalid = |reason: &str| {
+            ApiError::BadRequest(reason.to_owned())
+                .with_code("site.ingress_invalid")
+        };
+        let port = match (&self.ingress_port, &self.ingress_protocol) {
+            (None, None) => return Ok((current.and_then(|s| s.ingress_port), current.and_then(|s| s.ingress_protocol.clone()))),
+            (Some(None), Some(None)) => None,
+            (Some(Some(port)), Some(Some(protocol))) => {
+                let value = port.as_u64().filter(|p| (1..=65535).contains(p) && !matches!(p, 80 | 443))
+                    .ok_or_else(|| invalid("ingress_port must be an integer from 1 to 65535 other than 80 or 443"))?;
+                let protocol = protocol.as_str().filter(|p| matches!(*p, "http" | "https"))
+                    .ok_or_else(|| invalid("ingress_protocol must be http or https"))?;
+                Some((value as i32, protocol.to_owned()))
+            }
+            _ => return Err(invalid("ingress_port and ingress_protocol must both be supplied, both null, or both omitted")),
+        };
+        if !is_admin
+            && (port.is_some()
+                || current.is_some_and(|s| s.ingress_port.is_some()))
+        {
+            return Err(ApiError::Forbidden(
+                "only administrators may configure custom ingress".into(),
+            ));
+        }
+        Ok(port.unzip())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSiteRequest {
+    #[serde(default)]
+    pub ingress_agent_ids: std::collections::BTreeSet<Uuid>,
+    #[serde(flatten)]
+    pub ingress: IngressFields,
     pub name: String,
     pub domain: String,
     /// Extra hostnames (wildcards allowed) the site also answers on.
@@ -358,6 +428,8 @@ pub struct CreateSiteRequest {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateSiteRequest {
+    #[serde(flatten)]
+    pub ingress: IngressFields,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -1263,6 +1335,7 @@ async fn create(
             "name must be 1-100 characters".to_string(),
         ));
     }
+    let (port, protocol) = payload.ingress.resolve(None, current.is_admin())?;
     let domain = normalise_domain(&payload.domain)?;
     let alternate_domains = normalise_domain_list(
         &domain,
@@ -1270,7 +1343,7 @@ async fn create(
     )?;
     let mut all_domains = vec![domain.clone()];
     all_domains.extend(alternate_domains.iter().cloned());
-    ensure_domains_available(&state.db, &all_domains, None)
+    ensure_domains_available(&state.db, &all_domains, port, None)
         .await
         .map_err(site_domain_conflict)?;
 
@@ -1300,14 +1373,20 @@ async fn create(
     let id = Uuid::new_v4();
     // Publish a complete new site with its defaults or nothing at all.
     let txn = state.db.begin().await?;
+    if !payload.ingress_agent_ids.is_empty() && port.is_none() {
+        return Err(ApiError::BadRequest(
+            "ingress_agent_ids requires a custom ingress".into(),
+        )
+        .with_code("site.ingress_invalid"));
+    }
     let model = site::ActiveModel {
         id: Set(id),
         user_id: Set(current.id),
         name: Set(name),
         domain: Set(domain.clone()),
         alternate_domains: Set(alternate_domains),
-        ingress_port: Set(None),
-        ingress_protocol: Set(None),
+        ingress_port: Set(port),
+        ingress_protocol: Set(protocol),
         status: Set(status),
         plan: Set(plan),
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
@@ -1332,6 +1411,37 @@ async fn create(
     .await
     .map_err(map_site_domain_conflict)?;
 
+    if let (Some(port), Some(protocol)) =
+        (model.ingress_port, model.ingress_protocol.as_deref())
+    {
+        if model.status == site_status::ACTIVE
+            && payload.ingress_agent_ids.is_empty()
+        {
+            return Err(ApiError::BadRequest(
+                "active custom ingress requires an explicitly assigned agent"
+                    .into(),
+            )
+            .with_code("site.ingress_unavailable"));
+        }
+        for agent_id in payload.ingress_agent_ids {
+            crate::grpc::check_agent_ingress(
+                &txn,
+                &state.agents,
+                agent_id,
+                current.id,
+                port,
+                protocol,
+            )
+            .await?;
+            crate::models::agent_sites::ActiveModel {
+                agent_id: Set(agent_id),
+                site_id: Set(id),
+                created_at: Set(timestamp),
+            }
+            .insert(&txn)
+            .await?;
+        }
+    }
     // Every site starts with a default origin pool; the first origin node
     // goes into it.
     let defaults = PoolHealthCheck::default_values();
@@ -1431,6 +1541,8 @@ async fn create(
 /// the new primary domain: reusing the source's hostname would conflict.
 #[derive(Debug, Deserialize)]
 pub struct CloneSiteRequest {
+    #[serde(flatten)]
+    pub ingress: IngressFields,
     pub domain: String,
     #[serde(default)]
     pub alternate_domains: Option<Vec<String>>,
@@ -1663,8 +1775,6 @@ fn clone_site_row(
     active.name = Set(name);
     active.domain = Set(domain);
     active.alternate_domains = Set(alternate_domains);
-    active.ingress_port = Set(None);
-    active.ingress_protocol = Set(None);
     active.status = Set(site_status::PAUSED.to_string());
     active.created_at = Set(timestamp);
     active
@@ -1678,8 +1788,19 @@ async fn clone_site(
 ) -> Result<Response, ApiError> {
     require_write(&current)?;
     let source_id = parse_uuid(&site_id, "site id")?;
-    let source = load_site_write(&state.db, source_id, &current).await?;
+    let txn = state
+        .db
+        .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
+        .await?;
+    let source = load_site_write(&txn, source_id, &current).await?;
 
+    let (port, protocol) =
+        payload.ingress.resolve(Some(&source), current.is_admin())?;
+    if port.is_some() && !current.is_admin() {
+        return Err(ApiError::Forbidden(
+            "only administrators may clone to a custom ingress".into(),
+        ));
+    }
     let domain = normalise_domain(&payload.domain)?;
     let alternate_domains = normalise_domain_list(
         &domain,
@@ -1687,7 +1808,7 @@ async fn clone_site(
     )?;
     let mut all_domains = vec![domain.clone()];
     all_domains.extend(alternate_domains.iter().cloned());
-    ensure_domains_available(&state.db, &all_domains, None)
+    ensure_domains_available(&txn, &all_domains, port, None)
         .await
         .map_err(site_domain_conflict)?;
 
@@ -1706,9 +1827,8 @@ async fn clone_site(
 
     let new_id = Uuid::new_v4();
     let timestamp = Utc::now();
-    let txn = state.db.begin().await?;
 
-    let active = clone_site_row(
+    let mut active = clone_site_row(
         &source,
         new_id,
         current.id,
@@ -1717,6 +1837,8 @@ async fn clone_site(
         alternate_domains,
         timestamp,
     );
+    active.ingress_port = Set(port);
+    active.ingress_protocol = Set(protocol);
     let model = active
         .insert(&txn)
         .await
@@ -1822,36 +1944,29 @@ async fn clone_site(
         node.insert(&txn).await?;
     }
 
-    // Certificates and the grants that share them are copied too. Every row
-    // gets a new id and belongs to the clone: reusing the source rows would
-    // couple the two sites (deleting one would revoke the other's TLS).
+    // Default-to-default clones retain the historical certificate ownership copy.
+    // A clone involving a custom listener needs its own TLS authorization.
     let mut cert_ids: HashMap<Uuid, Uuid> = HashMap::new();
-    let certificates = site_certificates::Entity::find()
-        .filter(site_certificates::Column::SiteId.eq(source_id))
-        .all(&txn)
-        .await?;
-    for row in certificates {
-        let old_id = row.id;
-        let mut node: site_certificates::ActiveModel = row.into();
-        node.id = Set(Uuid::new_v4());
-        node.site_id = Set(Some(new_id));
-        node.created_at = Set(timestamp);
-        node.updated_at = Set(timestamp);
-        let inserted = node.insert(&txn).await?;
-        cert_ids.insert(old_id, inserted.id);
+    let copy_tls_material = source.ingress_port.is_none() && port.is_none();
+    if copy_tls_material {
+        let certificates = site_certificates::Entity::find()
+            .filter(site_certificates::Column::SiteId.eq(source_id))
+            .all(&txn)
+            .await?;
+        for row in certificates {
+            let old_id = row.id;
+            let mut node: site_certificates::ActiveModel = row.into();
+            node.id = Set(Uuid::new_v4());
+            node.site_id = Set(Some(new_id));
+            node.created_at = Set(timestamp);
+            node.updated_at = Set(timestamp);
+            let inserted = node.insert(&txn).await?;
+            cert_ids.insert(old_id, inserted.id);
+        }
     }
 
-    // No grant rows are cloned. A source site's certificates are copied with
-    // the clone as their owner (site_id on the row), which is the ownership
-    // relation itself - the link row a clone would add only restates it (and
-    // used to make an owner look shared). A grant that merely shared another
-    // site's certificate is that owner's authorisation and must not extend to
-    // the clone, so there is nothing to copy either way.
-
-    // TLS material travels with the site: the clone serves the same
-    // certificate and protocol switches until an operator changes them. The
-    // selected certificate id is remapped to the clone-owned copy above; the
-    // legacy inline PEM is cleared so the managed row stays authoritative.
+    // Grants on a shared certificate never extend to the clone. Inline PEM
+    // is cleared and only an explicitly copied owned certificate may be selected.
     if let Some(row) = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(source_id))
         .one(&txn)
@@ -1859,7 +1974,10 @@ async fn clone_site(
     {
         let selected =
             row.certificate_id.and_then(|id| cert_ids.get(&id).copied());
-        if row.certificate_id.is_some() && selected.is_none() {
+        if copy_tls_material
+            && row.certificate_id.is_some()
+            && selected.is_none()
+        {
             tracing::warn!(
                 "clone: the source site selected a certificate it does not own; the clone starts without a certificate and must pick one"
             );
@@ -1994,44 +2112,48 @@ async fn clone_site(
         .await?;
     }
 
-    // mTLS material: `site_ssl.mtls_enabled` is copied above, so the trust
-    // anchors and issued client certificates must travel too or every client
-    // is rejected. Client certificates reference a CA row, hence the remap.
-    let mut ca_ids: HashMap<Uuid, Uuid> = HashMap::new();
-    let cas = mtls::mtls_cas::Entity::find()
-        .filter(mtls::mtls_cas::Column::SiteId.eq(source_id))
-        .all(&txn)
-        .await?;
-    for row in cas {
-        let old_id = row.id;
-        let mut node: mtls::mtls_cas::ActiveModel = row.into();
-        node.id = Set(Uuid::new_v4());
-        node.site_id = Set(new_id);
-        node.created_at = Set(timestamp);
-        let inserted = node.insert(&txn).await?;
-        ca_ids.insert(old_id, inserted.id);
-    }
-    let client_certs = mtls::mtls_client_certificates::Entity::find()
-        .filter(mtls::mtls_client_certificates::Column::SiteId.eq(source_id))
-        .all(&txn)
-        .await?;
-    for row in client_certs {
-        let old_ca = row.ca_id;
-        let mut node: mtls::mtls_client_certificates::ActiveModel = row.into();
-        node.id = Set(Uuid::new_v4());
-        node.site_id = Set(new_id);
-        node.ca_id = Set(match ca_ids.get(&old_ca).copied() {
-            Some(mapped) => mapped,
-            None => {
-                tracing::warn!(
-                    source_ca = %old_ca,
-                    "clone: client certificate references a CA outside the source site; skipping it"
-                );
-                continue;
-            },
-        });
-        node.created_at = Set(timestamp);
-        node.insert(&txn).await?;
+    // Preserve legacy mTLS clones. Custom listener clones must provision
+    // their own CA and client credentials before enabling client traffic.
+    if copy_tls_material {
+        let mut ca_ids: HashMap<Uuid, Uuid> = HashMap::new();
+        let cas = mtls::mtls_cas::Entity::find()
+            .filter(mtls::mtls_cas::Column::SiteId.eq(source_id))
+            .all(&txn)
+            .await?;
+        for row in cas {
+            let old_id = row.id;
+            let mut node: mtls::mtls_cas::ActiveModel = row.into();
+            node.id = Set(Uuid::new_v4());
+            node.site_id = Set(new_id);
+            node.created_at = Set(timestamp);
+            let inserted = node.insert(&txn).await?;
+            ca_ids.insert(old_id, inserted.id);
+        }
+        let client_certs = mtls::mtls_client_certificates::Entity::find()
+            .filter(
+                mtls::mtls_client_certificates::Column::SiteId.eq(source_id),
+            )
+            .all(&txn)
+            .await?;
+        for row in client_certs {
+            let old_ca = row.ca_id;
+            let mut node: mtls::mtls_client_certificates::ActiveModel =
+                row.into();
+            node.id = Set(Uuid::new_v4());
+            node.site_id = Set(new_id);
+            node.ca_id = Set(match ca_ids.get(&old_ca).copied() {
+                Some(mapped) => mapped,
+                None => {
+                    tracing::warn!(
+                        source_ca = %old_ca,
+                        "clone: client certificate references a CA outside the source site; skipping it"
+                    );
+                    continue;
+                },
+            });
+            node.created_at = Set(timestamp);
+            node.insert(&txn).await?;
+        }
     }
 
     // WAF custom rules travel with the clone (C4/L2-001): without them the
@@ -2112,11 +2234,25 @@ async fn update(
     AppJson(payload): AppJson<UpdateSiteRequest>,
 ) -> Result<Json<SiteResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
-    let model = load_site_write(&state.db, id, &current).await?;
+    let txn = state
+        .db
+        .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
+        .await?;
+    let model = load_site_write(&txn, id, &current).await?;
+    let (port, protocol) =
+        payload.ingress.resolve(Some(&model), current.is_admin())?;
+    let ingress_changed =
+        port != model.ingress_port || protocol != model.ingress_protocol;
+    let activating =
+        payload.status.as_deref().map(str::trim) == Some(site_status::ACTIVE);
     let previous_domain = model.domain.clone();
     let previous_alternates = model.alternate_domains.clone();
 
     let mut active: site::ActiveModel = model.into();
+    if ingress_changed {
+        active.ingress_port = Set(port);
+        active.ingress_protocol = Set(protocol);
+    }
     if let Some(name) = non_empty(&payload.name) {
         if name.len() > 100 {
             return Err(ApiError::BadRequest(
@@ -2129,7 +2265,10 @@ async fn update(
         Some(domain) => Some(normalise_domain(&domain)?),
         None => None,
     };
-    if requested_domain.is_some() || payload.alternate_domains.is_some() {
+    if ingress_changed
+        || requested_domain.is_some()
+        || payload.alternate_domains.is_some()
+    {
         let primary = requested_domain
             .clone()
             .unwrap_or_else(|| previous_domain.clone());
@@ -2141,7 +2280,7 @@ async fn update(
 
         let mut all_domains = vec![primary.clone()];
         all_domains.extend(alternates.iter().cloned());
-        ensure_domains_available(&state.db, &all_domains, Some(id))
+        ensure_domains_available(&txn, &all_domains, port, Some(id))
             .await
             .map_err(site_domain_conflict)?;
 
@@ -2205,7 +2344,7 @@ async fn update(
         let mut normalized: Vec<Uuid> = Vec::with_capacity(group_ids.len());
         for group_id in group_ids {
             let exists = ip_groups::Entity::find_by_id(*group_id)
-                .one(&state.db)
+                .one(&txn)
                 .await?
                 .is_some();
             if !exists {
@@ -2243,11 +2382,16 @@ async fn update(
     active.updated_at = Set(Utc::now());
 
     let updated = active
-        .update(&state.db)
+        .update(&txn)
         .await
         // Same backstop as create: the uniqueness check above is a pre-check,
         // the DB constraint decides under concurrency.
         .map_err(map_site_domain_conflict)?;
+    if updated.status == site_status::ACTIVE && (ingress_changed || activating)
+    {
+        crate::grpc::check_site_ingress(&txn, &state.agents, &updated).await?;
+    }
+    txn.commit().await.map_err(map_site_domain_conflict)?;
     tracing::info!(%id, "site updated");
     notify_config_changed(&state, id, Some(&current.email)).await;
 
@@ -3844,6 +3988,121 @@ pub async fn touch_site(
 }
 
 #[cfg(test)]
+pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
+    use serde_json::json;
+    let admin = || AuthUser::new(owner, "owner@example.test", "admin");
+    let request = |status: &str| {
+        AppJson(serde_json::from_value(json!({
+        "name":"write regression","domain":"ingress-write.test","upstream_address":"127.0.0.1:12345",
+        "status":status,"ingress_protocol":"http","ingress_port":81
+    })).unwrap())
+    };
+    let state_arg = || State(state.clone());
+    let error = create(state_arg(), admin(), request("active"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "site.ingress_unavailable");
+    let created = create(state_arg(), admin(), request("paused"))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let row = site::Entity::find()
+        .filter(site::Column::Domain.eq("ingress-write.test"))
+        .one(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.ingress_port, Some(81));
+    let args = |value| AppJson(serde_json::from_value(value).unwrap());
+    let path = || Path(row.id.to_string());
+    let updated =
+        update(state_arg(), admin(), path(), args(json!({"name":"edited"})))
+            .await
+            .unwrap();
+    assert_eq!(updated.ingress_port, Some(81));
+    let invalid = update(
+        state_arg(),
+        admin(),
+        path(),
+        args(json!({"ingress_port":null})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.code(), "site.ingress_invalid");
+    let cert = site_certificates::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        site_id: Set(Some(row.id)),
+        domain: Set(row.domain.clone()),
+        cert_pem: Set(Some("regression certificate".into())),
+        key_pem: Set(Some("regression sentinel".into())),
+        auto_renew: Set(false),
+        acme_challenge_type: Set("http-01".into()),
+        status: Set("active".into()),
+        created_at: Set(Utc::now()),
+        updated_at: Set(Utc::now()),
+        ..Default::default()
+    }
+    .insert(&state.db)
+    .await
+    .unwrap();
+    let clone = |value| Json(serde_json::from_value(value).unwrap());
+    let error = clone_site(
+        state_arg(),
+        admin(),
+        path(),
+        clone(json!({"domain":row.domain})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), "site.domain_conflict");
+    let response = clone_site(state_arg(), admin(), path(), clone(json!({"domain":row.domain,"ingress_port":82,"ingress_protocol":"http"}))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let destination = site::Entity::find()
+        .filter(site::Column::Domain.eq(&row.domain))
+        .filter(site::Column::IngressPort.eq(82))
+        .one(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        site_certificates::Entity::find()
+            .filter(site_certificates::Column::SiteId.eq(destination.id))
+            .count(&state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(site_certificates::Entity::find_by_id(cert.id)
+        .one(&state.db)
+        .await
+        .unwrap()
+        .is_some());
+    let denied = update(
+        state_arg(),
+        AuthUser::new(owner, "owner@example.test", "viewer"),
+        path(),
+        args(json!({"ingress_port":null,"ingress_protocol":null})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.code(), "forbidden");
+    let cleared = update(
+        state_arg(),
+        admin(),
+        path(),
+        args(json!({"ingress_port":null,"ingress_protocol":null})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cleared.ingress_port, None);
+    site::Entity::delete_many()
+        .filter(site::Column::Domain.eq("ingress-write.test"))
+        .exec(&state.db)
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     // Tests convert `ActiveModel`s back into `Model`s to assert field parity.
@@ -3852,6 +4111,40 @@ mod tests {
     /// The three accepted families, their normalization, and a rejection for
     /// anything else - including the empty string, which must not silently
     /// mean "unset": the data plane has no address family for it.
+    #[test]
+    fn ingress_fields_require_a_valid_pair() {
+        use serde_json::json;
+        for fields in [
+            json!({"ingress_port":81}),
+            json!({"ingress_protocol":null}),
+            json!({"ingress_port":0,"ingress_protocol":"http"}),
+            json!({"ingress_port":80,"ingress_protocol":"http"}),
+            json!({"ingress_port":443,"ingress_protocol":"https"}),
+            json!({"ingress_port":65536,"ingress_protocol":"http"}),
+            json!({"ingress_port":"81","ingress_protocol":"http"}),
+            json!({"ingress_port":81,"ingress_protocol":"HTTP"}),
+        ] {
+            let dto: UpdateSiteRequest =
+                serde_json::from_value(fields).unwrap();
+            assert_eq!(
+                dto.ingress.resolve(None, true).unwrap_err().code(),
+                "site.ingress_invalid"
+            );
+        }
+        let dto: UpdateSiteRequest = serde_json::from_value(
+            json!({"ingress_port":65535,"ingress_protocol":"https"}),
+        )
+        .unwrap();
+        assert_eq!(
+            dto.ingress.resolve(None, true).unwrap(),
+            (Some(65535), Some("https".into()))
+        );
+        assert_eq!(
+            dto.ingress.resolve(None, false).unwrap_err().code(),
+            "forbidden"
+        );
+    }
+
     #[test]
     fn pool_address_family_accepts_three_values_only() {
         assert_eq!(
@@ -5336,8 +5629,8 @@ mod tests {
         );
 
         assert!(clone.trust_proxy_headers.unwrap());
-        assert_eq!(clone.ingress_port, Set(None));
-        assert_eq!(clone.ingress_protocol, Set(None));
+        assert_eq!(clone.ingress_port.unwrap(), Some(8443));
+        assert_eq!(clone.ingress_protocol.unwrap().as_deref(), Some("https"));
         assert!(!clone.trust_last_hop.unwrap());
         assert_eq!(clone.trusted_proxy_group_ids.unwrap(), vec![group_id]);
         assert_eq!(

@@ -400,6 +400,10 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 站点列表和详情返回 `ingress_port`、`ingress_protocol`。默认入口的两项均为 null，同一主域名下的站点用 UUID 区分。 使用 `:8443` 或 `example.com:8443` 可筛选对应端口。
 
+创建、修改和复制接口按对解析入口字段。省略两项时，新站采用默认入口，修改保留当前入口，复制继承源入口；两项均为 null 表示选择默认入口。端口须为 1 至 65535 的整数，80 和 443 保留，协议仅接受 http 或 https。当前数据库迁移仍禁止正式写入自定义入口，并返回 `site.ingress_unavailable`。
+
+在隔离验证库中，创建活动自定义站点需要通过 `ingress_agent_ids` 显式分派同属主、selected 模式的节点，核对认证会话和最近 60 秒实际绑定的协议与端口；暂停站点允许暂不分派，启用时重新核对。复制路径任一端为自定义入口时不复制 TLS 私钥、证书共享授权或 mTLS 凭据。
+
 ## Sites：response_replace（响应体替换）
 
 ### Response body replacement (`response_replace`)

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -1000,7 +1000,14 @@ async fn set_site_status(
     if previous != status {
         let mut active: site::ActiveModel = row.into();
         active.status = Set(status.clone());
-        active.update(&ctx.state.db).await.map_err(db_error)?;
+        let tx = ctx.state.db.begin().await.map_err(db_error)?;
+        let updated = active.update(&tx).await.map_err(db_error)?;
+        if status == site_status::ACTIVE {
+            crate::grpc::check_site_ingress(&tx, &ctx.state.agents, &updated)
+                .await
+                .map_err(api_error)?;
+        }
+        tx.commit().await.map_err(db_error)?;
         sites::touch_site(ctx.state, id).await.map_err(api_error)?;
         notify_config_changed(ctx.state, id, Some(ctx.actor)).await;
         tracing::info!(

@@ -204,6 +204,8 @@ async fn site_ingress_migration_postgres() {
         crate::config::ServerConfig::default(),
         crate::grpc::AgentRegistry::new(),
     );
+    crate::api::sites::check_ingress_writes(&state, USER.parse().unwrap())
+        .await;
     let owner = crate::mcp::tools::ToolContext {
         state: &state,
         actor: "regression",

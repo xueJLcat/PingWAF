@@ -12,6 +12,7 @@ pub mod cache_status;
 pub mod config;
 pub mod control_plane;
 mod managed;
+pub(crate) use managed::{check_agent_ingress, check_site_ingress};
 pub mod registry;
 pub mod visitor_auth;
 
@@ -591,7 +592,7 @@ pub(crate) async fn check_legacy_ingress_delivery(
 
     let agent_id = Uuid::parse_str(&registered.agent_id).unwrap();
     let (sender, mut rx) = tokio::sync::mpsc::channel(1);
-    registry.connect_session(agent_id, sender, false).await;
+    registry.connect_session(agent_id, sender, None).await;
     assert!(repush_agent_config(db, &registry, agent_id).await.unwrap());
     let Some(Payload::UpdateSite(update)) = rx.try_recv().unwrap().payload
     else {

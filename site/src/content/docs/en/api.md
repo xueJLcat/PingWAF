@@ -4,6 +4,8 @@ description: REST groups, authentication, the gRPC control-plane contract, API k
 minutes: 7
 ---
 
+Explicit ingress sites are identified by UUID. Site writes accept `ingress_port` and `ingress_protocol` together. Enabling an assigned listener requires current agent session and bind evidence. Production custom writes remain disabled by the database migration.
+
 ## REST
 
 Every endpoint lives under `/api/v1` on the control-plane address, `https://<host>:9080/api/v1`. Authentication is a bearer access token:
@@ -79,21 +81,9 @@ Custom pages (`GET|POST /error-pages`, administrators; the API path keeps the hi
   scope is separate from the site and unmatched-host 503 error pages; editing
   it does not change them.
 
-## Site clones copy everything
+## Site clone credentials
 
-`POST /sites/{id}/clone` now copies **every** site-scoped table, including
-the sensitive ones: certificates **with their private keys** (each row
-re-keyed to the clone, `site_ssl.certificate_id` remapped to the clone's own
-copy), the source site's own certificate-sharing links, Basic Auth
-credentials, the OIDC configuration (including `cookie_secret`) and visitor
-authorizations. Treat the clone API as a secret-duplication operation — the
-console requires an explicit acknowledgement before it will send the
-request. The clone still starts `paused`, forwarded-header trust
-(`trust_proxy_headers`, trusted proxy ranges/groups) is still reset, and the
-OIDC callback still names the source domain, so the identity-provider
-registration must be updated before the clone is enabled. References the
-mapping cannot resolve (a deleted pool, a foreign rule group) fall back to
-the clone's own default pool instead of dangling.
+A clone starts paused and retains the source’s forwarded-header trust settings. Default-to-default clones copy owned TLS material under new IDs. If either ingress is custom, provision server certificates and mTLS credentials separately. Certificate sharing grants never transfer. Basic Auth credentials and visitor authorizations still copy; the copied OIDC configuration starts disabled. Review the callback and identity-provider registration before enabling it.
 
 ## Cache rule precedence and presets
 

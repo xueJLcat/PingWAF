@@ -281,6 +281,75 @@ async fn authorize(
     Ok((row, owner.id))
 }
 
+fn unavailable(reason: &str) -> crate::api::error::ApiError {
+    crate::api::error::ApiError::BadRequest(reason.into())
+        .with_code("site.ingress_unavailable")
+}
+
+/// Check both the durable identity and the inventory of that exact authenticated stream.
+pub(crate) async fn check_agent_ingress(
+    tx: &DatabaseTransaction,
+    agents: &super::AgentRegistry,
+    agent_id: Uuid,
+    owner: Uuid,
+    port: i32,
+    protocol: &str,
+) -> Result<(), crate::api::error::ApiError> {
+    let (agent, key_owner) =
+        authorize(tx, agent_id).await.map_err(|err| match err {
+            BuildError::Storage(db) => crate::api::error::ApiError::from(db),
+            _ => unavailable("agent authorization is unavailable"),
+        })?;
+    if key_owner != owner || agent.site_scope != "selected" {
+        return Err(unavailable(
+            "agent must have explicit site scope and the same owner",
+        ));
+    }
+    let session = current_session(tx, agent_id)
+        .await?
+        .ok_or_else(|| unavailable("agent has no current managed session"))?;
+    if !agents
+        .has_bound_ingress(agent_id, session, port, protocol)
+        .await
+    {
+        return Err(unavailable("agent has no recent bound listener for the requested port and protocol"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn check_site_ingress(
+    tx: &DatabaseTransaction,
+    agents: &super::AgentRegistry,
+    site: &site::Model,
+) -> Result<(), crate::api::error::ApiError> {
+    let (Some(port), Some(protocol)) =
+        (site.ingress_port, site.ingress_protocol.as_deref())
+    else {
+        return Ok(());
+    };
+    let assignments = agent_sites::Entity::find()
+        .filter(agent_sites::Column::SiteId.eq(site.id))
+        .all(tx)
+        .await?;
+    if assignments.is_empty() {
+        return Err(unavailable(
+            "active custom ingress requires an explicitly assigned agent",
+        ));
+    }
+    for row in assignments {
+        check_agent_ingress(
+            tx,
+            agents,
+            row.agent_id,
+            site.user_id,
+            port,
+            protocol,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn visible_sites(
     tx: &DatabaseTransaction,
     row: &agent::Model,
@@ -597,6 +666,43 @@ pub(super) async fn check_postgres(
         vec![custom.id.into()],
     )
     .await;
+    let registry = super::AgentRegistry::new();
+    let (sender, _rx) = tokio::sync::mpsc::channel(1);
+    let (stream, _) = registry.connect_session(id, sender, Some(session)).await;
+    let tx = db.begin().await.unwrap();
+    assert_eq!(
+        check_site_ingress(&tx, &registry, custom)
+            .await
+            .unwrap_err()
+            .code(),
+        "site.ingress_unavailable"
+    );
+    let bound = pingwaf_proto::IngressListeners {
+        listeners: vec![pingwaf_proto::IngressListenerStatus {
+            port: 81,
+            protocol: pingwaf_proto::IngressProtocol::Http as i32,
+            state: pingwaf_proto::IngressBindState::Bound as i32,
+        }],
+    };
+    registry.record_ingress(id, stream, Some(&bound)).await;
+    check_site_ingress(&tx, &registry, custom).await.unwrap();
+    assert!(check_agent_ingress(
+        &tx,
+        &registry,
+        id,
+        custom.user_id,
+        81,
+        "https"
+    )
+    .await
+    .is_err());
+    let (sender, _rx) = tokio::sync::mpsc::channel(1);
+    let (replacement, _) = registry
+        .connect_session(id, sender, Some(Uuid::new_v4()))
+        .await;
+    registry.record_ingress(id, replacement, Some(&bound)).await;
+    assert!(check_site_ingress(&tx, &registry, custom).await.is_err());
+    tx.commit().await.unwrap();
     let assigned = fetch(token.clone()).await.unwrap();
     assert_eq!(heartbeat_scope(db, id, session).await.unwrap(), [custom.id]);
     let row = service.authorize(&token).await.unwrap();

@@ -287,7 +287,7 @@ pub fn require_write(user: &AuthUser) -> Result<(), ApiError> {
 /// owned by somebody else is reported as `404` rather than `403` so that the API
 /// does not leak which domains exist.
 pub async fn load_site(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
     user: &AuthUser,
     write: bool,
@@ -323,7 +323,7 @@ pub async fn load_site_read(
 
 /// Convenience wrapper around [`load_site`] for mutating handlers.
 pub async fn load_site_write(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
     user: &AuthUser,
 ) -> Result<site::Model, ApiError> {
@@ -627,11 +627,15 @@ pub fn ensure_acme_wildcard_supported(
 /// racing writers, and [`map_domain_conflict`] maps those failures to this same
 /// 400, including when the failure happens at commit.
 pub async fn ensure_domains_available(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     domains: &[String],
+    ingress_port: Option<i32>,
     exclude: Option<Uuid>,
 ) -> Result<(), ApiError> {
-    let mut query = site::Entity::find();
+    let mut query = site::Entity::find().filter(match ingress_port {
+        Some(port) => site::Column::IngressPort.eq(port),
+        None => site::Column::IngressPort.is_null(),
+    });
     if let Some(id) = exclude {
         query = query.filter(site::Column::Id.ne(id));
     }

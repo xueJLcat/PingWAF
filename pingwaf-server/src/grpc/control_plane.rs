@@ -772,7 +772,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             mpsc::channel::<ServerCommand>(COMMAND_CHANNEL_CAPACITY);
         let (generation, queued) = self
             .agents
-            .connect_session(agent_id, sender, session_id.is_some())
+            .connect_session(agent_id, sender, session_id)
             .await;
         for command in queued {
             // The registry owns the sender now, so replay through it.

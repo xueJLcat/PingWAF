@@ -473,6 +473,10 @@ posture: the plaintext-gRPC flag moved to the admin-only
 
 Site list and detail responses include nullable `ingress_port` and `ingress_protocol`. Both are null for the default ingress. Sites sharing a primary hostname are identified by UUID. Search by `:8443` or `example.com:8443` to filter explicit listeners.
 
+The create, edit and clone handlers accept the fields as a pair. Omit both to use the default on creation or preserve the source/current ingress on clone/edit. Supply two nulls to select the default explicitly. A custom port is an integer from 1 to 65535 excluding 80 and 443, and its protocol is `http` or `https`. Only administrators can configure it. Migration 104 currently blocks production custom writes with `site.ingress_unavailable`.
+
+When custom writes are enabled in an isolated validation database, an active create requires `ingress_agent_ids` listing selected-scope agents owned by the caller. Each must have a current authenticated managed session and a recent bound listener matching the requested port and protocol. A paused site can be staged without assignments. Activation checks the assigned agents again. Cloning to or from a custom listener leaves private TLS material and certificate grants behind; provision the clone before activation.
+
 A site is one protected domain plus its origin pools, rules and TLS posture. A
 site may serve several hostnames: `domain` is the primary one and
 `alternate_domains` lists the rest, all sharing the same routing, WAF and cache
@@ -694,10 +698,10 @@ immediately would silently double the source site's traffic.
   the clone's own groups.
 - IP-group bindings (`ip_group_sites`): without them the clone would silently
   lose group-based access rules and proxy-trust ranges.
-- mTLS material: the site's trust CAs and its issued client certificates
+- For default-to-default clones, mTLS material: the site's trust CAs and its issued client certificates
   (client certificates are remapped to the clone's own CA rows; one that
   references a CA outside the source site is skipped with a warning).
-- Certificates: every `site_certificates` row — including its `cert_pem` /
+- For default-to-default clones, certificates: every `site_certificates` row — including its `cert_pem` /
   `key_pem` (the private key), its ACME configuration and its status — is
   copied with a fresh id and belongs to the clone (reusing the source rows
   would couple the two sites: deleting one would revoke the other's TLS).
@@ -707,12 +711,7 @@ immediately would silently double the source site's traffic.
   selected a certificate it only had shared access to, the clone starts with
   no selection and logs a warning; pick or link a certificate before enabling
   it.
-- Certificate sharing: only the source site's **own** `site_certificate_links`
-  are copied, with the certificate id remapped to the clone's copy. A link
-  some *other* site holds on a source certificate is that site's
-  authorisation and never extends to the clone; a grant on a certificate
-  shared *into* the source from elsewhere is skipped with a warning — the
-  clone can use that certificate only after its owner links it explicitly.
+- Certificate sharing grants never transfer. A default-to-default clone owns its copied certificates directly. Using a shared certificate requires an explicit link to the new site.
 - Basic-auth credentials (`site_basic_auth`; the row stores them as
   plaintext at rest).
 - OIDC single sign-on (`site_oidc`), including `cookie_secret` /

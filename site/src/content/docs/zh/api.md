@@ -4,6 +4,8 @@ description: REST 分组、认证、gRPC 控制面契约、API Key 与自动化�
 minutes: 7
 ---
 
+同一主域名的自定义入口站点用 UUID 区分。站点写接口成对接收 `ingress_port` 和 `ingress_protocol`，启用时检查分派节点的当前受管会话和监听回报。当前数据库迁移仍禁止正式写入自定义入口。
+
 ## REST
 
 所有端点都在控制面地址的 `/api/v1` 下：`https://<host>:9080/api/v1`。认证使用 Bearer access token：
@@ -64,9 +66,9 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 - **`unmatched_host`** —— 边缘对 `Host` 不匹配任何已配置站点请求的兜底（裸 IP + 端口、未知主机名）。仅接受 404、421、503；同 `(scope, status_code)` 重复返回 `409`。只有存在至少一条启用的该作用域页面时边缘才会生成兜底 Location——否则网关保持默认 404——且它永远不会覆盖已匹配站点自身的 Location。模板只能使用 `{{ host }}`（已 HTML 转义）与 `{{ request_id }}`；响应带 `Cache-Control: no-store`。
 - **`challenge`** —— JS / managed / interactive 挑战页；固定 503、`text/html`。仅展示层：编译好的挑战 JS 通过 `{{ challenge_scripts | safe }}` 注入；模板必须保留 `countdown`、`title`、`subtitle`、`status`、`spinnerWrap`、`progressBar`、`progressFill` 这些 id，且不能包含 `<script>`。该作用域与站点、未匹配 Host 的 503 错误页相互独立，修改它不会影响那些页面。
 
-## 站点克隆完整复制
+## 站点复制与凭据
 
-`POST /sites/{id}/clone` 现在复制**全部**站点级数据，包括敏感数据：证书**及其私钥**（每行以新 id 归属克隆，`site_ssl.certificate_id` 重映射到克隆自己的证书副本）、源站点自身的证书共享关联、Basic Auth 凭据（明文存储）、OIDC 配置（含 `cookie_secret`）与访客授权。请把克隆 API 视为一次秘密复制操作——控制台在发送请求前要求显式勾选确认。克隆仍以 `paused` 状态创建，转发头信任（`trust_proxy_headers`、可信代理范围/分组）仍会重置，OIDC 回调仍指向源域名——启用克隆前需在身份提供方重新登记。无法重映射的引用（已删除的池、外部规则组）会回退到克隆自己的默认池而不是悬挂引用。
+复制站点以暂停状态创建，并保留源站的转发头信任设置。默认入口之间复制时，克隆持有独立的自有证书副本；任一端为自定义入口时，需单独配置服务端证书和 mTLS 凭据。证书共享授权不会转移。Basic Auth 凭据和访客授权仍随站点复制；复制后的 OIDC 配置初始禁用，启用前需核对回调和身份提供方登记。
 
 ## 缓存规则优先级与预设
 

@@ -290,6 +290,9 @@ export interface SiteDetail {
 }
 
 export interface CreateSiteRequest {
+  ingress_port?: number | null
+  ingress_protocol?: 'http' | 'https' | null
+  ingress_agent_ids?: string[]
   name: string
   domain: string
   /** Extra hostnames (wildcards allowed) the site also answers on. */
@@ -308,6 +311,8 @@ export interface CreateSiteRequest {
 
 /** `POST /sites/{site_id}/clone` — duplicate a site under a new primary domain. */
 export interface CloneSiteRequest {
+  ingress_port?: number | null
+  ingress_protocol?: 'http' | 'https' | null
   /** New primary hostname; must not collide with any existing site. */
   domain: string
   /** Extra hostnames for the clone (wildcards allowed). */
@@ -317,6 +322,8 @@ export interface CloneSiteRequest {
 }
 
 export interface UpdateSiteRequest {
+  ingress_port?: number | null
+  ingress_protocol?: 'http' | 'https' | null
   name?: string
   domain?: string
   /** Replaces the whole list; an empty array clears it. */
