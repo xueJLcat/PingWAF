@@ -485,7 +485,7 @@ pub struct ManagedRequestSite {
 #[derive(Clone)]
 struct ManagedUpstreams(Arc<dyn UpstreamProvider>);
 
-fn parse_managed_authority(value: &str) -> Option<(String, Option<u16>)> {
+fn parse_managed_authority(value: &str) -> Option<(String, Option<u16>, bool)> {
     let authority: http::uri::Authority = value.parse().ok()?;
     if value.contains('@') {
         return None;
@@ -501,15 +501,18 @@ fn parse_managed_authority(value: &str) -> Option<(String, Option<u16>)> {
         }
         Some(port.parse::<u16>().ok().filter(|port| *port != 0)?)
     };
+    let trailing_dot = host.ends_with('.');
     let host = host.strip_suffix('.').unwrap_or(host);
     // Wildcards are patterns in the configured index, not client names.
     if host.is_empty() || host.ends_with('.') || host.contains('*') {
         return None;
     }
-    Some((host.to_ascii_lowercase(), port))
+    Some((host.to_ascii_lowercase(), port, trailing_dot))
 }
 
-fn managed_hostname(header: &RequestHeader) -> Option<String> {
+fn managed_authority(
+    header: &RequestHeader,
+) -> Option<pingap_core::ManagedAuthority> {
     use pingora::protocols::http::authority::{
         RawTargetAuthority, raw_target_authority,
     };
@@ -542,23 +545,38 @@ fn managed_hostname(header: &RequestHeader) -> Option<String> {
             .authority()
             .map(|authority| (authority.as_str(), header.uri.scheme_str())),
     };
-    if let Some((authority, scheme)) = target {
-        let uri = parse_managed_authority(authority)?;
-        let default_port = match scheme {
-            Some(value) if value.eq_ignore_ascii_case("https") => Some(443),
-            Some(value) if value.eq_ignore_ascii_case("http") => Some(80),
-            Some(_) => return None,
-            None => None,
+    let (hostname, port, scheme, trailing_dot) =
+        if let Some((authority, scheme)) = target {
+            let (name, port, trailing_dot) =
+                parse_managed_authority(authority)?;
+            let default_port = match scheme {
+                Some(value) if value.eq_ignore_ascii_case("https") => Some(443),
+                Some(value) if value.eq_ignore_ascii_case("http") => Some(80),
+                Some(_) => return None,
+                None => None,
+            };
+            if host.as_ref().is_some_and(|(host_name, host_port, _)| {
+                *host_name != name
+                    || host_port.or(default_port) != port.or(default_port)
+            }) {
+                return None;
+            }
+            (
+                name,
+                port,
+                scheme.map(str::to_ascii_lowercase),
+                trailing_dot || host.is_some_and(|(_, _, dot)| dot),
+            )
+        } else {
+            let (hostname, port, trailing_dot) = host?;
+            (hostname, port, None, trailing_dot)
         };
-        if host.is_some_and(|(name, port)| {
-            name != uri.0 || port.or(default_port) != uri.1.or(default_port)
-        }) {
-            return None;
-        }
-        Some(uri.0)
-    } else {
-        host.map(|(name, _)| name)
-    }
+    Some(pingap_core::ManagedAuthority {
+        hostname,
+        port,
+        scheme,
+        trailing_dot,
+    })
 }
 
 impl Server {
@@ -986,7 +1004,7 @@ impl Server {
 
         let (host, route, managed) =
             if let Some(selector) = &self.managed_selector {
-                let host = managed_hostname(header).ok_or_else(|| {
+                let authority = managed_authority(header).ok_or_else(|| {
                     new_internal_error(
                         400,
                         "invalid or ambiguous request authority",
@@ -996,8 +1014,10 @@ impl Server {
                     selector.as_ref(),
                     session,
                     ctx,
-                    &host,
+                    &authority.hostname,
                 )?;
+                let host = authority.hostname.clone();
+                session.req_header_mut().extensions_mut().insert(authority);
                 (host, Some(site.route.clone()), Some(site))
             } else {
                 (
@@ -3587,7 +3607,7 @@ value = 'proxy_set_headers = ["name:value"]'
     }
 
     #[test]
-    fn managed_hostname_rejects_ambiguous_or_invalid_authorities() {
+    fn managed_authority_preserves_ports_and_rejects_ambiguous_inputs() {
         let request = |uri: &str, hosts: &[&str]| {
             let mut request =
                 RequestHeader::build("GET", uri.as_bytes(), None).unwrap();
@@ -3607,30 +3627,33 @@ value = 'proxy_set_headers = ["name:value"]'
             ("https://example.test:82/", "example.test:83"),
         ] {
             assert_eq!(
-                managed_hostname(&request(uri, &[host])),
+                managed_authority(&request(uri, &[host])),
                 None,
                 "{uri} / {host}"
             );
         }
-        assert_eq!(managed_hostname(&request("/", &[])), None);
+        assert_eq!(managed_authority(&request("/", &[])), None);
         assert_eq!(
-            managed_hostname(&request("/", &["example.test", "example.test"])),
+            managed_authority(&request("/", &["example.test", "example.test"])),
             None
         );
         assert_eq!(
-            managed_hostname(&request(
+            managed_authority(&request(
                 "https://example.test/",
                 &["EXAMPLE.test.:443"]
             ))
-            .as_deref(),
-            Some("example.test")
+            .unwrap()
+            .hostname,
+            "example.test"
         );
         let mut h2 = request("/", &[]);
         h2.set_version(http::Version::HTTP_2);
         h2.set_uri("https://example.test:83/path".parse().unwrap());
-        assert_eq!(managed_hostname(&h2).as_deref(), Some("example.test"));
+        let authority = managed_authority(&h2).unwrap();
+        assert_eq!(authority.hostname, "example.test");
+        assert_eq!(authority.port, Some(83));
         h2.insert_header("Host", "example.test:82").unwrap();
-        assert_eq!(managed_hostname(&h2), None);
+        assert_eq!(managed_authority(&h2), None);
     }
 
     #[tokio::test]

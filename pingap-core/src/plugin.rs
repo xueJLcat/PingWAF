@@ -300,6 +300,19 @@ pub struct ManagedSiteContext {
     pub rules: Arc<dyn std::any::Any + Send + Sync>,
 }
 
+/// Original normalized authority, recorded before any request rewrite.
+/// This is only for application checks such as browser origin validation;
+/// its port does not identify the accepting listener.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedAuthority {
+    pub hostname: String,
+    pub port: Option<u16>,
+    /// Scheme explicitly present in absolute-form or HTTP/2, if any.
+    pub scheme: Option<String>,
+    /// DNS matching ignores a trailing dot; browser origins do not.
+    pub trailing_dot: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

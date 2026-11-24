@@ -31,7 +31,8 @@ use http::{HeaderName, HeaderValue, Method, StatusCode};
 use jsonwebtoken::{Algorithm, Validation};
 use pingap_config::PluginConf;
 use pingap_core::{
-    Ctx, HttpResponse, Plugin, PluginStep, ProxyTrust, RequestPluginResult,
+    Ctx, HttpResponse, MANAGED_COOKIE_PREFIX, ManagedAuthority,
+    ManagedSiteContext, Plugin, PluginStep, ProxyTrust, RequestPluginResult,
     constant_time_eq, get_cookie_value, now_sec,
     protect_from_connection_header, resolve_scheme_with_trust,
 };
@@ -99,6 +100,7 @@ pub struct Oidc {
     /// The same as the provider is to see it, when that is not what the
     /// request says: behind another proxy, or a CDN.
     redirect_url: Option<String>,
+    managed: Option<ManagedOidc>,
     /// Ends the session, when set.
     logout_path: Option<String>,
     /// The scopes asked for, with spaces between.
@@ -125,6 +127,91 @@ pub struct Oidc {
     provider: ArcSwapOption<Provider>,
     /// One discovery at a time, and when the last one was started.
     discovery_lock: tokio::sync::Mutex<Option<Instant>>,
+}
+
+/// Kept separate from the legacy config so that neither mode can read the
+/// other's state even when an operator reuses the same provider and secret.
+struct ManagedOidc {
+    site_id: uuid::Uuid,
+    listener_port: u16,
+    hostname: String,
+    external_port: u16,
+}
+
+impl ManagedOidc {
+    fn new(
+        site: &str,
+        port: Option<i64>,
+        callback: Option<&str>,
+    ) -> Option<Self> {
+        let callback = callback?;
+        let uri: http::Uri = callback.parse().ok()?;
+        let url = url::Url::parse(callback).ok()?;
+        let hostname = url.host_str()?;
+        if uri.scheme_str() != Some("https")
+            || !uri.host()?.eq_ignore_ascii_case(hostname)
+            || uri.path() != url.path()
+            || url.scheme() != "https"
+            || hostname.ends_with('.')
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        Some(Self {
+            site_id: uuid::Uuid::parse_str(site).ok()?,
+            listener_port: u16::try_from(port?)
+                .ok()
+                .filter(|port| *port != 0)?,
+            hostname: hostname.to_owned(),
+            external_port: url
+                .port_or_known_default()
+                .filter(|port| *port != 0)?,
+        })
+    }
+
+    fn matches(&self, session: &Session, ctx: &Ctx) -> bool {
+        let extensions = &session.req_header().extensions;
+        ctx.conn.tls_version.is_some()
+            && ctx.conn.server_port == Some(self.listener_port)
+            && extensions.get::<ManagedSiteContext>().is_some_and(|site| {
+                uuid::Uuid::parse_str(&site.id).ok() == Some(self.site_id)
+            })
+            && extensions
+                .get::<ManagedAuthority>()
+                .is_some_and(|authority| {
+                    !authority.trailing_dot
+                        && authority.hostname == self.hostname
+                        && authority.port.unwrap_or(443) == self.external_port
+                        && authority
+                            .scheme
+                            .as_deref()
+                            .is_none_or(|scheme| scheme == "https")
+                })
+    }
+
+    fn permits_logout(&self, session: &Session) -> bool {
+        let request = session.req_header();
+        let mut origins = request.headers.get_all(http::header::ORIGIN).iter();
+        let Some(origin) = origins.next().and_then(|v| v.to_str().ok()) else {
+            return false;
+        };
+        if request.method != Method::POST || origins.next().is_some() {
+            return false;
+        }
+        let Ok(uri) = origin.parse::<http::Uri>() else {
+            return false;
+        };
+        // The browser sends only the serialized origin, not a URL path.
+        origin
+            .strip_prefix("https://")
+            .is_some_and(|authority| !authority.contains(['/', '?', '#', '@']))
+            && uri.scheme_str() == Some("https")
+            && uri.host() == Some(self.hostname.as_str())
+            && uri.port_u16().unwrap_or(443) == self.external_port
+    }
 }
 
 /// How a visitor signs in at this site.
@@ -561,6 +648,27 @@ impl TryFrom<&PluginConf> for Oidc {
                 scopes.push(scope);
             }
         }
+        let managed = if value.contains_key("managed_site_id")
+            || value.contains_key("managed_listener_port")
+        {
+            Some(
+                ManagedOidc::new(
+                    &get_str_conf(value, "managed_site_id"),
+                    value
+                        .get("managed_listener_port")
+                        .and_then(toml::Value::as_integer),
+                    redirect_url.as_deref(),
+                )
+                .ok_or_else(|| {
+                    invalid(
+                        "invalid managed OIDC site, listener or callback"
+                            .into(),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
         let cookie_name = Some(get_str_conf(value, "cookie_name"))
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| DEFAULT_COOKIE_NAME.to_string());
@@ -594,14 +702,32 @@ impl TryFrom<&PluginConf> for Oidc {
         // Made of the secret and of whom the sessions are from and for: a
         // second plugin with the same secret and another provider, or
         // another client of it, does not take them for its own.
-        let key: [u8; 32] = Sha256::new()
-            .chain_update(cookie_secret.as_bytes())
-            .chain_update([0])
-            .chain_update(issuer.as_bytes())
-            .chain_update([0])
-            .chain_update(client_id.as_bytes())
-            .finalize()
-            .into();
+        let (key, cookie_name) = if let Some(scope) = &managed {
+            let context = Sha256::new()
+                .chain_update(b"pingwaf-managed-oidc-v1")
+                .chain_update(scope.site_id.as_bytes())
+                .chain_update(scope.listener_port.to_be_bytes())
+                .chain_update(scope.external_port.to_be_bytes())
+                .chain_update(Sha256::digest(scope.hostname.as_bytes()))
+                .chain_update(Sha256::digest(redirect_path.as_bytes()))
+                .chain_update(Sha256::digest(issuer.as_bytes()))
+                .chain_update(Sha256::digest(client_id.as_bytes()))
+                .finalize();
+            (
+                hmac_sha256::HMAC::mac(context, cookie_secret.as_bytes()),
+                format!("{MANAGED_COOKIE_PREFIX}oidc_{}", scope.site_id),
+            )
+        } else {
+            let key = Sha256::new()
+                .chain_update(cookie_secret.as_bytes())
+                .chain_update([0])
+                .chain_update(issuer.as_bytes())
+                .chain_update([0])
+                .chain_update(client_id.as_bytes())
+                .finalize()
+                .into();
+            (key, cookie_name)
+        };
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             // What the provider sends is taken from the provider, not
@@ -617,6 +743,7 @@ impl TryFrom<&PluginConf> for Oidc {
             client_secret,
             redirect_path,
             redirect_url,
+            managed,
             logout_path,
             scopes: scopes.join(" "),
             cookie_name,
@@ -891,6 +1018,9 @@ impl Oidc {
     /// the same trust the client IP already uses, so an untrusted peer cannot
     /// talk the site into a weaker scheme.
     fn scheme(&self, session: &Session, ctx: &Ctx) -> &'static str {
+        if self.managed.is_some() {
+            return "https";
+        }
         match site_proxy_trust(session) {
             Some(trust) => resolve_scheme_with_trust(session, ctx, &trust),
             None => {
@@ -1315,10 +1445,15 @@ impl Oidc {
     /// connection TLS, and clearing without `Secure` would leave the browser
     /// holding the original cookie.
     async fn logout(&self, session: &Session, ctx: &Ctx) -> HttpResponse {
-        let end_session = self
-            .provider()
-            .await
-            .and_then(|provider| provider.end_session_endpoint.clone());
+        // Managed sites may share an IdP session. Signing out of one site's
+        // edge session must not terminate the shared provider session.
+        let end_session = if self.managed.is_some() {
+            None
+        } else {
+            self.provider()
+                .await
+                .and_then(|provider| provider.end_session_endpoint.clone())
+        };
         let mut response = end_session
             .and_then(|url| {
                 let separator = if url.contains('?') { '&' } else { '?' };
@@ -1397,10 +1532,15 @@ impl Oidc {
         // maps the domain back to it. An unknown domain reports under an empty
         // id — the entry is dropped there, which is the correct outcome for a
         // host this agent does not serve.
-        let site_id = agent
-            .get_rules_for_domain(&host)
-            .map(|rules| rules.site_id.to_string())
-            .unwrap_or_default();
+        let site_id = self.managed.as_ref().map_or_else(
+            || {
+                agent
+                    .get_rules_for_domain(&host)
+                    .map(|rules| rules.site_id.to_string())
+                    .unwrap_or_default()
+            },
+            |scope| scope.site_id.to_string(),
+        );
         // The scheme the browser used, not the last hop's: an event recorded
         // for a site behind a TLS-terminating proxy should not claim http.
         let scheme = self.scheme(session, ctx);
@@ -1518,6 +1658,27 @@ impl Plugin for Oidc {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
+        if let Some(scope) = &self.managed {
+            if !scope.matches(session, ctx) {
+                return Ok(RequestPluginResult::Respond(text(
+                    StatusCode::MISDIRECTED_REQUEST,
+                    "Use the configured HTTPS origin to sign in",
+                )));
+            }
+            // Public paths also must not be able to present client-supplied
+            // identity headers to an origin that trusts this site's claims.
+            strip_claim_headers(session.req_header_mut(), &self.own_headers);
+        } else if session
+            .req_header()
+            .extensions
+            .get::<ManagedSiteContext>()
+            .is_some()
+        {
+            return Ok(RequestPluginResult::Respond(text(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Managed authentication not configured",
+            )));
+        }
         // The path the client asked for: a rewrite of the location is not
         // what the provider was told to come back to.
         let path = request_uri(session, ctx).path().to_string();
@@ -1561,6 +1722,25 @@ impl Plugin for Oidc {
             return Ok(RequestPluginResult::Respond(response));
         }
         if self.logout_path.as_deref() == Some(path.as_str()) {
+            if let Some(scope) = &self.managed {
+                if session.req_header().method != Method::POST {
+                    let mut response = text(
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "Use POST to sign out",
+                    );
+                    response.headers.get_or_insert_default().push((
+                        http::header::ALLOW,
+                        HeaderValue::from_static("POST"),
+                    ));
+                    return Ok(RequestPluginResult::Respond(response));
+                }
+                if !scope.permits_logout(session) {
+                    return Ok(RequestPluginResult::Respond(text(
+                        StatusCode::FORBIDDEN,
+                        "Sign out from the configured HTTPS origin",
+                    )));
+                }
+            }
             return Ok(RequestPluginResult::Respond(
                 self.logout(session, ctx).await,
             ));
@@ -1734,6 +1914,226 @@ Xy9d98XlTMj+HdE8reX0ymEIpLbCDnS5WhaUEhNcxGGHktUH/3e9BlrR
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
         session
+    }
+
+    #[tokio::test]
+    async fn managed_oidc_checks_original_origin_before_using_state_or_session()
+    {
+        const A: &str = "00000000-0000-4000-8000-000000000081";
+        const B: &str = "00000000-0000-4000-8000-000000000082";
+        let make = |id, port, url| {
+            new_plugin(&format!(
+                "managed_site_id = '{id}'\nmanaged_listener_port = {port}\nredirect_url = '{url}'\n"
+            ))
+        };
+        let callback = "https://app.test:8443/oauth2/callback";
+        let a = make(A, 81, callback).unwrap();
+        let b = make(B, 81, callback).unwrap();
+        let moved = make(A, 82, callback).unwrap();
+        let origin_changed =
+            make(A, 81, "https://app.test:9443/oauth2/callback").unwrap();
+        for invalid in [
+            "http://app.test:8443/oauth2/callback",
+            "https://x@app.test:8443/oauth2/callback",
+            "https://app.test:8443/oauth2/callback?x=1",
+        ] {
+            assert!(make(A, 81, invalid).is_err());
+        }
+        let legacy = new_plugin("").unwrap();
+        let data = SessionData {
+            exp: u64::MAX,
+            claims: ClaimMap::new(),
+        };
+        let sealed = a.seal(&data).unwrap();
+        let login = Login {
+            state: "tab12345".into(),
+            verifier: "verifier".into(),
+            nonce: "nonce".into(),
+            url: "/private".into(),
+            exp: u64::MAX,
+        };
+        let sealed_login = a.seal(&login).unwrap();
+        assert_eq!(a.cookie_name, format!("{MANAGED_COOKIE_PREFIX}oidc_{A}"));
+        for plugin in [&b, &moved, &origin_changed, &legacy] {
+            assert!(plugin.unseal::<SessionData>(&sealed).is_none());
+            assert!(plugin.unseal::<Login>(&sealed_login).is_none());
+        }
+
+        for (site_id, local_port, external_port, scheme, tls, expected) in [
+            (A, 81, 8443, None, true, None),
+            (A, 81, 8443, Some("https"), true, None),
+            (B, 81, 8443, None, true, Some(421)),
+            (A, 82, 8443, None, true, Some(421)),
+            (A, 81, 9443, None, true, Some(421)),
+            (A, 81, 8443, Some("http"), true, Some(421)),
+            (A, 81, 8443, None, false, Some(421)),
+        ] {
+            let mut session = new_session(&format!("GET /private HTTP/1.1\r\nHost: rewritten.test\r\nX-Forwarded-Proto: https\r\nX-Forwarded-Host: app.test:8443\r\nCookie: {}={sealed}\r\n\r\n", a.cookie_name)).await;
+            let extensions = session.req_header_mut().extensions_mut();
+            extensions.insert(ManagedSiteContext {
+                id: site_id.into(),
+                rules: Arc::new(()),
+            });
+            extensions.insert(ManagedAuthority {
+                hostname: "app.test".into(),
+                port: Some(external_port),
+                scheme: scheme.map(str::to_owned),
+                trailing_dot: false,
+            });
+            let mut ctx = Ctx::default();
+            ctx.conn.server_port = Some(local_port);
+            ctx.conn.tls_version = tls.then(|| "TLSv1.3".into());
+            let result = a
+                .handle_request(PluginStep::Request, &mut session, &mut ctx)
+                .await
+                .unwrap();
+            if let Some(status) = expected {
+                assert!(
+                    matches!(result, RequestPluginResult::Respond(response) if response.status == status)
+                );
+                assert!(ctx.state.user_identity.is_none());
+            } else {
+                assert_eq!(result, RequestPluginResult::Continue);
+                assert_eq!(ctx.state.user_identity.as_deref(), Some("unknown"));
+                assert_eq!(
+                    a.redirect_uri(&session, &ctx).as_deref(),
+                    Some(callback)
+                );
+                assert!(a.is_secure(&session, &ctx));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_oidc_completes_login_and_logs_out_only_the_selected_site()
+    {
+        const A: &str = "00000000-0000-4000-8000-000000000081";
+        const B: &str = "00000000-0000-4000-8000-000000000082";
+        let make = |id, port| {
+            new_plugin(&format!(
+            "managed_site_id = '{id}'\nmanaged_listener_port = {port}\nredirect_url = 'https://app.test:{port}/oauth2/callback'\nlogout_path = '/logout'\nclaims_to_headers = ['sub:X-Visitor']\n"
+        )).unwrap()
+        };
+        let a = make(A, 81);
+        let b = make(B, 82);
+        let endpoint = Arc::new(TokenEndpoint::default());
+        let provider = provider(&serve(endpoint.clone()).await).await;
+        a.provider.store(Some(provider.clone()));
+        b.provider.store(Some(provider));
+
+        async fn request(
+            plugin: &Oidc,
+            target: &str,
+            cookie: &str,
+        ) -> (RequestPluginResult, Ctx, Session) {
+            let scope = plugin.managed.as_ref().unwrap();
+            let mut session = new_session(&format!("{target} HTTP/1.1\r\nHost: app.test:{}\r\nAccept: text/html\r\nX-Visitor: supplied-by-client\r\nCookie: {cookie}\r\n\r\n", scope.external_port)).await;
+            let ext = session.req_header_mut().extensions_mut();
+            ext.insert(ManagedSiteContext {
+                id: scope.site_id.to_string().into(),
+                rules: Arc::new(()),
+            });
+            ext.insert(ManagedAuthority {
+                hostname: "app.test".into(),
+                port: Some(scope.external_port),
+                scheme: None,
+                trailing_dot: false,
+            });
+            let mut ctx = Ctx::default();
+            ctx.conn.server_port = Some(scope.listener_port);
+            ctx.conn.tls_version = Some("TLSv1.3".into());
+            let result = plugin
+                .handle_request(PluginStep::Request, &mut session, &mut ctx)
+                .await
+                .unwrap();
+            (result, ctx, session)
+        }
+        let (RequestPluginResult::Respond(login), _, _) =
+            request(&a, "GET /private", "theme=blue").await
+        else {
+            panic!("missing provider redirect");
+        };
+        let url = url::Url::parse(header_of(&login, "location")[0]).unwrap();
+        let params = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            params["redirect_uri"],
+            "https://app.test:81/oauth2/callback"
+        );
+        assert_eq!(params["code_challenge_method"], "S256");
+        let set_cookie = header_of(&login, "set-cookie")[0];
+        assert!(set_cookie.ends_with("; HttpOnly; SameSite=Lax; Secure"));
+        let cookie = set_cookie.split(';').next().unwrap();
+        let (_, sealed_login) = cookie.split_once('=').unwrap();
+        let callback = format!(
+            "GET /oauth2/callback?code=fixture-code&state={}",
+            params["state"]
+        );
+        let renamed =
+            format!("{}={sealed_login}", b.login_cookie_name(&params["state"]));
+        let (result, _, _) = request(&b, &callback, &renamed).await;
+        assert!(
+            matches!(result, RequestPluginResult::Respond(r) if r.status == 400)
+        );
+        assert!(endpoint.requests.lock().unwrap().is_empty());
+
+        let claims = serde_json::json!({"iss": "https://idp.test", "aud": "pingap", "sub": "visitor-a", "exp": now_sec() + 300, "nonce": params["nonce"]});
+        let token = encode(
+            &Header::new(Algorithm::ES256),
+            &claims,
+            &EncodingKey::from_ec_pem(PRIVATE_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        *endpoint.answer.lock().unwrap() =
+            serde_json::json!({"id_token": token}).to_string();
+        let (RequestPluginResult::Respond(complete), _, _) =
+            request(&a, &callback, cookie).await
+        else {
+            panic!("missing callback response");
+        };
+        assert_eq!(header_of(&complete, "location"), vec!["/private"]);
+        assert_eq!(endpoint.requests.lock().unwrap().len(), 1);
+        let session_cookie = header_of(&complete, "set-cookie")[0]
+            .split(';')
+            .next()
+            .unwrap();
+        let (result, ctx, session) =
+            request(&a, "GET /private", session_cookie).await;
+        assert_eq!(result, RequestPluginResult::Continue);
+        assert_eq!(ctx.state.user_identity.as_deref(), Some("visitor-a"));
+        assert_eq!(session.req_header().headers["x-visitor"], "visitor-a");
+
+        let (result, _, _) = request(&a, "GET /logout", session_cookie).await;
+        assert!(
+            matches!(result, RequestPluginResult::Respond(r) if r.status == 405)
+        );
+        let (result, _, _) = request(&a, "POST /logout", session_cookie).await;
+        assert!(
+            matches!(result, RequestPluginResult::Respond(r) if r.status == 403)
+        );
+        let from = |port| {
+            format!("{session_cookie}\r\nOrigin: https://app.test:{port}")
+        };
+        let (result, _, _) = request(&a, "POST /logout", &from(82)).await;
+        assert!(
+            matches!(result, RequestPluginResult::Respond(r) if r.status == 403)
+        );
+        let (RequestPluginResult::Respond(logout), _, _) =
+            request(&a, "POST /logout", &from(81)).await
+        else {
+            panic!("missing logout response");
+        };
+        assert_eq!(logout.status, 200);
+        assert!(header_of(&logout, "location").is_empty());
+        let cleared = header_of(&logout, "set-cookie");
+        assert_eq!(cleared.len(), 1);
+        assert!(
+            cleared[0].starts_with(&format!(
+                "{}=; Path=/; Max-Age=0;",
+                a.cookie_name
+            ))
+        );
     }
 
     /// A JWKS source whose document (the key of the tests) is served by

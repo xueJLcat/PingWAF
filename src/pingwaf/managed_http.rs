@@ -33,7 +33,13 @@ impl View {
         let rules = candidate.compile()?;
         let sites = rules
             .sites()
-            .map(|(id, site)| Ok((id, build_site(site, cache_dir)?)))
+            .filter_map(|(id, site)| {
+                Some((id, site, candidate.sites().get(&id)?.ingress.as_ref()?))
+            })
+            .map(|(id, site, ingress)| {
+                let oidc = managed_oidc(&rules, id, site, ingress)?;
+                Ok((id, build_site(site, oidc, cache_dir)?))
+            })
             .collect::<anyhow::Result<_>>()?;
         #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
         let tls = candidate
@@ -71,12 +77,73 @@ impl View {
     }
 }
 
+fn managed_oidc(
+    rules: &Compiled,
+    id: Uuid,
+    site: &CompiledSite,
+    ingress: &pingwaf_proto::SiteIngress,
+) -> anyhow::Result<Option<u16>> {
+    use anyhow::{Context, ensure};
+    let Some(oidc) = site.rules.oidc.as_ref().filter(|oidc| oidc.enabled)
+    else {
+        return Ok(None);
+    };
+    ensure!(
+        matches!(oidc.auth_mode.trim(), "" | "oidc"),
+        "visitor authentication is not yet supported by managed ingress"
+    );
+    ensure!(
+        ingress.protocol() == pingwaf_proto::IngressProtocol::Https,
+        "managed OIDC requires a custom HTTPS ingress"
+    );
+    let port = u16::try_from(ingress.port)?;
+    let url = url::Url::parse(&oidc.redirect_url)
+        .context("managed OIDC requires an explicit HTTPS callback URL")?;
+    let host = url
+        .host_str()
+        .context("managed OIDC callback needs a host")?;
+    ensure!(
+        url.scheme() == "https" && !host.ends_with('.'),
+        "managed OIDC requires a canonical HTTPS callback URL"
+    );
+    let listener = Listener::Custom {
+        port,
+        protocol: ingress.protocol(),
+    };
+    // Check the full listener index: another site's exact alias may outrank
+    // this site's wildcard.
+    ensure!(
+        rules
+            .select(listener, host)
+            .is_some_and(|(selected, _)| selected == id),
+        "managed OIDC callback must select site {id}"
+    );
+    Ok(Some(port))
+}
+
 fn build_site(
     site: &CompiledSite,
+    oidc_listener_port: Option<u16>,
     cache_dir: &Path,
 ) -> anyhow::Result<ManagedRequestSite> {
-    let (config, mut names) =
+    let (mut config, mut names) =
         convert_proxy_config(&site.translation_input(), cache_dir, false);
+    if let Some(port) = oidc_listener_port {
+        use anyhow::Context;
+        let id = site.rules.site_id.as_ref();
+        let plugin = config
+            .plugins
+            .get_mut(&format!("{id}_oidc"))
+            .context("managed OIDC plugin missing")?;
+        plugin.insert(
+            "managed_site_id".into(),
+            toml::Value::String(id.to_string()),
+        );
+        plugin.insert(
+            "managed_listener_port".into(),
+            toml::Value::Integer(port.into()),
+        );
+    }
     // Stable sort preserves the same generated order for equal weights.
     names.sort_by_key(|name| Reverse(config.locations[name].get_weight()));
     let locations = crate::locations::isolated_locations(&config.locations)?;
@@ -365,6 +432,19 @@ mod tests {
                     key_pem: server_key.serialize_pem(),
                     ..Default::default()
                 });
+                if name == "other.example" {
+                    row.rules.as_mut().unwrap().oidc = Some(pingwaf_proto::OidcConfig {
+                        enabled: true,
+                        issuer: "https://idp.example".into(),
+                        client_id: "managed-site-test".into(),
+                        cookie_secret: "test-cookie-key-not-for-deployment".into(),
+                        redirect_url: "https://other.example:8443/oauth2/callback".into(),
+                        logout_path: "/logout".into(),
+                        session_ttl_seconds: 600,
+                        path: "/private".into(),
+                        ..Default::default()
+                    });
+                }
                 sites.push(item);
                 tasks.spawn(origin(origin_socket, name, false));
             }
@@ -464,15 +544,25 @@ mod tests {
             let _ = driver.await;
             server.await.unwrap().unwrap();
 
-            let (client, server) = connect(config(Some(1), b"http/1.1", true, false), "other.example").await;
-            let mut client = client.unwrap();
-            assert_eq!(client.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_2));
-            client.write_all(b"GET /route HTTP/1.1\r\nHost: other.example\r\nConnection: close\r\n\r\n").await.unwrap();
-            client.flush().await.unwrap();
-            let response = read_closed_tls_response(&mut client).await;
-            server.await.unwrap().unwrap();
-            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-            assert!(response.ends_with("other.example"), "{response}");
+            for (path, host, status, expected) in [
+                ("/private", "other.example", 421, "Use the configured HTTPS origin"),
+                ("/private", "other.example.:8443", 421, "Use the configured HTTPS origin"),
+                ("/private", "other-alias.example:8443", 421, "Use the configured HTTPS origin"),
+                ("/private", "other.example:8443", 401, "Login required"),
+                ("/oauth2/callback?code=unused&state=unused", "other.example:8443", 400, "this login was not started here"),
+                ("/logout", "other.example:8443", 405, "allow: POST"),
+                ("/route", "other.example:8443", 200, "other.example"),
+            ] {
+                let (client, server) = connect(config(Some(1), b"http/1.1", true, false), "other.example").await;
+                let mut client = client.unwrap();
+                assert_eq!(client.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_2));
+                client.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-Host: other.example:8443\r\nX-Forwarded-Proto: https\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                client.flush().await.unwrap();
+                let response = read_closed_tls_response(&mut client).await;
+                server.await.unwrap().unwrap();
+                assert!(response.starts_with(&format!("HTTP/1.1 {status}")), "{response}");
+                assert!(response.to_ascii_lowercase().contains(&expected.to_ascii_lowercase()), "{response}");
+            }
             while let Some(result) = tasks.join_next().await {
                 result.unwrap();
             }

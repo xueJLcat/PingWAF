@@ -124,6 +124,15 @@ problem still surfaces because the alert keeps recurring.
 
 ## Usage notes
 
+Custom ingress is not yet available in production. The isolated managed
+proxy requires an explicit HTTPS `redirect_url` whose hostname selects that
+site on its configured listener. The browser's original HTTPS origin must
+match the callback origin; forwarding headers and other aliases cannot
+substitute for it. Managed login and session cookies are scoped to the site
+UUID. Managed logout requires a same-origin POST and clears only that site's
+edge session, not the shared identity-provider session. The settings below
+describe legacy mode.
+
 - **PKCE (`S256`), `state` and `nonce` are all verified** on the way back;
   the ID token's signature is checked against the provider's JWKS keys, and
   `iss`, `aud` (the client id), `exp` (and `nbf`) and the `nonce` of this very

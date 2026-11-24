@@ -866,6 +866,15 @@ impl Plugin for Cache {
         if ![&Method::GET, &Method::HEAD, &*METHOD_PURGE].contains(&method) {
             return Ok(RequestPluginResult::Skipped);
         }
+        if method != &*METHOD_PURGE
+            && ctx.state.user_identity.is_some()
+            && req_header
+                .extensions
+                .get::<pingap_core::ManagedSiteContext>()
+                .is_some()
+        {
+            return Ok(RequestPluginResult::Skipped);
+        }
 
         // Check if request matches skip pattern (if configured)
         if let Some(skip) = &self.skip
@@ -1196,6 +1205,27 @@ mod tests {
             )]);
             rules.site_id = id.clone().into();
             let rules = Arc::new(rules);
+            let mut authenticated = crate::test_support::h1_session(
+                "GET",
+                "/static/a",
+                "example.com",
+            )
+            .await;
+            crate::test_support::pin_site(&mut authenticated, rules.clone());
+            let mut auth_ctx = Ctx::default();
+            auth_ctx.state.user_identity = Some("visitor".into());
+            assert_eq!(
+                cache
+                    .handle_request(
+                        cache.plugin_step,
+                        &mut authenticated,
+                        &mut auth_ctx
+                    )
+                    .await
+                    .unwrap(),
+                RequestPluginResult::Skipped,
+            );
+            assert!(!authenticated.cache.enabled());
             let mut get = crate::test_support::h1_session(
                 "GET",
                 "/static/a",

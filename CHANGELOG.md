@@ -30,6 +30,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Added
 
+- **Managed OIDC view validation.** In the isolated data-plane view, a
+  custom HTTPS site requires an explicit callback that selects that site.
+  Login state and sessions are scoped to the site and origin; logout clears
+  only the edge session. This does not enable custom ingress in production.
 - **Managed snapshot protocol groundwork.** Migration `000105` stores a
   deployment epoch and per-agent generation. A negotiated, authenticated
   session can request a complete, ordered snapshot; replaced sessions cannot
