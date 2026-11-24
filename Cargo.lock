@@ -5343,6 +5343,7 @@ dependencies = [
  "dhat",
  "flate2",
  "glob",
+ "h2",
  "hex",
  "http",
  "humantime",

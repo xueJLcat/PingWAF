@@ -181,6 +181,7 @@ edge = []
 
 [dev-dependencies]
 criterion = { workspace = true }
+h2 = "0.4"
 pretty_assertions = { workspace = true }
 prost = { workspace = true }
 rcgen = { workspace = true }

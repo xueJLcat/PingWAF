@@ -4,9 +4,16 @@ use std::{cmp::Reverse, collections::HashMap, path::Path, sync::Arc};
 
 use pingap_core::{ManagedSiteContext, ProxyTrust};
 use pingap_location::ServerLocationRoute;
-use pingap_proxy::{ManagedRequestSite, ManagedSiteSelector};
-use pingora::proxy::Session;
-use pingwaf_agent::managed::{Candidate, Compiled, CompiledSite, Listener};
+use pingap_proxy::{ManagedRequestSite, ManagedSiteSelector, Server};
+use pingora::{
+    apps::{HttpServerApp, HttpServerOptions, ReusedHttpStream},
+    protocols::http::{ServerSession, v2::server::H2Options},
+    proxy::{HttpProxy, Session},
+    server::ShutdownWatch,
+};
+use pingwaf_agent::managed::{
+    Candidate, Compiled, CompiledSite, Forwarding, Listener,
+};
 use uuid::Uuid;
 
 use super::convert_proxy_config;
@@ -79,17 +86,88 @@ impl ManagedSiteSelector for Selector {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod tests {
-    use super::*;
+/// Pingora's HTTP/2 dispatch spawns the per-stream `process_new_http` future
+/// independently of the connection. Fence at that boundary as well as around
+/// the transport so revocation drops live proxy requests, not just their client.
+struct AuthorizedProxy {
+    forwarding: Arc<Forwarding<Arc<View>>>,
+    app: Arc<HttpProxy<Server>>,
+}
+
+#[async_trait::async_trait]
+impl HttpServerApp for AuthorizedProxy {
+    async fn process_new_http(
+        self: &Arc<Self>,
+        session: ServerSession,
+        shutdown: &ShutdownWatch,
+    ) -> Option<ReusedHttpStream> {
+        self.forwarding
+            .run(|_| self.app.process_new_http(session, shutdown))
+            .await
+            .flatten()
+    }
+
+    fn h2_options(&self) -> Option<H2Options> {
+        self.app.h2_options()
+    }
+
+    fn server_options(&self) -> Option<&HttpServerOptions> {
+        self.app.server_options()
+    }
+}
+
+async fn serve_http(
+    forwarding: Forwarding<Arc<View>>,
+    tcp: tokio::net::TcpStream,
+    listener: Listener,
+    shutdown: ShutdownWatch,
+    h2c: bool,
+) -> Option<anyhow::Result<()>> {
     use pingora::{
         protocols::l4::stream::Stream, services::listening::Service,
     };
+
+    let Listener::Custom { port, .. } = listener else {
+        return Some(Err(anyhow::anyhow!(
+            "expected a custom ingress listener"
+        )));
+    };
+    let forwarding = Arc::new(forwarding);
+    forwarding
+        .run(|view| async {
+            let selector = Arc::new(Selector {
+                view: view.clone(),
+                listener,
+            });
+            let mut app = super::ingress::http_proxy(port, |server| {
+                server.with_managed_selector(selector)
+            })?;
+            if let Some(options) = app.server_options.as_mut() {
+                options.h2c = h2c;
+            }
+            let app = AuthorizedProxy {
+                forwarding: forwarding.clone(),
+                app: Arc::new(app),
+            };
+            Service::handle_event(
+                Box::new(Stream::from(tcp)),
+                Arc::new(app),
+                shutdown,
+            )
+            .await;
+            Ok(())
+        })
+        .await
+}
+
+#[cfg(target_os = "linux")]
+mod tests {
+    use super::*;
     use pingwaf_agent::managed::{AppliedState, PullWindow, Receiver};
     use pingwaf_proto::{
-        IngressProtocol, ManagedSite, ManagedSiteConfig, ManagedSnapshot,
-        RouteConfig, RuleBundle, Site, SiteIngress, UpstreamConfig,
-        UpstreamPeer,
+        CacheRule, IngressProtocol, ManagedSite, ManagedSiteConfig,
+        ManagedSnapshot, RouteConfig, RuleBundle, Site, SiteIngress,
+        UpstreamConfig, UpstreamPeer,
     };
     use prost::Message;
     use sha2::{Digest, Sha256};
@@ -149,24 +227,60 @@ mod tests {
         }
     }
 
+    fn apply(
+        sites: Vec<ManagedSite>,
+        cache_dir: &Path,
+    ) -> (Arc<AppliedState<Arc<View>>>, Uuid) {
+        let config = ManagedSiteConfig { sites }.encode_to_vec();
+        let session = Uuid::new_v4();
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        let received = PullWindow::start(&receiver)
+            .unwrap()
+            .receive(
+                &mut receiver,
+                ManagedSnapshot {
+                    session_id: session.to_string(),
+                    authority_epoch: Uuid::new_v4().to_string(),
+                    generation: 1,
+                    config_hash: hex::encode(Sha256::digest(&config)),
+                    config,
+                    lease_seconds: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let state = Arc::new(AppliedState::default());
+        state.start_session(session);
+        let pending = state.prepare(received).unwrap();
+        let view =
+            Arc::new(View::build(pending.candidate(), cache_dir).unwrap());
+        assert!(state.publish(pending, view).unwrap());
+        (state, session)
+    }
+
+    async fn read_origin_headers(io: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            assert!(request.len() < 8192);
+            match io.read_u8().await {
+                Ok(byte) => request.push(byte),
+                Err(err)
+                    if request.is_empty()
+                        && err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    break;
+                },
+                Err(err) => panic!("origin request: {err}"),
+            }
+        }
+        request
+    }
+
     async fn origin(socket: TcpListener, marker: &str) {
         loop {
             let (mut io, _) = socket.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                assert!(request.len() < 8192);
-                match io.read_u8().await {
-                    Ok(byte) => request.push(byte),
-                    Err(err)
-                        if request.is_empty()
-                            && err.kind()
-                                == std::io::ErrorKind::UnexpectedEof =>
-                    {
-                        break;
-                    },
-                    Err(err) => panic!("origin request: {err}"),
-                }
-            }
+            let request = read_origin_headers(&mut io).await;
             if request.is_empty() {
                 continue;
             } // TCP health probe.
@@ -211,82 +325,46 @@ mod tests {
                     tasks.spawn(origin(socket, marker));
                 }
             }
-            let config = ManagedSiteConfig { sites }.encode_to_vec();
-            let session = Uuid::new_v4();
-            let mut receiver = Receiver::default();
-            receiver.set_session(Some(session));
-            let received = PullWindow::start(&receiver)
-                .unwrap()
-                .receive(
-                    &mut receiver,
-                    ManagedSnapshot {
-                        session_id: session.to_string(),
-                        authority_epoch: Uuid::new_v4().to_string(),
-                        generation: 1,
-                        config_hash: hex::encode(Sha256::digest(&config)),
-                        config,
-                        lease_seconds: 30,
-                    },
-                )
-                .unwrap()
-                .unwrap();
-            let state = Arc::new(AppliedState::default());
-            state.start_session(session);
-            let pending = state.prepare(received).unwrap();
             let cache = tempfile::tempdir().unwrap();
-            let view = Arc::new(
-                View::build(pending.candidate(), cache.path()).unwrap(),
-            );
-            let a = view
-                .rules
-                .select(listener(endpoints[0].0.port()), "alias.example")
-                .unwrap()
-                .0;
-            let b = view
-                .rules
-                .select(listener(endpoints[1].0.port()), "shared.example")
-                .unwrap()
-                .0;
-            let a_origin = view.sites[&a].upstreams.get("same-pool").unwrap();
-            let b_origin = view.sites[&b].upstreams.get("same-pool").unwrap();
+            let (state, _) = apply(sites, cache.path());
+            let forwarded = state.forwarding().unwrap();
+            let [a_origin, b_origin] = forwarded
+                .run(|view| {
+                    let upstreams = [0, 1].map(|index| {
+                        let id = view
+                            .rules
+                            .select(
+                                listener(endpoints[index].0.port()),
+                                "alias.example",
+                            )
+                            .unwrap()
+                            .0;
+                        view.sites[&id].upstreams.get("same-pool").unwrap()
+                    });
+                    std::future::ready(upstreams)
+                })
+                .await
+                .unwrap();
             assert!(!Arc::ptr_eq(&a_origin, &b_origin));
             a_origin.run_health_check().await.unwrap();
             b_origin.run_health_check().await.unwrap();
-            assert!(state.publish(pending, view).unwrap());
 
             let mut clients = Vec::new();
             for (addr, proxy, marker) in endpoints {
                 let state = state.clone();
                 tasks.spawn(async move {
                     let (tcp, _) = proxy.accept().await.unwrap();
-                    state
-                        .forwarding()
-                        .unwrap()
-                        .run(|view| async move {
-                            let id = listener(addr.port());
-                            let app = super::super::ingress::http_proxy(
-                                addr.port(),
-                                |server| {
-                                    server.with_managed_selector(Arc::new(
-                                        Selector {
-                                            view: view.clone(),
-                                            listener: id,
-                                        },
-                                    ))
-                                },
-                            )
-                            .unwrap();
-                            let (_shutdown, watch) =
-                                tokio::sync::watch::channel(false);
-                            Service::handle_event(
-                                Box::new(Stream::from(tcp)),
-                                Arc::new(app),
-                                watch,
-                            )
-                            .await;
-                        })
-                        .await
-                        .unwrap();
+                    let (_shutdown, watch) = tokio::sync::watch::channel(false);
+                    serve_http(
+                        state.forwarding().unwrap(),
+                        tcp,
+                        listener(addr.port()),
+                        watch,
+                        false,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
                 });
                 clients.push((addr, marker));
             }
@@ -299,6 +377,110 @@ mod tests {
                 } else {
                     assert!(response.starts_with("HTTP/1.1 421"), "{response}");
                 }
+            }
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn revocation_stops_actual_http1_and_concurrent_http2_origin_requests()
+     {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut tasks = JoinSet::new();
+            let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = socket.local_addr().unwrap();
+            let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let cache = tempfile::tempdir().unwrap();
+            let mut managed =
+                site(Some(addr.port()), origin.local_addr().unwrap());
+            managed
+                .site
+                .as_mut()
+                .unwrap()
+                .rules
+                .as_mut()
+                .unwrap()
+                .cache_rules
+                .push(CacheRule {
+                    match_expression:
+                        r#"http.request.uri.path starts_with "/""#.into(),
+                    edge_ttl_seconds: 60,
+                    cache_eligible: true,
+                    enabled: true,
+                    ..Default::default()
+                });
+            let (state, session) = apply(vec![managed], cache.path());
+            let (h1, accepted) =
+                tokio::join!(TcpStream::connect(addr), socket.accept());
+            let mut h1 = h1.unwrap();
+            let h1_server = accepted.unwrap().0;
+            let (h2, accepted) =
+                tokio::join!(TcpStream::connect(addr), socket.accept());
+            let h2_server = accepted.unwrap().0;
+            let (_shutdown, watch) = tokio::sync::watch::channel(false);
+            for (tcp, h2c) in [(h1_server, false), (h2_server, true)] {
+                let forwarded = state.forwarding().unwrap();
+                let watch = watch.clone();
+                tasks.spawn(async move {
+                    assert!(
+                        serve_http(
+                            forwarded,
+                            tcp,
+                            listener(addr.port()),
+                            watch,
+                            h2c
+                        )
+                        .await
+                        .is_none()
+                    );
+                });
+            }
+            h1.write_all(b"GET /route HTTP/1.1\r\nHost: alias.example\r\n\r\n")
+                .await
+                .unwrap();
+            let (mut h2, conn) =
+                h2::client::handshake(h2.unwrap()).await.unwrap();
+            tasks.spawn(async move {
+                let _ = conn.await;
+            });
+            let mut responses = Vec::new();
+            for _ in 0..2 {
+                h2 = h2.ready().await.unwrap();
+                let (response, _) = h2
+                    .send_request(
+                        http::Request::builder()
+                            .uri("http://alias.example/route")
+                            .body(())
+                            .unwrap(),
+                        true,
+                    )
+                    .unwrap();
+                responses.push(response);
+            }
+            let mut upstreams = Vec::new();
+            for _ in 0..3 {
+                let (mut io, _) = origin.accept().await.unwrap();
+                assert!(
+                    read_origin_headers(&mut io)
+                        .await
+                        .starts_with(b"GET /first HTTP/1.1\r\n")
+                );
+                upstreams.push(io);
+            }
+            // The origin has not sent any response. Simultaneous active streams
+            // must stop at their actual origin sockets before the lease times out.
+            state.end_session(session);
+            assert!(state.forwarding().is_none());
+            for mut io in upstreams {
+                assert_eq!(io.read(&mut [0u8; 1]).await.unwrap(), 0);
+            }
+            assert_eq!(h1.read(&mut [0u8; 1]).await.unwrap(), 0);
+            for response in responses {
+                assert!(response.await.is_err());
             }
             while let Some(result) = tasks.join_next().await {
                 result.unwrap();

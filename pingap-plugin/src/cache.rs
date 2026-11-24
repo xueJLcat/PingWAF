@@ -1094,7 +1094,15 @@ impl Plugin for Cache {
             self.http_cache,
             self.eviction,
             self.predictor,
-            self.lock,
+            // An authorized proxy can drop the in-flight future on lease
+            // revocation. Pingora's write permit requires explicit completion
+            // and panics on an unfinished drop in debug builds. Do not give
+            // managed requests that permit until cancellation-aware cache
+            // finalization is available. Detached stale-while-revalidate
+            // also needs this write permit and cannot outlive the lease.
+            self.lock.filter(|_| {
+                !site_rules.as_ref().is_some_and(|site| site.managed)
+            }),
             self.cache_option_overrides(),
         );
 
@@ -1206,6 +1214,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(get.cache.enabled());
+            assert!(get.cache.lock_duration().is_none());
             cache
                 .handle_request(cache.plugin_step, &mut purge, &mut purge_ctx)
                 .await
