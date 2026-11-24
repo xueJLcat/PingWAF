@@ -5,9 +5,9 @@ use chrono::Utc;
 use pingwaf_proto::ManagedSnapshot;
 use prost::Message;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    DbBackend, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder,
-    RuntimeErr, Statement, TransactionTrait,
+    AccessMode, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbBackend, DbErr, EntityTrait, IsolationLevel,
+    QueryFilter, QueryOrder, RuntimeErr, Statement, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tonic::Status;
@@ -48,6 +48,73 @@ pub(super) async fn build_snapshot(
         }
     }
     Err(Status::aborted("configuration changed; retry snapshot"))
+}
+
+/// Refresh the report scope even on an already-open stream. Registration or
+/// site changes may have been committed by a different control-plane replica.
+pub(super) async fn heartbeat_scope(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    session_id: Uuid,
+) -> Result<Vec<Uuid>, Status> {
+    async fn read_scope(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Vec<Uuid>, BuildError> {
+        let tx = db
+            .begin_with_config(
+                Some(IsolationLevel::RepeatableRead),
+                Some(AccessMode::ReadOnly),
+            )
+            .await?;
+        require_session(&tx, agent_id, session_id).await?;
+        let (agent, owner_id) = authorize(&tx, agent_id).await?;
+        let sites = visible_sites(&tx, &agent, owner_id).await?;
+        tx.commit().await?;
+        Ok(sites.into_iter().map(|site| site.id).collect())
+    }
+    status_for_scope(agent_id, read_scope(db, agent_id, session_id).await)
+}
+
+pub(super) async fn authorize_session(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    session_id: Uuid,
+) -> Result<agent::Model, Status> {
+    async fn read_identity(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<agent::Model, BuildError> {
+        let tx = db
+            .begin_with_config(
+                Some(IsolationLevel::RepeatableRead),
+                Some(AccessMode::ReadOnly),
+            )
+            .await?;
+        require_session(&tx, agent_id, session_id).await?;
+        let (row, _) = authorize(&tx, agent_id).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+    status_for_scope(agent_id, read_identity(db, agent_id, session_id).await)
+}
+
+fn status_for_scope<T>(
+    agent_id: Uuid,
+    result: Result<T, BuildError>,
+) -> Result<T, Status> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(BuildError::Forbidden) => {
+            Err(Status::permission_denied("agent is not authorized"))
+        },
+        Err(err) => {
+            tracing::warn!(%agent_id, error = ?err, "managed authorization unavailable");
+            Err(Status::internal("authorization unavailable"))
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -93,9 +160,7 @@ async fn build_in_view(
     agent_id: Uuid,
     session_id: Uuid,
 ) -> Result<ManagedSnapshot, BuildError> {
-    if current_session(tx, agent_id).await? != Some(session_id) {
-        return Err(BuildError::Forbidden);
-    }
+    require_session(tx, agent_id, session_id).await?;
     let (agent, owner_id) = authorize(tx, agent_id).await?;
     let sites = visible_sites(tx, &agent, owner_id).await?;
     let config = assemble_managed_config(tx, &sites).await?;
@@ -112,6 +177,17 @@ async fn build_in_view(
         config,
         session_id: session_id.to_string(),
     })
+}
+
+async fn require_session(
+    tx: &DatabaseTransaction,
+    agent_id: Uuid,
+    session_id: Uuid,
+) -> Result<(), BuildError> {
+    if current_session(tx, agent_id).await? != Some(session_id) {
+        return Err(BuildError::Forbidden);
+    }
+    Ok(())
 }
 
 async fn authorize(
@@ -237,11 +313,11 @@ pub(super) async fn register_session(
     Ok(())
 }
 
-async fn current_session(
-    tx: &DatabaseTransaction,
+pub(super) async fn current_session(
+    db: &impl ConnectionTrait,
     agent_id: Uuid,
 ) -> Result<Option<Uuid>, DbErr> {
-    let row = tx.query_one(Statement::from_sql_and_values(
+    let row = db.query_one(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT session_id FROM managed_config_generations WHERE agent_id = $1",
         [agent_id.into()],
@@ -282,7 +358,8 @@ pub(super) async fn check_postgres(
 ) {
     use pingwaf_proto::{
         control_plane_server::ControlPlane, GetManagedSnapshotRequest,
-        ManagedSiteConfig, RegisterAgentRequest, MANAGED_PROTOCOL_VERSION,
+        GetSiteConfigRequest, ManagedSiteConfig, RegisterAgentRequest,
+        SyncRulesRequest, MANAGED_PROTOCOL_VERSION,
     };
     use tonic::{Code, Request};
 
@@ -309,16 +386,50 @@ pub(super) async fn check_postgres(
     let unauthorized = register(MANAGED_PROTOCOL_VERSION + 1).await;
     assert_eq!(unauthorized.managed_protocol_version, 0);
     assert_eq!(
-        fetch(unauthorized.agent_token).await.unwrap_err().code(),
+        fetch(unauthorized.agent_token.clone())
+            .await
+            .unwrap_err()
+            .code(),
         Code::PermissionDenied
     );
 
     let managed = register(MANAGED_PROTOCOL_VERSION).await;
     assert_eq!(managed.managed_protocol_version, MANAGED_PROTOCOL_VERSION);
     assert_eq!(managed.agent_id, unauthorized.agent_id);
-    assert_eq!(managed.initial_config.unwrap().sites.len(), 1);
+    assert!(managed.initial_config.is_none());
     let token = managed.agent_token;
     let id = Uuid::parse_str(&managed.agent_id).unwrap();
+    let pull_legacy = |agent_token| async {
+        service
+            .get_site_config(Request::new(GetSiteConfigRequest {
+                agent_token,
+                ..Default::default()
+            }))
+            .await
+    };
+    assert_eq!(
+        pull_legacy(token.clone()).await.unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        pull_legacy(unauthorized.agent_token)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        service
+            .sync_rules(Request::new(SyncRulesRequest {
+                agent_token: token.clone(),
+                ..Default::default()
+            }))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        Code::FailedPrecondition
+    );
     let decode = |snapshot: &ManagedSnapshot| {
         assert_eq!(
             snapshot.config_hash,
@@ -329,6 +440,11 @@ pub(super) async fn check_postgres(
     };
     let first = fetch(token.clone()).await.unwrap();
     let session = Uuid::parse_str(&first.session_id).unwrap();
+    assert_eq!(first.session_id, managed.managed_session_id);
+    assert_eq!(
+        heartbeat_scope(db, id, session).await.unwrap(),
+        [default.id]
+    );
     assert_eq!(first.generation, 1);
     let config = decode(&first);
     assert_eq!(config.sites.len(), 1);
@@ -416,6 +532,13 @@ pub(super) async fn check_postgres(
     )
     .await;
     let assigned = fetch(token.clone()).await.unwrap();
+    assert_eq!(heartbeat_scope(db, id, session).await.unwrap(), [custom.id]);
+    let row = service.authorize(&token).await.unwrap();
+    assert!(service
+        .legacy_delivery_sites(&row)
+        .await
+        .unwrap()
+        .is_empty());
     assert!(assigned.generation > latest.generation);
     assert_eq!(assigned.authority_epoch, first.authority_epoch);
     let config = decode(&assigned);
@@ -452,6 +575,7 @@ pub(super) async fn check_postgres(
     )
     .await;
     let revoked = fetch(token.clone()).await.unwrap();
+    assert!(heartbeat_scope(db, id, session).await.unwrap().is_empty());
     assert_eq!(revoked.generation, assigned.generation + 1);
     assert!(decode(&revoked).sites.is_empty());
     exec(
@@ -472,15 +596,105 @@ pub(super) async fn check_postgres(
     let next = register(MANAGED_PROTOCOL_VERSION).await;
     assert_eq!(next.agent_id, id.to_string());
     assert_eq!(
+        heartbeat_scope(db, id, session).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        service.authorize(&token).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
         fetch(token).await.unwrap_err().code(),
         Code::PermissionDenied
     );
     let renewed = fetch(next.agent_token.clone()).await.unwrap();
     assert_ne!(renewed.session_id, first.session_id);
     assert_eq!(renewed.generation, revoked.generation + 1);
-    assert_eq!(register(0).await.agent_id, id.to_string());
+    check_stream(db, id, &next.agent_token, &register).await;
     assert_eq!(
         fetch(next.agent_token).await.unwrap_err().code(),
         Code::PermissionDenied
     );
+}
+
+#[cfg(test)]
+async fn check_stream<F, Fut>(
+    db: &DatabaseConnection,
+    id: Uuid,
+    agent_token: &str,
+    register: &F,
+) where
+    F: Fn(u32) -> Fut,
+    Fut: std::future::Future<Output = pingwaf_proto::RegisterAgentResponse>,
+{
+    use pingwaf_proto::{
+        control_plane_client::ControlPlaneClient,
+        control_plane_server::ControlPlaneServer, server_command::Payload,
+        AgentHeartbeat,
+    };
+    use tokio::{
+        net::TcpListener,
+        sync::mpsc,
+        time::{timeout, Duration},
+    };
+    use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+
+    // A separate service and registry share only the database with the
+    // registration endpoint. The network namespace only has loopback.
+    let stream_registry = super::AgentRegistry::new();
+    let service = super::ControlPlaneService::new(
+        db.clone(),
+        std::sync::Arc::new(crate::config::ServerConfig::default()),
+        stream_registry.clone(),
+        None,
+        super::CacheStatusRegistry::new(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(ControlPlaneServer::new(service))
+            .serve_with_incoming(TcpListenerStream::new(listener)),
+    );
+    let result = timeout(Duration::from_secs(8), async {
+        let mut client = ControlPlaneClient::connect(endpoint).await.unwrap();
+        let heartbeat = AgentHeartbeat {
+            agent_id: id.to_string(),
+            agent_token: agent_token.into(),
+            config_hash: "not-an-applied-snapshot".into(),
+            last_config_sync_at: super::config::now_timestamp(),
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(heartbeat.clone()).await.unwrap();
+        let mut stream = client
+            .heartbeat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(super::repush_agent_config(db, &stream_registry, id)
+            .await
+            .unwrap());
+        assert!(matches!(
+            stream.message().await.unwrap().unwrap().payload,
+            Some(Payload::ManagedConfigChanged(_))
+        ));
+        let legacy = register(0).await;
+        assert_eq!(legacy.agent_id, id.to_string());
+        assert!(legacy.managed_session_id.is_empty());
+        assert!(legacy.initial_config.is_some());
+        tx.send(heartbeat).await.unwrap();
+        assert!(stream.message().await.unwrap().is_none());
+        assert!(!stream_registry.is_connected(&id).await);
+        let row = agent::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.config_hash.is_none());
+        assert!(row.last_config_sync_at.is_none());
+    })
+    .await;
+    server.abort();
+    result.expect("managed stream round trip timed out");
 }

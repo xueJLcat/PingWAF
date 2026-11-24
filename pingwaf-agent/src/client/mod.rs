@@ -985,6 +985,9 @@ impl ControlPlaneClient {
                 // heartbeat's pending-log counters.
                 flush_notify.notify_one();
             },
+            Some(proto::server_command::Payload::ManagedConfigChanged(_)) => {
+                // This client has not negotiated the managed protocol.
+            },
             None => {
                 debug!("Received server command with no payload");
             },

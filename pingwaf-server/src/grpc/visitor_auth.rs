@@ -122,7 +122,8 @@ async fn agent_site_ids(
     service: &ControlPlaneService,
     agent_row: &crate::models::agent::Model,
 ) -> Result<Vec<Uuid>, Status> {
-    let sites = service.visible_sites(agent_row).await?;
+    // These legacy RPCs identify sites by hostname, not listener and UUID.
+    let sites = service.legacy_delivery_sites(agent_row).await?;
     Ok(sites.into_iter().map(|row| row.id).collect())
 }
 
@@ -152,6 +153,7 @@ async fn resolve_site(
     // got wrong by a dialect detail.
     let rows = site::Entity::find()
         .filter(site::Column::Id.is_in(allowed))
+        .filter(site::Column::IngressPort.is_null())
         .all(&service.db)
         .await
         .map_err(db_status)?;

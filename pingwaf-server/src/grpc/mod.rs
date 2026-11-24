@@ -93,24 +93,6 @@ where
     Ok(sites.iter().map(|row| row.id).collect())
 }
 
-/// Builds the `UpdateSite` payload one agent should receive for a change on
-/// `site_id`: its bound site's bundle, or the full visible bundle for an
-/// unbound agent. `None` when the agent does not serve the site.
-async fn update_payload_for_agent(
-    db: &DatabaseConnection,
-    agent_row: &agent::Model,
-    site_id: Uuid,
-) -> Result<Option<SiteConfig>, DbErr> {
-    let visible = agent_visible_site_ids(db, agent_row).await?;
-    if !visible.contains(&site_id) {
-        return Ok(None);
-    }
-    // Always use the legacy builder, even for a single bound site: moving it
-    // to custom ingress must send an empty replacement, not its history bundle.
-    let config = build_site_config(db, Some(&visible)).await?;
-    Ok(Some(config))
-}
-
 /// The command that replaces an agent's configuration with `site_config`.
 fn update_site_command(site_config: SiteConfig) -> ServerCommand {
     ServerCommand {
@@ -135,6 +117,9 @@ pub(crate) async fn repush_agent_config(
     registry: &AgentRegistry,
     agent_id: Uuid,
 ) -> Result<bool, DbErr> {
+    if let Some(delivered) = registry.hint_managed_config(&agent_id).await {
+        return Ok(delivered);
+    }
     let Some(row) = agent::Entity::find_by_id(agent_id).one(db).await? else {
         return Ok(false);
     };
@@ -151,7 +136,8 @@ pub(crate) async fn repush_agent_config(
 /// to the caller. The REST API handler has already committed the change; a push
 /// that does not arrive is repaired from the heartbeat, which reports the hash
 /// the agent runs — one that stays behind the hash issued here gets the
-/// configuration pushed again (see [`repush_agent_config`]). Agents never pull.
+/// configuration pushed again (see [`repush_agent_config`]). Managed streams
+/// get only a pull hint; this queue cannot advance their applied generation.
 ///
 /// Also records a configuration version (unless the latest
 /// version already carries this fingerprint), which is what makes the console
@@ -203,23 +189,33 @@ pub async fn notify_config_changed(
 
     let mut delivered = 0usize;
     for row in &agents {
-        let payload =
-            match update_payload_for_agent(&state.db, row, site_id).await {
-                Ok(payload) => payload,
-                Err(err) => {
-                    tracing::warn!(
-                        agent_id = %row.id,
-                        %site_id,
-                        error = %err,
-                        "failed to build the config payload for an agent"
-                    );
-                    continue;
-                },
-            };
-        let Some(site_config_for_agent) = payload else {
-            continue;
+        let visible = match agent_visible_site_ids(&state.db, row).await {
+            Ok(visible) if visible.contains(&site_id) => visible,
+            Ok(_) => continue,
+            Err(err) => {
+                tracing::warn!(agent_id = %row.id, %site_id, error = %err, "failed to resolve the sites of an agent");
+                continue;
+            },
         };
-        let command = update_site_command(site_config_for_agent);
+        if let Some(hinted) = state.agents.hint_managed_config(&row.id).await {
+            delivered += usize::from(hinted);
+            continue;
+        }
+        // Even for a single binding use the legacy builder: moving the site
+        // to custom ingress must send an empty replacement, not its history.
+        let payload = match build_site_config(&state.db, Some(&visible)).await {
+            Ok(payload) => payload,
+            Err(err) => {
+                tracing::warn!(
+                    agent_id = %row.id,
+                    %site_id,
+                    error = %err,
+                    "failed to build the config payload for an agent"
+                );
+                continue;
+            },
+        };
+        let command = update_site_command(payload);
         if state.agents.send_command(&row.id, command).await {
             delivered += 1;
         }
@@ -353,6 +349,9 @@ async fn push_visible_bundle(
     visible: &[Uuid],
     bundle_cache: &mut HashMap<Vec<Uuid>, SiteConfig>,
 ) -> bool {
+    if let Some(delivered) = state.agents.hint_managed_config(&row.id).await {
+        return delivered;
+    }
     let payload = match bundle_cache.get(visible) {
         Some(config) => config.clone(),
         None => {
@@ -592,7 +591,7 @@ pub(crate) async fn check_legacy_ingress_delivery(
 
     let agent_id = Uuid::parse_str(&registered.agent_id).unwrap();
     let (sender, mut rx) = tokio::sync::mpsc::channel(1);
-    registry.connect(agent_id, sender).await;
+    registry.connect_session(agent_id, sender, false).await;
     assert!(repush_agent_config(db, &registry, agent_id).await.unwrap());
     let Some(Payload::UpdateSite(update)) = rx.try_recv().unwrap().payload
     else {
@@ -602,18 +601,19 @@ pub(crate) async fn check_legacy_ingress_delivery(
 
     // The legacy single-binding branch must send an authoritative empty
     // replacement (discarding a previously served site), not silence.
-    let mut row = agent::Entity::find_by_id(agent_id)
-        .one(db)
-        .await
-        .unwrap()
-        .unwrap();
-    row.site_id = Some(custom.id);
-    assert!(update_payload_for_agent(db, &row, custom.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .sites
-        .is_empty());
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE agents SET site_id = $1 WHERE id = $2",
+        [custom.id.into(), agent_id.into()],
+    ))
+    .await
+    .unwrap();
+    assert!(repush_agent_config(db, &registry, agent_id).await.unwrap());
+    let Some(Payload::UpdateSite(update)) = rx.try_recv().unwrap().payload
+    else {
+        panic!("expected an authoritative empty legacy update");
+    };
+    assert!(update.site_config.unwrap().sites.is_empty());
 
     managed::check_postgres(db, &service, raw_key, key_id, default, custom)
         .await;

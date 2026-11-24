@@ -113,8 +113,9 @@ message RegisterAgentResponse {
   string agent_id = 1;
   string agent_token = 2;  // JWT for subsequent communication
   int64 heartbeat_interval_seconds = 3;
-  SiteConfig initial_config = 4;
+  SiteConfig initial_config = 4; // Legacy only
   uint32 managed_protocol_version = 5; // 0 = not negotiated
+  string managed_session_id = 6; // Empty in legacy mode
 }
 
 message AgentHeartbeat {
@@ -304,6 +305,7 @@ message ServerCommand {
     UpdateSiteCommand update_site = 15;
     RestartAgentCommand restart_agent = 16;
     FlushLogsCommand flush_logs = 17;
+    ManagedConfigChangedCommand managed_config_changed = 18;
   }
 }
 
@@ -317,7 +319,11 @@ enum CommandType {
   COMMAND_UPDATE_SITE = 6;
   COMMAND_RESTART_AGENT = 7;
   COMMAND_FLUSH_LOGS = 8;
+  COMMAND_MANAGED_CONFIG_CHANGED = 9;
 }
+
+// An advisory pull hint. Carries neither configuration nor authorization.
+message ManagedConfigChangedCommand {}
 
 message RuleUpdateCommand {
   string site_id = 1;

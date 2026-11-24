@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
-    server_command::Payload, IngressBindState, IngressListeners,
-    IngressProtocol, ServerCommand,
+    server_command::Payload, CommandType, IngressBindState, IngressListeners,
+    IngressProtocol, ManagedConfigChangedCommand, ServerCommand,
 };
 use pingwaf_proto::MAX_INGRESS_LISTENERS;
 use tokio::sync::{mpsc, RwLock};
@@ -50,6 +50,7 @@ pub const CONFIG_REPUSH_COOLDOWN_MAX: Duration = Duration::from_secs(600);
 
 struct Connection {
     sender: mpsc::Sender<ServerCommand>,
+    managed: bool,
     connected_at: DateTime<Utc>,
     /// Monotonic per-registry stream id. Teardown only removes the entry
     /// when this id still matches, so a stale stream finishing after the
@@ -114,6 +115,27 @@ fn update_site_hash(command: &ServerCommand) -> Option<&str> {
             .as_ref()
             .map(|config| config.config_hash.as_str()),
         _ => None,
+    }
+}
+
+fn is_config_command(command: &ServerCommand) -> bool {
+    matches!(
+        command.payload,
+        Some(
+            Payload::RuleUpdate(_)
+                | Payload::ConfigReload(_)
+                | Payload::UpdateSite(_)
+        )
+    )
+}
+
+fn config_changed(command: ServerCommand) -> ServerCommand {
+    ServerCommand {
+        r#type: CommandType::CommandManagedConfigChanged as i32,
+        payload: Some(Payload::ManagedConfigChanged(
+            ManagedConfigChangedCommand {},
+        )),
+        ..command
     }
 }
 
@@ -199,10 +221,11 @@ impl AgentRegistry {
 
     /// Attaches a freshly opened heartbeat stream and returns everything that
     /// was queued while the agent was away.
-    pub async fn connect(
+    pub(super) async fn connect_session(
         &self,
         agent_id: Uuid,
         sender: mpsc::Sender<ServerCommand>,
+        managed: bool,
     ) -> (u64, VecDeque<ServerCommand>) {
         let mut inner = self.inner.write().await;
         inner.next_generation = inner.next_generation.wrapping_add(1);
@@ -211,6 +234,7 @@ impl AgentRegistry {
             agent_id,
             Connection {
                 sender,
+                managed,
                 connected_at: Utc::now(),
                 generation,
                 ingress: None,
@@ -221,7 +245,12 @@ impl AgentRegistry {
         // them.
         inner.metrics.remove(&agent_id);
         inner.apply_errors.remove(&agent_id);
-        let drained = inner.pending.remove(&agent_id).unwrap_or_default();
+        let mut drained = inner.pending.remove(&agent_id).unwrap_or_default();
+        if managed {
+            // The initial pull is authoritative; queued config is obsolete.
+            drained.retain(|command| !is_config_command(command));
+            inner.config.remove(&agent_id);
+        }
         if !drained.is_empty() {
             tracing::info!(
                 %agent_id,
@@ -230,6 +259,44 @@ impl AgentRegistry {
             );
         }
         (generation, drained)
+    }
+
+    #[cfg(test)]
+    async fn connect(
+        &self,
+        agent_id: Uuid,
+        sender: mpsc::Sender<ServerCommand>,
+    ) -> (u64, VecDeque<ServerCommand>) {
+        self.connect_session(agent_id, sender, false).await
+    }
+
+    pub(super) async fn is_current_stream(
+        &self,
+        agent_id: Uuid,
+        generation: u64,
+    ) -> bool {
+        self.inner
+            .read()
+            .await
+            .connected
+            .get(&agent_id)
+            .is_some_and(|c| c.generation == generation)
+    }
+
+    /// `None` means this replica has no managed stream for the node. A full
+    /// or closed queue returns `Some(false)` rather than queueing old config.
+    pub(super) async fn hint_managed_config(
+        &self,
+        agent_id: &Uuid,
+    ) -> Option<bool> {
+        let inner = self.inner.read().await;
+        let connection = inner.connected.get(agent_id).filter(|c| c.managed)?;
+        let hint = config_changed(ServerCommand {
+            command_id: Uuid::new_v4().to_string(),
+            issued_at: super::config::now_timestamp(),
+            ..Default::default()
+        });
+        Some(connection.sender.try_send(hint).is_ok())
     }
 
     /// Drops the connection when a heartbeat stream ends. Only the stream
@@ -489,6 +556,9 @@ impl AgentRegistry {
             return;
         };
         let mut inner = self.inner.write().await;
+        if inner.connected.get(agent_id).is_some_and(|c| c.managed) {
+            return;
+        }
         if let Some(queue) = inner.pending.get_mut(agent_id) {
             queue.retain(|queued| update_site_hash(queued).is_none());
         }
@@ -543,12 +613,19 @@ impl AgentRegistry {
 
         // Grab the sender while holding the read lock only: `send().await`
         // must not block other registry operations.
-        let sender = {
+        let connection = {
             let inner = self.inner.read().await;
-            inner.connected.get(agent_id).map(|c| c.sender.clone())
+            inner
+                .connected
+                .get(agent_id)
+                .map(|c| (c.sender.clone(), c.managed))
         };
 
-        if let Some(sender) = sender {
+        if let Some((sender, managed)) = connection {
+            if managed && is_config_command(&command) {
+                // Lost hints are repaired by periodic pulls, never replayed.
+                return sender.try_send(config_changed(command)).is_ok();
+            }
             match sender.try_send(command) {
                 Ok(()) => {
                     tracing::debug!(%agent_id, "command pushed to agent");
@@ -581,12 +658,18 @@ impl AgentRegistry {
         agent_id: &Uuid,
         command: ServerCommand,
     ) -> bool {
-        let sender = {
+        let connection = {
             let inner = self.inner.read().await;
-            inner.connected.get(agent_id).map(|c| c.sender.clone())
+            inner
+                .connected
+                .get(agent_id)
+                .map(|c| (c.sender.clone(), c.managed))
         };
-        match sender {
-            Some(sender) => sender.try_send(command).is_ok(),
+        match connection {
+            Some((sender, true)) if is_config_command(&command) => {
+                sender.try_send(config_changed(command)).is_ok()
+            },
+            Some((sender, _)) => sender.try_send(command).is_ok(),
             None => false,
         }
     }
@@ -637,6 +720,54 @@ impl AgentRegistry {
 mod tests {
     use super::*;
     use pingwaf_proto::control_plane::RestartAgentCommand;
+
+    #[tokio::test]
+    async fn managed_stream_discards_queued_configs_and_only_gets_live_hints() {
+        let registry = AgentRegistry::new();
+        let agent = Uuid::new_v4();
+        let reload = ServerCommand {
+            payload: Some(Payload::ConfigReload(
+                pingwaf_proto::ConfigReloadCommand::default(),
+            )),
+            ..Default::default()
+        };
+        let incremental = ServerCommand {
+            payload: Some(Payload::RuleUpdate(
+                pingwaf_proto::RuleUpdateCommand::default(),
+            )),
+            ..Default::default()
+        };
+        let replacements = [incremental, reload, update_site("legacy")];
+        for command in &replacements {
+            assert!(!registry.send_command(&agent, command.clone()).await);
+        }
+        assert!(!registry.send_command(&agent, restart("operator")).await);
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (stream, queued) =
+            registry.connect_session(agent, sender, true).await;
+        assert!(registry.is_current_stream(agent, stream).await);
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(queued[0].payload, Some(Payload::RestartAgent(_))));
+        for command in replacements {
+            assert!(registry.send_command(&agent, command.clone()).await);
+            assert!(!registry.send_command(&agent, command).await);
+            assert_eq!(registry.pending_count(&agent).await, 0);
+            let hint = receiver.try_recv().unwrap();
+            assert_eq!(
+                hint.r#type,
+                CommandType::CommandManagedConfigChanged as i32
+            );
+            assert!(matches!(
+                hint.payload,
+                Some(Payload::ManagedConfigChanged(_))
+            ));
+        }
+        let (sender, _) = mpsc::channel(1);
+        let (next, queued) = registry.connect(agent, sender).await;
+        assert!(!registry.is_current_stream(agent, stream).await);
+        assert!(registry.is_current_stream(agent, next).await);
+        assert!(queued.is_empty());
+    }
 
     fn restart(reason: &str) -> ServerCommand {
         ServerCommand {

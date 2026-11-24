@@ -44,7 +44,7 @@ use crate::api::capabilities::{
 };
 use crate::api::keys::{authenticate_api_key, key_allows_agent};
 use crate::api::ssl::cert_status;
-use crate::auth::jwt::{create_agent_token, verify_agent_token};
+use crate::auth::jwt::{create_agent_token, verify_agent_token, Claims};
 use crate::config::ServerConfig;
 use crate::es::{
     AccessLogDocument, ElasticsearchClient, SecurityEventDocument,
@@ -175,14 +175,31 @@ impl ControlPlaneService {
         &self,
         token: &str,
     ) -> Result<agent::Model, Status> {
-        if token.trim().is_empty() {
-            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
-        }
-        let claims = verify_agent_token(token, &self.config.jwt_secret)
-            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        let claims = self.agent_claims(token)?;
+        self.authorize_claims(&claims).await
+    }
+
+    async fn authorize_claims(
+        &self,
+        claims: &Claims,
+    ) -> Result<agent::Model, Status> {
         let agent_id = claims
             .subject_id()
             .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        let session = managed_session_id(claims)?;
+        if let Some(session) = session {
+            return managed::authorize_session(&self.db, agent_id, session)
+                .await;
+        }
+        if managed::current_session(&self.db, agent_id)
+            .await
+            .map_err(db_status)?
+            .is_some()
+        {
+            return Err(Status::permission_denied(
+                "legacy session was replaced",
+            ));
+        }
 
         let row = agent::Entity::find_by_id(agent_id)
             .one(&self.db)
@@ -213,6 +230,28 @@ impl ControlPlaneService {
         Ok(row)
     }
 
+    fn agent_claims(&self, token: &str) -> Result<Claims, Status> {
+        let claims = verify_agent_token(token, &self.config.jwt_secret)
+            .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        if claims.is_expired() {
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        }
+        Ok(claims)
+    }
+
+    async fn require_legacy_session(
+        &self,
+        token: &str,
+    ) -> Result<agent::Model, Status> {
+        let claims = self.agent_claims(token)?;
+        if claims.jti.is_some() {
+            return Err(Status::failed_precondition(
+                "use the managed snapshot RPC",
+            ));
+        }
+        self.authorize_claims(&claims).await
+    }
+
     /// Reads the agent token from the `x-agent-token` request metadata, the
     /// transport-level credential for the client-streaming ship RPCs (their
     /// message bodies carry no token field).
@@ -228,9 +267,7 @@ impl ControlPlaneService {
     /// Sites this agent is allowed to see: its own binding, or every site owned
     /// by the user that issued its API key.
     ///
-    /// `pub(crate)` because the visitor-auth RPCs in `grpc/visitor_auth.rs`
-    /// scope their answers by the same set.
-    pub(crate) async fn visible_sites(
+    async fn visible_sites(
         &self,
         row: &agent::Model,
     ) -> Result<Vec<site::Model>, Status> {
@@ -433,7 +470,7 @@ impl ControlPlaneService {
 
     /// For legacy per-site requests only. Keep these rows from the same read
     /// that checked the ingress; `SyncRules` builds from them directly.
-    async fn legacy_delivery_sites(
+    pub(super) async fn legacy_delivery_sites(
         &self,
         row: &agent::Model,
     ) -> Result<Vec<site::Model>, Status> {
@@ -539,6 +576,12 @@ impl ControlPlaneTrait for ControlPlaneService {
                 active.private_ip = Set(optional(&payload.private_ip));
                 active.peer_ip = Set(peer_ip.clone());
                 active.peer_ip_seen_at = Set(peer_ip.as_ref().map(|_| now));
+                if session_id.is_some() {
+                    // A new managed session has no applied configuration yet.
+                    active.config_hash = Set(None);
+                    active.last_config_sync_at = Set(None);
+                    active.last_policy_sync_at = Set(None);
+                }
                 let updated = active.update(&tx).await.map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent re-registered");
                 updated
@@ -597,11 +640,16 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         // Order matters: a change committed while the configuration is being
         // built queues its own push, which must survive to be replayed.
-        self.agents.begin_registration(row.id).await;
-        let initial_config = self.site_config_for(&row).await?;
-        self.agents
-            .note_initial_config(row.id, &initial_config.config_hash)
-            .await;
+        let initial_config = if session_id.is_some() {
+            None
+        } else {
+            self.agents.begin_registration(row.id).await;
+            let config = self.site_config_for(&row).await?;
+            self.agents
+                .note_initial_config(row.id, &config.config_hash)
+                .await;
+            Some(config)
+        };
         // DR-04: the config above is pushed regardless — this only makes a
         // version/capability mismatch visible to the operator.
         self.warn_scope_capability_gaps(&row).await;
@@ -610,9 +658,12 @@ impl ControlPlaneTrait for ControlPlaneService {
             agent_id: row.id.to_string(),
             agent_token: token,
             heartbeat_interval_seconds: self.config.heartbeat_interval_seconds,
-            initial_config: Some(initial_config),
+            initial_config,
             managed_protocol_version: session_id
                 .map_or(0, |_| pingwaf_proto::MANAGED_PROTOCOL_VERSION),
+            managed_session_id: session_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
         }))
     }
 
@@ -620,24 +671,13 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<GetManagedSnapshotRequest>,
     ) -> Result<Response<ManagedSnapshot>, Status> {
-        let claims = verify_agent_token(
-            &request.into_inner().agent_token,
-            &self.config.jwt_secret,
-        )
-        .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
-        if claims.is_expired() {
-            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
-        }
+        let claims = self.agent_claims(&request.into_inner().agent_token)?;
         let agent_id = claims
             .subject_id()
             .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
-        let session_id = claims
-            .jti
-            .as_deref()
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .ok_or_else(|| {
-                Status::permission_denied("managed protocol was not negotiated")
-            })?;
+        let session_id = managed_session_id(&claims)?.ok_or_else(|| {
+            Status::permission_denied("managed protocol was not negotiated")
+        })?;
         managed::build_snapshot(&self.db, agent_id, session_id)
             .await
             .map(Response::new)
@@ -669,8 +709,11 @@ impl ControlPlaneTrait for ControlPlaneService {
         // (2026-11-13 audit, server-grpc-control-02). The previous shape only
         // verified the JWT and that the agent row still existed, so a revoked
         // edge kept its command channel for the token's 30-day lifetime.
-        let row = self.authorize(&first.agent_token).await?;
-        let agent_id = row.id;
+        let claims = self.agent_claims(&first.agent_token)?;
+        let agent_id = claims
+            .subject_id()
+            .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        let session_id = managed_session_id(&claims)?;
         if !first.agent_id.is_empty() && first.agent_id != agent_id.to_string()
         {
             return Err(Status::permission_denied(
@@ -680,18 +723,31 @@ impl ControlPlaneTrait for ControlPlaneService {
         // Heartbeat writes certificate state and cache/block counters: an
         // entry stamped with a site this agent does not serve must be dropped
         // (2026-11-13 audit, server-grpc-control-03).
-        let visible: Vec<Uuid> = self
-            .visible_sites(&row)
-            .await?
-            .iter()
-            .map(|site| site.id)
-            .collect();
+        let mut visible = match session_id {
+            Some(session) => {
+                managed::heartbeat_scope(&self.db, agent_id, session).await?
+            },
+            None => {
+                let row = self.authorize_claims(&claims).await?;
+                self.legacy_delivery_sites(&row)
+                    .await?
+                    .into_iter()
+                    .map(|site| site.id)
+                    .collect()
+            },
+        };
         let mut first = first;
         filter_heartbeat_sites(&mut first, &visible);
+        if session_id.is_some() {
+            clear_legacy_config_report(&mut first);
+        }
 
         let (sender, receiver) =
             mpsc::channel::<ServerCommand>(COMMAND_CHANNEL_CAPACITY);
-        let (generation, queued) = self.agents.connect(agent_id, sender).await;
+        let (generation, queued) = self
+            .agents
+            .connect_session(agent_id, sender, session_id.is_some())
+            .await;
         for command in queued {
             // The registry owns the sender now, so replay through it.
             self.agents.send_command(&agent_id, command).await;
@@ -720,7 +776,9 @@ impl ControlPlaneTrait for ControlPlaneService {
                 persist_peer_ip(&db, agent_id, &peer).await;
             }
             persist_heartbeat(&db, agent_id, &first, &registry).await;
-            reconcile_agent_config(&db, &registry, agent_id, &first).await;
+            if session_id.is_none() {
+                reconcile_agent_config(&db, &registry, agent_id, &first).await;
+            }
             persist_host_samples(&db, agent_id, &first.host_samples).await;
             persist_blocked_ips(
                 &db,
@@ -738,7 +796,27 @@ impl ControlPlaneTrait for ControlPlaneService {
                     None
                 },
             } {
+                if !registry.is_current_stream(agent_id, generation).await
+                    || claims.is_expired()
+                {
+                    break;
+                }
+                if let Some(session) = session_id {
+                    match managed::heartbeat_scope(&db, agent_id, session).await
+                    {
+                        Ok(sites) => visible = sites,
+                        Err(_) => break,
+                    }
+                } else if !matches!(
+                    managed::current_session(&db, agent_id).await,
+                    Ok(None)
+                ) {
+                    break;
+                }
                 filter_heartbeat_sites(&mut message, &visible);
+                if session_id.is_some() {
+                    clear_legacy_config_report(&mut message);
+                }
                 cache_status
                     .record_heartbeat(agent_id, &message.site_statuses)
                     .await;
@@ -756,8 +834,10 @@ impl ControlPlaneTrait for ControlPlaneService {
                     )
                     .await;
                 persist_heartbeat(&db, agent_id, &message, &registry).await;
-                reconcile_agent_config(&db, &registry, agent_id, &message)
-                    .await;
+                if session_id.is_none() {
+                    reconcile_agent_config(&db, &registry, agent_id, &message)
+                        .await;
+                }
                 persist_host_samples(&db, agent_id, &message.host_samples)
                     .await;
                 persist_blocked_ips(
@@ -770,7 +850,11 @@ impl ControlPlaneTrait for ControlPlaneService {
                 record_upstream_health(&db, agent_id, &message.upstream_health)
                     .await;
             }
-            mark_offline(&db, agent_id).await;
+            if registry.is_current_stream(agent_id, generation).await
+                && matches!(managed::current_session(&db, agent_id).await, Ok(current) if current == session_id)
+            {
+                mark_offline(&db, agent_id).await;
+            }
             registry.disconnect(&agent_id, generation).await;
             tracing::info!(%agent_id, "agent heartbeat stream ended");
         });
@@ -789,7 +873,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         request: Request<SyncRulesRequest>,
     ) -> Result<Response<Self::SyncRulesStream>, Status> {
         let payload = request.into_inner();
-        let row = self.authorize(&payload.agent_token).await?;
+        let row = self.require_legacy_session(&payload.agent_token).await?;
 
         let sites = self.legacy_delivery_sites(&row).await?;
         // SyncRules predates listener identity and sends one bare RuleBundle
@@ -894,7 +978,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         // DR32-08): a revoked key or an unbound site must stop the flow even
         // on a stream that stays up for hours.
         let mut visibility = SiteVisibility::new(
-            self.visible_sites(&agent)
+            self.legacy_delivery_sites(&agent)
                 .await?
                 .iter()
                 .map(|row| row.id)
@@ -939,7 +1023,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 next_visibility_refresh =
                     tokio::time::Instant::now() + SITE_VISIBILITY_REFRESH;
                 match self.authorize(&agent_token).await {
-                    Ok(agent) => match self.visible_sites(&agent).await {
+                    Ok(agent) => match self.legacy_delivery_sites(&agent).await
+                    {
                         Ok(sites) => {
                             let sites: Vec<Uuid> =
                                 sites.into_iter().map(|row| row.id).collect();
@@ -1124,7 +1209,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         // days (review of 0.32.33, H3 — the same defect as DR32-08, fixed here
         // because the two streams had identical shapes).
         let mut visibility = SiteVisibility::new(
-            self.visible_sites(&agent)
+            self.legacy_delivery_sites(&agent)
                 .await?
                 .iter()
                 .map(|row| row.id)
@@ -1163,7 +1248,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 next_visibility_refresh =
                     tokio::time::Instant::now() + SITE_VISIBILITY_REFRESH;
                 match self.authorize(&agent_token).await {
-                    Ok(agent) => match self.visible_sites(&agent).await {
+                    Ok(agent) => match self.legacy_delivery_sites(&agent).await
+                    {
                         Ok(sites) => {
                             let sites: Vec<Uuid> =
                                 sites.into_iter().map(|row| row.id).collect();
@@ -1399,7 +1485,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         request: Request<GetSiteConfigRequest>,
     ) -> Result<Response<SiteConfig>, Status> {
         let payload = request.into_inner();
-        let row = self.authorize(&payload.agent_token).await?;
+        let row = self.require_legacy_session(&payload.agent_token).await?;
 
         let requested = payload.site_id.trim();
         let config = if requested.is_empty() {
@@ -3456,17 +3542,25 @@ fn positive_u32(value: u32) -> Option<u32> {
     }
 }
 
-/// Maps a SeaORM error onto a `tonic::Status`, logging the detail server side.
-///
-/// The detail never reaches the peer: `DbErr::RecordNotFound` carries whatever
-/// text the lookup used (a generated `find_related` / `update` path puts the
-/// table name in it), and the other variants name tables, columns and
-/// connection strings just as readily. Both bodies are therefore fixed
-/// strings — the 404 says only that the row is gone, everything else answers
-/// `internal error` after the full error has been logged here.
-///
-/// `NotFound` is deliberately not logged at `error` level: a missing row is a
-/// routine race (an agent deleted between two statements), not an incident.
+fn managed_session_id(claims: &Claims) -> Result<Option<Uuid>, Status> {
+    claims
+        .jti
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))
+}
+
+/// Legacy sync metadata cannot acknowledge a managed generation.
+fn clear_legacy_config_report(heartbeat: &mut AgentHeartbeat) {
+    heartbeat.config_hash.clear();
+    heartbeat.config_apply_error.clear();
+    heartbeat.last_config_sync_at = None;
+    heartbeat.last_policy_sync_at = None;
+}
+
+/// Maps a SeaORM error onto a `tonic::Status`, keeping storage details in
+/// server logs. A missing row is a routine race rather than an incident.
 fn db_status(err: sea_orm::DbErr) -> Status {
     match err {
         sea_orm::DbErr::RecordNotFound(detail) => {
