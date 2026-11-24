@@ -574,6 +574,19 @@
       "cloneSensitiveAck": "I understand that cloning copies sensitive configuration."
     },
     "siteDetail": {
+      "deployment": {
+        "title": "Ingress deployment",
+        "desired": "Desired revision",
+        "empty": "No eligible assigned nodes",
+        "applied": "Applied",
+        "pending": "Awaiting application",
+        "unknown": "Application unknown",
+        "withdrawn": "Withdrawn",
+        "revoking": "Awaiting withdrawal",
+        "bound": "Listener bound",
+        "unbound": "Listener not bound",
+        "bindUnknown": "Listener status unknown"
+      },
       "title": "Site",
       "overview": "Overview",
       "upstreams": "Upstreams",

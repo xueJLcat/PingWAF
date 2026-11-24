@@ -20,6 +20,18 @@ import type {
   UpsertSslRequest,
 } from './types'
 
+interface SiteDeployment {
+  desired_revision: string | null
+  nodes: {
+    id: string
+    name: string
+    bound: boolean | null
+    observed_at: string | null
+    applied_revision: string | null
+    state: 'applied' | 'pending' | 'unknown' | 'withdrawn' | 'revoking'
+  }[]
+}
+
 export interface IngressOptions {
   writes_enabled: boolean
   agents: { id: string; name: string; listeners: [number, 'http' | 'https'][] }[]
@@ -34,6 +46,8 @@ export interface IngressOptions {
  * rather than `403` so existence is never leaked.
  */
 export const sitesApi = {
+  deployment: (id: string) => apiClient.get<SiteDeployment>(`/sites/${id}/deployment`),
+
   ingressOptions: (siteId?: string) =>
     apiClient.get<IngressOptions>('/sites/ingress-options', { query: { site_id: siteId } }),
 

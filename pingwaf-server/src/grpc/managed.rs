@@ -357,6 +357,97 @@ pub(crate) async fn ingress_agent_options(
     Ok(options)
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct SiteDeployment {
+    desired_revision: Option<String>,
+    nodes: Vec<DeploymentNode>,
+}
+
+#[derive(serde::Serialize)]
+struct DeploymentNode {
+    id: Uuid,
+    name: String,
+    bound: Option<bool>,
+    observed_at: Option<chrono::DateTime<Utc>>,
+    applied_revision: Option<String>,
+    state: &'static str,
+}
+
+pub(crate) async fn site_deployment(
+    tx: &DatabaseTransaction,
+    registry: &super::AgentRegistry,
+    model: &site::Model,
+) -> Result<SiteDeployment, DbErr> {
+    let mut result = SiteDeployment {
+        desired_revision: None,
+        nodes: Vec::new(),
+    };
+    let (Some(port), Some(protocol)) =
+        (model.ingress_port, model.ingress_protocol.as_deref())
+    else {
+        return Ok(result);
+    };
+    if model.status == site_status::ACTIVE {
+        let bundle =
+            assemble_managed_config(tx, std::slice::from_ref(model)).await?;
+        result.desired_revision =
+            bundle.sites.into_iter().next().map(|s| s.site_revision);
+    }
+    let epoch = authority_epoch(tx).await?;
+    let assignments = agent_sites::Entity::find()
+        .filter(agent_sites::Column::SiteId.eq(model.id))
+        .order_by_asc(agent_sites::Column::AgentId)
+        .all(tx)
+        .await?;
+    for row in assignments {
+        let id = row.agent_id;
+        let agent = match authorize(tx, id).await {
+            Ok((agent, owner))
+                if owner == model.user_id && agent.site_scope == "selected" =>
+            {
+                agent
+            },
+            Err(BuildError::Storage(db)) => return Err(db),
+            _ => continue,
+        };
+        let (bound, report) = match current_session(tx, id).await? {
+            Some(session) => {
+                registry
+                    .site_observation(
+                        id, session, port, protocol, model.id, epoch,
+                    )
+                    .await
+            },
+            None => (None, None),
+        };
+        let (observed_at, applied_revision) =
+            report.map(|(at, rev)| (Some(at), rev)).unwrap_or_default();
+        let state = match (
+            result.desired_revision.as_ref(),
+            applied_revision.as_ref(),
+            bound,
+            observed_at,
+        ) {
+            (None, Some(_), _, _) => "revoking",
+            (None, None, _, Some(_)) => "withdrawn",
+            (Some(want), Some(have), Some(true), _) if want == have => {
+                "applied"
+            },
+            (_, _, None, _) | (_, _, _, None) => "unknown",
+            _ => "pending",
+        };
+        result.nodes.push(DeploymentNode {
+            id,
+            name: agent.display_name.unwrap_or(agent.hostname),
+            bound,
+            observed_at,
+            applied_revision,
+            state,
+        });
+    }
+    Ok(result)
+}
+
 pub(crate) async fn check_site_ingress(
     tx: &DatabaseTransaction,
     agents: &super::AgentRegistry,
@@ -764,6 +855,48 @@ pub(super) async fn check_postgres(
     )
     .await
     .is_err());
+    let stored = site::Entity::find_by_id(custom.id)
+        .one(&tx)
+        .await
+        .unwrap()
+        .unwrap();
+    let initial = site_deployment(&tx, &registry, &stored).await.unwrap();
+    assert_eq!(initial.nodes.len(), 1);
+    assert_eq!(initial.nodes[0].state, "unknown");
+    let wanted = initial.desired_revision.unwrap();
+    let mut report = pingwaf_proto::ManagedApplyReport {
+        session_id: session.to_string(),
+        authority_epoch: first.authority_epoch.clone(),
+        generation: 1,
+        sites: vec![pingwaf_proto::ManagedSiteApplication {
+            site_id: custom.id.to_string(),
+            site_revision: wanted.clone(),
+            ingress: Some(pingwaf_proto::SiteIngress {
+                port: 81,
+                protocol: pingwaf_proto::IngressProtocol::Http as i32,
+            }),
+        }],
+    };
+    for (epoch, revision, state) in [
+        (first.authority_epoch.clone(), wanted.clone(), "applied"),
+        (first.authority_epoch.clone(), "ff".repeat(32), "pending"),
+        (Uuid::new_v4().to_string(), wanted.clone(), "unknown"),
+    ] {
+        report.authority_epoch = epoch;
+        report.sites[0].site_revision = revision;
+        registry
+            .record_application(
+                id,
+                stream,
+                Some(session),
+                &[custom.id],
+                Some(&report),
+            )
+            .await;
+        let view = site_deployment(&tx, &registry, &stored).await.unwrap();
+        assert_eq!(view.nodes[0].state, state);
+        assert_eq!(view.nodes[0].bound, Some(true));
+    }
     let (sender, _rx) = tokio::sync::mpsc::channel(1);
     let (replacement, _) = registry
         .connect_session(id, sender, Some(Uuid::new_v4()))
@@ -787,6 +920,7 @@ pub(super) async fn check_postgres(
     assert_eq!(assigned.authority_epoch, first.authority_epoch);
     let config = decode(&assigned);
     let repeated = fetch(token.clone()).await.unwrap();
+    assert_eq!(config.sites[0].site_revision, wanted);
     assert_eq!(config.sites[0].site_revision.len(), 64);
     assert_eq!(
         config.sites[0].site_revision,

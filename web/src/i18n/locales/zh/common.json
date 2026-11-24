@@ -574,6 +574,19 @@
       "cloneSensitiveAck": "我了解克隆会复制敏感配置。"
     },
     "siteDetail": {
+      "deployment": {
+        "title": "入口生效状态",
+        "desired": "期望版本",
+        "empty": "没有符合条件的已分派节点",
+        "applied": "已应用",
+        "pending": "待应用",
+        "unknown": "应用状态未知",
+        "withdrawn": "已撤销",
+        "revoking": "待撤销",
+        "bound": "监听已绑定",
+        "unbound": "监听未绑定",
+        "bindUnknown": "监听状态未知"
+      },
       "title": "站点",
       "overview": "概览",
       "upstreams": "上游服务",

@@ -63,6 +63,12 @@ export function SiteDetailPage() {
   // drop edits (the Basic page's timeout/trust cards included).
   const unsavedDialog = useUnsavedGuard(useAnyUnsaved())
   const site = detail.data?.site
+  const deployment = useQuery({
+    queryKey: [...siteKeys.all, siteId, 'deployment'],
+    queryFn: () => sitesApi.deployment(siteId as string),
+    enabled: Boolean(siteId && site?.ingress_port),
+    refetchInterval: 20_000,
+  })
   const scheme = site?.ingress_protocol ?? (detail.data?.ssl?.has_certificate ? 'https' : 'http')
   const visitTitle = scheme === 'https'
     ? t('pages.siteDetail.visitSite')
@@ -301,6 +307,22 @@ export function SiteDetailPage() {
       )}
 
       {/* Z5: offline/degraded agents mean config changes may lag. */}
+      {Boolean(site?.ingress_port) && <section className="mb-4 space-y-2 rounded-md border border-border px-3 py-2 text-sm">
+        <h2 className="font-medium">{t('pages.siteDetail.deployment.title')}</h2>
+        {deployment.isError || deployment.isPending
+          ? <p>{t(deployment.isError ? 'pages.siteDetail.deployment.unknown' : 'common.loading')}</p>
+          : <>
+            {deployment.data.desired_revision && <p>{t('pages.siteDetail.deployment.desired')} <code title={deployment.data.desired_revision}>{deployment.data.desired_revision.slice(0, 12)}</code></p>}
+            {deployment.data.nodes.length === 0 && <p>{t('pages.siteDetail.deployment.empty')}</p>}
+            {deployment.data.nodes.map(node => <div key={node.id} className="flex flex-wrap gap-x-3">
+              <strong>{node.name}</strong>
+              <span>{t(`pages.siteDetail.deployment.${node.state}`)}</span>
+              <span>{t(node.bound === null ? 'pages.siteDetail.deployment.bindUnknown' : node.bound ? 'pages.siteDetail.deployment.bound' : 'pages.siteDetail.deployment.unbound')}</span>
+              {node.applied_revision && <code title={node.applied_revision}>{node.applied_revision.slice(0, 12)}</code>}
+              {node.observed_at && <time dateTime={node.observed_at}>{new Date(node.observed_at).toLocaleString()}</time>}
+            </div>)}
+          </>}
+      </section>}
       <AgentStatusBanner siteId={siteId} />
 
       {/* Tab nav — sticky on phones so the nine tabs stay reachable (UX-19). */}

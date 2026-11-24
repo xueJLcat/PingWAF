@@ -574,6 +574,19 @@
       "cloneSensitiveAck": "クローンが機密設定をコピーすることを理解しました。"
     },
     "siteDetail": {
+      "deployment": {
+        "title": "リスナーの適用状態",
+        "desired": "期待するリビジョン",
+        "empty": "対象の割り当て済みノードはありません",
+        "applied": "適用済み",
+        "pending": "適用待ち",
+        "unknown": "適用状態不明",
+        "withdrawn": "撤回済み",
+        "revoking": "撤回待ち",
+        "bound": "バインド済み",
+        "unbound": "未バインド",
+        "bindUnknown": "バインド状態不明"
+      },
       "title": "サイト",
       "overview": "概要",
       "upstreams": "アップストリーム",

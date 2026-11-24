@@ -517,6 +517,57 @@ impl AgentRegistry {
             .collect()
     }
 
+    /// Sample inventory and application from the same authenticated connection.
+    pub(super) async fn site_observation(
+        &self,
+        agent: Uuid,
+        session: Uuid,
+        port: i32,
+        protocol: &str,
+        site: Uuid,
+        epoch: Uuid,
+    ) -> (Option<bool>, Option<(DateTime<Utc>, Option<String>)>) {
+        let inner = self.inner.read().await;
+        let Some(conn) = inner
+            .connected
+            .get(&agent)
+            .filter(|c| c.session == Some(session))
+        else {
+            return (None, None);
+        };
+        let fresh = Duration::from_secs(60);
+        let bound = conn
+            .ingress
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < fresh)
+            .map(|(_, report)| {
+                report.listeners.iter().any(|l| {
+                    l.port as i32 == port
+                        && l.state() == IngressBindState::Bound
+                        && matches!(
+                            (protocol, l.protocol()),
+                            ("http", IngressProtocol::Http)
+                                | ("https", IngressProtocol::Https)
+                        )
+                })
+            });
+        let applied = conn
+            .application
+            .as_ref()
+            .filter(|(at, report)| {
+                at.elapsed() < fresh && report.authority_epoch == epoch
+            })
+            .map(|(_, report)| {
+                let row = report.sites.iter().find(|r| {
+                    r.site_id == site
+                        && i32::from(r.port) == port
+                        && r.protocol == protocol
+                });
+                (report.observed_at, row.map(|r| r.site_revision.clone()))
+            });
+        (bound, applied)
+    }
+
     pub(super) async fn managed_stream_ids(&self) -> Vec<Uuid> {
         self.inner
             .read()

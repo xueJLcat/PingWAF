@@ -584,6 +584,10 @@ Each agent has an `id`, a `name` and a `listeners` array of pairs such as `[81, 
 Only current authenticated selected-scope agents with a fresh bound listener are offered.
 When editing a custom site, omit `ingress_agent_ids` to preserve assignments or provide the complete replacement list.
 
+### GET /sites/{site_id}/deployment
+
+Returns the desired site revision and the current deployment state of each eligible assigned node for a custom ingress. Uses the same site visibility as site detail. The revision is null for a paused site. A missing or stale observation gives no assurance of application. The control plane compares the authenticated session, authority epoch, site ID, revision and listener. `bound` reports the local socket status. Each node includes its name, observation time and applied revision when available. Possible states are `applied`, `pending`, `unknown`, `revoking` and `withdrawn`. A default site has a null revision and an empty node list.
+
 ### GET /sites/{site_id}
 
 Get site details including upstreams and SSL config.

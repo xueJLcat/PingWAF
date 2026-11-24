@@ -1207,6 +1207,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites", get(list).post(create))
         .route("/sites/ingress-options", get(ingress_options))
+        .route("/sites/{site_id}/deployment", get(deployment))
         .route("/sites/{site_id}", get(show).put(update).delete(remove))
         .route(
             "/sites/{site_id}/upstreams",
@@ -1249,6 +1250,23 @@ struct IngressOptions {
     writes_enabled: bool,
     agents: Vec<crate::grpc::IngressAgentOption>,
     assigned_agent_ids: Vec<Uuid>,
+}
+
+async fn deployment(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+) -> Result<Json<crate::grpc::SiteDeployment>, ApiError> {
+    let id = parse_uuid(&site_id, "site id")?;
+    let tx = state
+        .db
+        .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
+        .await?;
+    let model = crate::api::common::load_site(&tx, id, &current, false).await?;
+    let status =
+        crate::grpc::site_deployment(&tx, &state.agents, &model).await?;
+    tx.commit().await?;
+    Ok(Json(status))
 }
 
 async fn ingress_options(
