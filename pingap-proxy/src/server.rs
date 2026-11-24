@@ -46,6 +46,7 @@ use pingap_core::{
     ResponsePluginResult, ensure_client_ip, get_cache_key, get_host,
 };
 use pingap_core::{HTTP_HEADER_NAME_X_REQUEST_ID, get_digest_detail};
+use pingap_core::{ProxyTrust, resolve_client_ip_with_trust};
 use pingap_location::LocationProvider;
 use pingap_logger::{Parser, parse_access_log_directive};
 #[cfg(feature = "tracing")]
@@ -136,6 +137,7 @@ struct KeepaliveReuse;
 pub struct Server {
     /// Server name identifier used for logging and metrics
     name: String,
+    managed_selector: Option<Arc<dyn ManagedSiteSelector>>,
 
     /// Whether this instance serves admin endpoints and functionality
     admin: bool,
@@ -456,7 +458,111 @@ pub struct AppContext {
     pub certificate_provider: Arc<dyn CertificateProvider>,
 }
 
+/// Bound to a trusted listener and one immutable proxy view. Never derive
+/// the listener from the HTTP authority or any client-supplied metadata.
+pub trait ManagedSiteSelector: Send + Sync {
+    fn select(
+        &self,
+        session: &Session,
+        hostname: &str,
+    ) -> Option<ManagedRequestSite>;
+}
+
+pub struct ManagedRequestSite {
+    pub id: Arc<str>,
+    pub route: Arc<pingap_location::ServerLocationRoute>,
+    pub trust: ProxyTrust,
+}
+
+/// Set only by the proxy before running any site plugins, never decoded from
+/// an HTTP header. Retained even if an upstream rewrite changes Host.
+#[derive(Clone)]
+pub struct ManagedSiteId(pub Arc<str>);
+
+fn parse_managed_authority(value: &str) -> Option<(String, Option<u16>)> {
+    let authority: http::uri::Authority = value.parse().ok()?;
+    if value.contains('@') {
+        return None;
+    }
+    let host = authority.host();
+    let suffix = value.strip_prefix(host)?;
+    let port = if suffix.is_empty() {
+        None
+    } else {
+        let port = suffix.strip_prefix(':')?;
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        Some(port.parse::<u16>().ok().filter(|port| *port != 0)?)
+    };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    // Wildcards are patterns in the configured index, not client names.
+    if host.is_empty() || host.ends_with('.') || host.contains('*') {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), port))
+}
+
+fn managed_hostname(header: &RequestHeader) -> Option<String> {
+    use pingora::protocols::http::authority::{
+        RawTargetAuthority, raw_target_authority,
+    };
+
+    let mut hosts = header.headers.get_all(http::header::HOST).iter();
+    let host = match hosts.next() {
+        Some(value) => Some(parse_managed_authority(value.to_str().ok()?)?),
+        None => None,
+    };
+    if hosts.next().is_some() {
+        return None;
+    }
+    // Pingora keeps HTTP/1 absolute-form authority in the raw target and
+    // uses the parsed URI for HTTP/2 pseudo-headers.
+    let target = match raw_target_authority(header.raw_path()) {
+        RawTargetAuthority::AmbiguousAuthority => return None,
+        RawTargetAuthority::Absolute {
+            scheme, authority, ..
+        } => {
+            if header.uri.authority().is_some() {
+                return None;
+            }
+            Some((
+                std::str::from_utf8(authority).ok()?,
+                Some(std::str::from_utf8(scheme).ok()?),
+            ))
+        },
+        RawTargetAuthority::None => header
+            .uri
+            .authority()
+            .map(|authority| (authority.as_str(), header.uri.scheme_str())),
+    };
+    if let Some((authority, scheme)) = target {
+        let uri = parse_managed_authority(authority)?;
+        let default_port = match scheme {
+            Some(value) if value.eq_ignore_ascii_case("https") => Some(443),
+            Some(value) if value.eq_ignore_ascii_case("http") => Some(80),
+            Some(_) => return None,
+            None => None,
+        };
+        if host.is_some_and(|(name, port)| {
+            name != uri.0 || port.or(default_port) != uri.1.or(default_port)
+        }) {
+            return None;
+        }
+        Some(uri.0)
+    } else {
+        host.map(|(name, _)| name)
+    }
+}
+
 impl Server {
+    pub fn with_managed_selector(
+        mut self,
+        selector: Arc<dyn ManagedSiteSelector>,
+    ) -> Self {
+        self.managed_selector = Some(selector);
+        self
+    }
     /// Creates a new HTTP proxy server instance with the given configuration.
     /// Initializes all server components including:
     /// - TCP socket options
@@ -510,6 +616,7 @@ impl Server {
                 .as_deref(),
         );
         let s = Server {
+            managed_selector: None,
             name: conf.name.clone(),
             admin: conf.admin,
             accepted: AtomicU64::new(0),
@@ -850,29 +957,52 @@ impl Server {
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         let header = session.req_header();
+        let legacy_host = self
+            .managed_selector
+            .is_none()
+            .then(|| pingap_core::get_host(header));
         // L3-009: an HTTP/1.1+ request without any Host must be refused per
         // RFC 9112 §3.2 instead of silently falling to a default location
         // with no site context. HTTP/1.0 and internal paths stay allowed.
-        if pingap_core::get_host(header).is_none() && !host_is_optional(header)
+        if legacy_host.as_ref().is_some_and(Option::is_none)
+            && !host_is_optional(header)
         {
             return Err(new_internal_error(
                 400,
                 "missing required Host header",
             ));
         }
-        let host = pingap_core::get_host(header).unwrap_or_default();
-        let path = header.uri.path();
-
         // L3-007/L3-008: refuse unknown methods and oversized single header
         // fields before any location matching or plugin work.
         if let Err((status, message)) = validate_request_head(header) {
             return Err(new_internal_error(status, message));
         }
 
-        // locations not found
-        let Some(route) = self.server_locations_provider.get(&self.name) else {
+        let (host, route) = if let Some(selector) = &self.managed_selector {
+            let host = managed_hostname(header).ok_or_else(|| {
+                new_internal_error(
+                    400,
+                    "invalid or ambiguous request authority",
+                )
+            })?;
+            let route = Self::select_managed_route(
+                selector.as_ref(),
+                session,
+                ctx,
+                &host,
+            )?;
+            (host, Some(route))
+        } else {
+            (
+                legacy_host.flatten().unwrap_or_default(),
+                self.server_locations_provider.get(&self.name),
+            )
+        };
+        let Some(route) = route else {
             return Ok(());
         };
+        let header = session.req_header();
+        let path = header.uri.path();
 
         // Resolve the caller once: every candidate is gated on the same
         // address, and the parsed form is what `match_conditions` needs.
@@ -982,6 +1112,31 @@ impl Server {
             .await?;
 
         Ok(())
+    }
+
+    fn select_managed_route(
+        selector: &dyn ManagedSiteSelector,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        host: &str,
+    ) -> pingora::Result<Arc<pingap_location::ServerLocationRoute>> {
+        let site = selector.select(session, host).ok_or_else(|| {
+            new_internal_error(421, "no authorized site for this authority")
+        })?;
+        // Disabled or missing site trust means socket peer, not the global
+        // heuristic for forwarding headers from a private address.
+        ctx.conn.client_ip = Some(
+            resolve_client_ip_with_trust(session, &site.trust)
+                .or_else(|| {
+                    pingap_core::get_remote_addr(session).map(|(ip, _)| ip)
+                })
+                .unwrap_or_default(),
+        );
+        session
+            .req_header_mut()
+            .extensions_mut()
+            .insert(ManagedSiteId(site.id));
+        Ok(site.route)
     }
 
     #[inline]
@@ -1899,7 +2054,8 @@ impl ProxyHttp for Server {
         // response goes out inside `handle_acme_challenge`; the
         // `response_written` guard at the top of `request_filter` then
         // short-circuits the rest of the pipeline.
-        if self.lets_encrypt_enabled
+        if self.managed_selector.is_none()
+            && self.lets_encrypt_enabled
             && let Some(result) = self.handle_acme_challenge(session, ctx).await
         {
             result?;
@@ -3201,6 +3357,100 @@ value = 'proxy_set_headers = ["name:value"]'
         let mut buf = vec![];
         client.read_to_end(&mut buf).await.unwrap();
         String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn managed_authority_does_not_change_the_listener_or_borrow_legacy_routes()
+     {
+        struct Selector;
+        impl ManagedSiteSelector for Selector {
+            fn select(
+                &self,
+                _session: &Session,
+                hostname: &str,
+            ) -> Option<ManagedRequestSite> {
+                (hostname == "shared.example").then(|| ManagedRequestSite {
+                    id: Arc::from("site-on-this-listener"),
+                    route: Arc::new(
+                        pingap_location::ServerLocationRoute::build(
+                            Vec::new(),
+                            |_| None,
+                        ),
+                    ),
+                    trust: ProxyTrust::new(false, "", false, &[]),
+                })
+            }
+        }
+        let server = new_server().with_managed_selector(Arc::new(Selector));
+        let (mut session, _) = new_duplex_session("GET / HTTP/1.1\r\nHost: Shared.Example.:83\r\nX-Forwarded-Host: other.test\r\nX-Forwarded-Port: 82\r\n\r\n").await;
+        let mut ctx = Ctx::default();
+        server
+            .early_request_filter(&mut session, &mut ctx)
+            .await
+            .unwrap();
+        let site = session
+            .req_header()
+            .extensions
+            .get::<ManagedSiteId>()
+            .unwrap();
+        assert_eq!(site.0.as_ref(), "site-on-this-listener");
+        assert!(ctx.upstream.location.is_empty());
+        let (mut session, _) =
+            new_duplex_session("GET / HTTP/1.1\r\nHost: github.com\r\n\r\n")
+                .await;
+        assert!(
+            server
+                .early_request_filter(&mut session, &mut Ctx::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_hostname_rejects_ambiguous_or_invalid_authorities() {
+        let request = |uri: &str, hosts: &[&str]| {
+            let mut request =
+                RequestHeader::build("GET", uri.as_bytes(), None).unwrap();
+            for &host in hosts {
+                request.append_header("Host", host).unwrap();
+            }
+            request
+        };
+        for (uri, host) in [
+            ("/", "example.test:"),
+            ("/", "example.test:wrong"),
+            ("/", "example.test:0"),
+            ("/", "example.test:65536"),
+            ("/", "example.test.."),
+            ("/", "user@example.test"),
+            ("https://example.test:82/", "another.test:82"),
+            ("https://example.test:82/", "example.test:83"),
+        ] {
+            assert_eq!(
+                managed_hostname(&request(uri, &[host])),
+                None,
+                "{uri} / {host}"
+            );
+        }
+        assert_eq!(managed_hostname(&request("/", &[])), None);
+        assert_eq!(
+            managed_hostname(&request("/", &["example.test", "example.test"])),
+            None
+        );
+        assert_eq!(
+            managed_hostname(&request(
+                "https://example.test/",
+                &["EXAMPLE.test.:443"]
+            ))
+            .as_deref(),
+            Some("example.test")
+        );
+        let mut h2 = request("/", &[]);
+        h2.set_version(http::Version::HTTP_2);
+        h2.set_uri("https://example.test:83/path".parse().unwrap());
+        assert_eq!(managed_hostname(&h2).as_deref(), Some("example.test"));
+        h2.insert_header("Host", "example.test:82").unwrap();
+        assert_eq!(managed_hostname(&h2), None);
     }
 
     #[tokio::test]
