@@ -39,7 +39,6 @@ use pingora::cache::predictor::{CacheablePredictor, Predictor};
 use pingora::http::RequestHeader;
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
-use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::{
     CacheRule as AgentCacheRule, CacheTypeCategory, SiteRules as AgentSiteRules,
 };
@@ -144,10 +143,9 @@ impl Requirements {
 
 /// A site's enabled cache rules compiled for evaluation.
 struct SiteCacheRules {
-    /// The site's canonical control-plane domain. Doubles as the cache
-    /// namespace so the agent's per-domain disk quota ledger charges this
-    /// site's writes, whichever of its domains the request used.
+    /// Canonical domain for legacy sites, UUID namespace for managed sites.
     namespace: String,
+    managed: bool,
     requirements: Requirements,
     rules: Vec<CompiledCacheRule>,
     /// Site-level single-file cap in bytes; `None` follows the plugin's
@@ -158,9 +156,9 @@ struct SiteCacheRules {
     type_limits: HashMap<String, usize>,
 }
 
-/// A cached per-site rule set plus the fingerprint it was built from.
+/// A cached per-site rule set and the revision it was built from.
 struct CachedSiteCacheRules {
-    fingerprint: Arc<str>,
+    revision: crate::RuleRevision,
     rules: Arc<SiteCacheRules>,
     /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
     /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
@@ -298,6 +296,7 @@ fn build_site_cache_rules(site: &AgentSiteRules) -> SiteCacheRules {
     }
     SiteCacheRules {
         namespace: site.domain.to_string(),
+        managed: false,
         requirements,
         rules,
         max_file_size: site
@@ -446,8 +445,8 @@ pub struct Cache {
     // Unique identifier for this cache configuration
     hash_value: String,
     // Per-site cache rules compiled from agent (control plane) rules,
-    // keyed by request host — mirrors the waf plugin's site engines.
-    site_cache_rules: DashMap<String, CachedSiteCacheRules>,
+    // keyed by legacy request host or managed site UUID.
+    site_cache_rules: DashMap<crate::RuleKey, CachedSiteCacheRules>,
     // Sweep gate for the `site_cache_rules` host cache (TTL + hard cap).
     cache_rules_sweep: HostCacheSweep,
 }
@@ -740,34 +739,49 @@ impl Cache {
     /// plugin's static behaviour in charge. A known site with no rules of
     /// its own still resolves — an empty rule set then disables caching
     /// instead of silently falling back to the static config.
-    fn resolve_site_rules(&self, host: &str) -> Option<Arc<SiteCacheRules>> {
-        let agent = PingWafAgent::instance()?;
-        if host.is_empty() {
-            return None;
-        }
-        let site_rules = agent.get_rules_for_domain(host)?;
+    fn resolve_site_rules(
+        &self,
+        session: &Session,
+        host: &str,
+    ) -> pingora::Result<Option<Arc<SiteCacheRules>>> {
+        let Some(crate::RequestRules {
+            key,
+            revision,
+            site,
+        }) = crate::RequestRules::resolve(session, host)?
+        else {
+            return Ok(None);
+        };
         let now = crate::host_cache::unix_now();
         self.cache_rules_sweep
             .prune(&self.site_cache_rules, now, |cached| {
                 cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
             });
-        let fingerprint = agent.config_hash();
-        if let Some(cached) = self.site_cache_rules.get(host)
-            && cached.fingerprint == fingerprint
+        if let Some(cached) = self.site_cache_rules.get(&key)
+            && cached.revision == revision
         {
             touch(&cached.last_used, now);
-            return Some(Arc::clone(&cached.rules));
+            return Ok(Some(Arc::clone(&cached.rules)));
         }
-        let rules = Arc::new(build_site_cache_rules(&site_rules));
+        let mut rules = build_site_cache_rules(&site);
+        if let crate::RuleKey::Managed(id) = &key {
+            // Only a UUID may contribute to the storage directory name.
+            let uuid = uuid::Uuid::parse_str(id).map_err(|_| {
+                pingap_core::new_internal_error(503, "invalid cache site UUID")
+            })?;
+            rules.namespace = format!("managed:{uuid}");
+            rules.managed = true;
+        }
+        let rules = Arc::new(rules);
         self.site_cache_rules.insert(
-            host.to_string(),
+            key,
             CachedSiteCacheRules {
-                fingerprint,
+                revision,
                 rules: Arc::clone(&rules),
                 last_used: AtomicU64::new(now),
             },
         );
-        Some(rules)
+        Ok(Some(rules))
     }
 
     /// Creates a new Cache instance from the provided plugin configuration.
@@ -866,7 +880,7 @@ impl Plugin for Cache {
         // No agent, unknown host, or no match leaves the static config
         // below in charge.
         let host = get_host(req_header).unwrap_or_default();
-        let site_rules = self.resolve_site_rules(&host);
+        let site_rules = self.resolve_site_rules(session, &host)?;
         let matched = if let Some(site) = site_rules.as_deref() {
             // Only gather what some expression on this site actually
             // references — the common path-only rules then collect nothing.
@@ -934,11 +948,13 @@ impl Plugin for Cache {
             return Ok(RequestPluginResult::Skipped);
         }
 
-        // A matched rule files the entry under the site's canonical domain
-        // instead of the static namespace, keeping the agent's per-domain
-        // disk quota ledger aligned with what is written.
+        // Managed purge must target the same UUID namespace even when its
+        // path matches no rule, e.g. PURGE /* for a /static-only rule.
         let dynamic_namespace = match (matched, site_rules.as_deref()) {
             (Some(_), Some(site)) => Some(site.namespace.clone()),
+            (None, Some(site)) if site.managed && method == *METHOD_PURGE => {
+                Some(site.namespace.clone())
+            },
             _ => None,
         };
 
@@ -1113,11 +1129,8 @@ impl Plugin for Cache {
         _ctx: &mut Ctx,
         upstream_response: &mut ResponseHeader,
     ) -> pingora::Result<ResponsePluginResult> {
-        let host = get_host(session.req_header());
-        let Some(host) = host.as_deref().filter(|host| !host.is_empty()) else {
-            return Ok(ResponsePluginResult::Unchanged);
-        };
-        let Some(site_rules) = self.resolve_site_rules(host) else {
+        let host = get_host(session.req_header()).unwrap_or_default();
+        let Some(site_rules) = self.resolve_site_rules(session, &host)? else {
             return Ok(ResponsePluginResult::Unchanged);
         };
         let mut effective = site_rules.max_file_size;
@@ -1159,6 +1172,63 @@ mod tests {
     use pingwaf_proto::control_plane as proto;
     use pretty_assertions::assert_eq;
     use tokio_test::io::Builder;
+
+    #[tokio::test]
+    async fn managed_cache_and_unmatched_purge_use_the_same_site_namespace() {
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(r#"namespace = "legacy""#).unwrap(),
+        )
+        .unwrap();
+        let mut keys = Vec::new();
+        for suffix in [1, 2] {
+            let id = format!("00000000-0000-4000-8000-{suffix:012}");
+            let mut rules = agent_site_rules(vec![cache_rule(
+                r#"http.request.uri.path starts_with "/static/""#,
+                true,
+            )]);
+            rules.site_id = id.clone().into();
+            let rules = Arc::new(rules);
+            let mut get = crate::test_support::h1_session(
+                "GET",
+                "/static/a",
+                "example.com",
+            )
+            .await;
+            let mut purge =
+                crate::test_support::h1_session("PURGE", "/*", "example.com")
+                    .await;
+            crate::test_support::pin_site(&mut get, rules.clone());
+            crate::test_support::pin_site(&mut purge, rules);
+            let mut get_ctx = Ctx::default();
+            let mut purge_ctx = Ctx::default();
+            cache
+                .handle_request(cache.plugin_step, &mut get, &mut get_ctx)
+                .await
+                .unwrap();
+            assert!(get.cache.enabled());
+            cache
+                .handle_request(cache.plugin_step, &mut purge, &mut purge_ctx)
+                .await
+                .unwrap();
+            let expected = format!("managed:{id}");
+            for ctx in [&get_ctx, &purge_ctx] {
+                assert_eq!(
+                    ctx.cache.as_ref().unwrap().namespace.as_deref(),
+                    Some(expected.as_str())
+                );
+            }
+            keys.push(
+                get_cache_key(
+                    &get_ctx,
+                    "GET",
+                    &get.req_header().uri,
+                    "example.com",
+                )
+                .combined(),
+            );
+        }
+        assert_ne!(keys[0], keys[1]);
+    }
 
     /// A site whose cache rules don't match the request must NOT fall back
     /// to the static config and cache the traffic anyway: the plugin is

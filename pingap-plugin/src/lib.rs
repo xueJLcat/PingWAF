@@ -306,6 +306,66 @@ pub(crate) fn managed_rules(
             pingap_core::new_internal_error(503, "invalid managed site rules")
         })
 }
+
+/// The key includes the source, so neither a legacy hostname nor a legacy
+/// configuration hash can alias a managed entry. Compare managed rules by
+/// their pinned allocation, not by a re-encoded protobuf fingerprint.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) enum RuleKey {
+    Legacy(String),
+    Managed(std::sync::Arc<str>),
+}
+
+pub(crate) enum RuleRevision {
+    Legacy(std::sync::Arc<str>),
+    Managed(std::sync::Weak<pingwaf_agent::cache::SiteRules>),
+}
+
+impl PartialEq for RuleRevision {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Legacy(a), Self::Legacy(b)) => a == b,
+            (Self::Managed(a), Self::Managed(b)) => {
+                std::sync::Weak::ptr_eq(a, b)
+            },
+            _ => false,
+        }
+    }
+}
+
+pub(crate) struct RequestRules {
+    pub key: RuleKey,
+    pub revision: RuleRevision,
+    pub site: std::sync::Arc<pingwaf_agent::cache::SiteRules>,
+}
+
+impl RequestRules {
+    pub fn resolve(
+        session: &pingora::proxy::Session,
+        host: &str,
+    ) -> pingora::Result<Option<Self>> {
+        if let Some(site) = managed_rules(session)? {
+            return Ok(Some(Self {
+                key: RuleKey::Managed(site.site_id.clone()),
+                revision: RuleRevision::Managed(std::sync::Arc::downgrade(
+                    &site,
+                )),
+                site,
+            }));
+        }
+        if host.is_empty() {
+            return Ok(None);
+        }
+        Ok(pingwaf_agent::PingWafAgent::instance().and_then(|agent| {
+            let site = agent.get_rules_for_domain(host)?;
+            Some(Self {
+                key: RuleKey::Legacy(host.to_owned()),
+                revision: RuleRevision::Legacy(agent.config_hash()),
+                site,
+            })
+        }))
+    }
+}
 // The data plane drives the WAF plugin's access-log sweep timer from its
 // own runtime, so these two items are re-exported.
 pub use waf::{PENDING_ACCESS_SWEEP_TTL, sweep_stale_access};
@@ -315,6 +375,18 @@ pub(crate) mod test_support {
     //! Fixtures shared by plugin test modules.
     use pingora::proxy::Session;
     use tokio_test::io::Builder;
+
+    pub(crate) fn pin_site(
+        session: &mut Session,
+        rules: std::sync::Arc<pingwaf_agent::cache::SiteRules>,
+    ) {
+        session.req_header_mut().extensions_mut().insert(
+            pingap_core::ManagedSiteContext {
+                id: rules.site_id.clone(),
+                rules,
+            },
+        );
+    }
 
     /// Builds an H1 session preloaded with a single request.
     pub(crate) async fn h1_session(

@@ -6673,7 +6673,7 @@ ml_threshold = 0.75
 
     /// A minimal site: the WAF config carries the knobs under test,
     /// everything else is empty/disabled.
-    fn site_rules(waf: Option<CacheWafConfig>) -> CacheSiteRules {
+    pub(crate) fn site_rules(waf: Option<CacheWafConfig>) -> CacheSiteRules {
         CacheSiteRules {
             site_id: "site-1".into(),
             domain: "example.com".into(),

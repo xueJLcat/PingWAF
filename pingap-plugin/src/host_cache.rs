@@ -58,9 +58,9 @@ impl HostCacheSweep {
     /// `last_used`) is older than the TTL, then evict oldest-first beyond
     /// the hard cap. At most one caller per sweep interval performs the
     /// walk; every other caller returns after a single atomic load.
-    pub fn prune<V>(
+    pub fn prune<K: Clone + Eq + std::hash::Hash, V>(
         &self,
-        map: &DashMap<String, V>,
+        map: &DashMap<K, V>,
         now: u64,
         last_used: impl Fn(&V) -> u64,
     ) {
@@ -80,7 +80,7 @@ impl HostCacheSweep {
         map.retain(|_, value| last_used(value) > cutoff);
         let excess = map.len().saturating_sub(HOST_CACHE_MAX_ENTRIES);
         if excess > 0 {
-            let mut by_age: Vec<(String, u64)> = map
+            let mut by_age: Vec<(K, u64)> = map
                 .iter()
                 .map(|entry| (entry.key().clone(), last_used(entry.value())))
                 .collect();

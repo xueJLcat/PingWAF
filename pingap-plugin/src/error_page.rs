@@ -25,7 +25,7 @@
 //! hot path only pays for a render.
 //!
 //! Page definitions come from two sources, resolved per request:
-//! * a [`PingWafAgent`] control-plane instance, when one is running and has
+//! * a [`pingwaf_agent::PingWafAgent`] control-plane instance, when one is running and has
 //!   error pages for the request's domain (cached per host, rebuilt when the
 //!   agent's config hash changes); these take priority;
 //! * otherwise the locally configured `pages` from the plugin's TOML config,
@@ -48,7 +48,6 @@ use pingap_core::{
 };
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
-use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::CustomErrorPage;
 use pingwaf_challenge::generate_request_id;
 use std::borrow::Cow;
@@ -225,10 +224,9 @@ type CompiledErrorPageMap = Arc<HashMap<u16, CompiledErrorPage>>;
 /// A [`Tera`] instance plus the pages whose templates live inside it.
 type CompiledSitePages = (Arc<Tera>, CompiledErrorPageMap);
 
-/// Per-host cache of agent-supplied compiled pages plus the fingerprint they
-/// were built from.
+/// Compiled agent pages and the rule revision they were built from.
 struct CachedSitePages {
-    fingerprint: Arc<str>,
+    revision: crate::RuleRevision,
     tera: Arc<Tera>,
     pages: CompiledErrorPageMap,
     /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
@@ -272,8 +270,8 @@ pub struct ErrorPagePlugin {
     tera: Arc<Tera>,
     /// Whether the built-in PingWAF pages are used.
     use_defaults: bool,
-    /// Agent-supplied pages keyed by host.
-    site_pages: DashMap<String, CachedSitePages>,
+    /// Agent-supplied pages keyed by legacy host or managed UUID.
+    site_pages: DashMap<crate::RuleKey, CachedSitePages>,
     /// Sweep gate for the `site_pages` host cache (TTL + hard cap).
     pages_sweep: HostCacheSweep,
     hash_value: String,
@@ -305,35 +303,40 @@ impl ErrorPagePlugin {
 
     /// Resolve the active page set for `host`: agent pages when available,
     /// otherwise the locally configured pages.
-    fn resolve(&self, host: &str) -> CompiledSitePages {
-        if !host.is_empty()
-            && let Some(agent) = PingWafAgent::instance()
-            && let Some(site) = agent.get_rules_for_domain(host)
+    fn resolve(
+        &self,
+        session: &Session,
+        host: &str,
+    ) -> pingora::Result<CompiledSitePages> {
+        if let Some(crate::RequestRules {
+            key,
+            revision,
+            site,
+        }) = crate::RequestRules::resolve(session, host)?
             && !site.error_pages.is_empty()
         {
             let now = crate::host_cache::unix_now();
             self.pages_sweep.prune(&self.site_pages, now, |cached| {
                 cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
             });
-            let fingerprint = agent.config_hash();
-            if let Some(cached) = self.site_pages.get(host)
-                && cached.fingerprint == fingerprint
+            if let Some(cached) = self.site_pages.get(&key)
+                && cached.revision == revision
             {
                 touch(&cached.last_used, now);
-                return (cached.tera.clone(), cached.pages.clone());
+                return Ok((cached.tera.clone(), cached.pages.clone()));
             }
             match build_site_pages(&site.error_pages) {
                 Ok((tera, pages)) => {
                     self.site_pages.insert(
-                        host.to_string(),
+                        key,
                         CachedSitePages {
-                            fingerprint,
+                            revision,
                             tera: tera.clone(),
                             pages: pages.clone(),
                             last_used: AtomicU64::new(now),
                         },
                     );
-                    return (tera, pages);
+                    return Ok((tera, pages));
                 },
                 Err(e) => {
                     debug!(
@@ -343,7 +346,7 @@ impl ErrorPagePlugin {
                 },
             }
         }
-        (self.tera.clone(), self.templates.load_full())
+        Ok((self.tera.clone(), self.templates.load_full()))
     }
 
     /// Build the Tera render context for the current request.
@@ -408,7 +411,7 @@ impl ErrorPagePlugin {
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();
-        let (tera, pages) = self.resolve(&host);
+        let (tera, pages) = self.resolve(session, &host)?;
         let Some(page) = pages.get(&status) else {
             return Ok(ResponsePluginResult::Unchanged);
         };
@@ -930,6 +933,40 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
         assert_eq!(ResponsePluginResult::Unchanged, result);
     }
 
+    #[tokio::test]
+    async fn managed_error_page_uses_the_selected_site_after_authority_rewrite()
+    {
+        let plugin = ErrorPagePlugin::new(
+            &toml::from_str::<PluginConf>(r#"category = "error_page""#)
+                .unwrap(),
+        )
+        .unwrap();
+        for id in ["site-a", "site-b"] {
+            let mut rules = crate::waf::tests::site_rules(None);
+            rules.site_id = id.into();
+            rules.error_pages.push(CustomErrorPage {
+                id: "same-page".into(),
+                status_code: 503,
+                content_type: "text/html".into(),
+                body_template: format!("<p>{id}</p>"),
+                name: id.into(),
+                enabled: true,
+                scope: "site".into(),
+            });
+            let mut s = session("GET", "/", "example.com").await;
+            crate::test_support::pin_site(&mut s, Arc::new(rules));
+            s.req_header_mut()
+                .insert_header("host", "origin.example")
+                .unwrap();
+            let (tera, pages) = plugin.resolve(&s, "origin.example").unwrap();
+            let page = pages.get(&503).unwrap();
+            assert_eq!(
+                tera.render(&page.template_name, &Context::new()).unwrap(),
+                format!("<p>{id}</p>")
+            );
+        }
+    }
+
     mod agent_mode {
         use super::*;
         use crate::waf::tests::install_test_agent;
@@ -997,7 +1034,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             assert_eq!(ResponsePluginResult::Modified, result);
             // The compiled agent page renders with the documented variables
             // filled in.
-            let (tera, pages) = plugin.resolve("example.com");
+            let (tera, pages) = plugin.resolve(&s, "example.com").unwrap();
             let page = pages.get(&503).expect("agent page compiled");
             let mut c = Context::new();
             c.insert("error_code", &503u16);

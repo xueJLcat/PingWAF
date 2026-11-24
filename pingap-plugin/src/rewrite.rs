@@ -26,7 +26,7 @@
 //! * **Response body phase** — literal search/replace or full body replacement.
 //!
 //! Rules come from two sources, resolved per request:
-//! * a [`PingWafAgent`] control-plane instance, when one is running and has
+//! * a [`pingwaf_agent::PingWafAgent`] control-plane instance, when one is running and has
 //!   rules for the request's domain (cached per host, rebuilt when the agent's
 //!   config hash changes);
 //! * otherwise the locally configured `rules` from the plugin's TOML config.
@@ -52,7 +52,6 @@ use pingap_core::{
 };
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
-use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::{
     RewriteDirection as CacheRewriteDirection,
     RewriteOperation as CacheRewriteOperation, RewriteRule as CacheRewriteRule,
@@ -1332,10 +1331,9 @@ fn convert_operation(op: &CacheRewriteOperation) -> Option<RewriteOperation> {
 // Plugin
 // ─────────────────────────────────────────────────────────────
 
-/// Per-host cache of agent-supplied compiled rules plus the fingerprint they
-/// were built from.
+/// Compiled agent rules and the revision they were built from.
 struct CachedSiteRules {
-    fingerprint: Arc<str>,
+    revision: crate::RuleRevision,
     rules: Arc<Vec<CompiledRewriteRule>>,
     /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
     /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
@@ -1348,8 +1346,8 @@ pub struct RewritePlugin {
     plugin_step: PluginStep,
     /// Locally configured rules, hot-swappable.
     rules: Arc<ArcSwap<Vec<CompiledRewriteRule>>>,
-    /// Agent-supplied rules keyed by host.
-    site_rules: DashMap<String, CachedSiteRules>,
+    /// Agent-supplied rules keyed by legacy host or managed UUID.
+    site_rules: DashMap<crate::RuleKey, CachedSiteRules>,
     /// Sweep gate for the `site_rules` host cache (TTL + hard cap).
     rules_sweep: HostCacheSweep,
     hash_value: String,
@@ -1364,22 +1362,27 @@ impl RewritePlugin {
 
     /// Resolve the active rule set for `host`: agent rules when available,
     /// otherwise the locally configured rules.
-    fn active_rules(&self, host: &str) -> Arc<Vec<CompiledRewriteRule>> {
-        if !host.is_empty()
-            && let Some(agent) = PingWafAgent::instance()
-            && let Some(site) = agent.get_rules_for_domain(host)
+    fn active_rules(
+        &self,
+        session: &Session,
+        host: &str,
+    ) -> pingora::Result<Arc<Vec<CompiledRewriteRule>>> {
+        if let Some(crate::RequestRules {
+            key,
+            revision,
+            site,
+        }) = crate::RequestRules::resolve(session, host)?
             && !site.rewrite_rules.is_empty()
         {
             let now = crate::host_cache::unix_now();
             self.rules_sweep.prune(&self.site_rules, now, |cached| {
                 cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
             });
-            let fingerprint = agent.config_hash();
-            if let Some(cached) = self.site_rules.get(host)
-                && cached.fingerprint == fingerprint
+            if let Some(cached) = self.site_rules.get(&key)
+                && cached.revision == revision
             {
                 touch(&cached.last_used, now);
-                return cached.rules.clone();
+                return Ok(cached.rules.clone());
             }
             let converted = convert_agent_rules(&site.rewrite_rules);
             // Compile per rule: one invalid rule must not disable the
@@ -1402,16 +1405,16 @@ impl RewritePlugin {
             compiled.sort_by_key(|r| r.priority);
             let rules = Arc::new(compiled);
             self.site_rules.insert(
-                host.to_string(),
+                key,
                 CachedSiteRules {
-                    fingerprint,
+                    revision,
                     rules: Arc::clone(&rules),
                     last_used: AtomicU64::new(now),
                 },
             );
-            return rules;
+            return Ok(rules);
         }
-        self.rules.load_full()
+        Ok(self.rules.load_full())
     }
 }
 
@@ -1620,7 +1623,7 @@ impl Plugin for RewritePlugin {
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();
-        let rules = self.active_rules(&host);
+        let rules = self.active_rules(session, &host)?;
         if rules
             .iter()
             .all(|r| r.direction != RewriteDirection::Request)
@@ -1687,7 +1690,7 @@ impl Plugin for RewritePlugin {
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();
-        let rules = self.active_rules(&host);
+        let rules = self.active_rules(session, &host)?;
         if rules
             .iter()
             .all(|r| r.direction != RewriteDirection::Response)
@@ -2079,6 +2082,55 @@ rules = '[{"id":"zeros","direction":"request","operations":[{"type":"regex_repla
             .unwrap();
         assert_eq!(true, result == RequestPluginResult::Continue);
         assert_eq!("/f00/b00", s.req_header().uri.path());
+    }
+
+    #[tokio::test]
+    async fn managed_rewrite_uses_the_pinned_revision_of_each_site() {
+        use pingwaf_agent::cache;
+        let plugin = RewritePlugin::new(
+            &toml::from_str::<PluginConf>(r#"category = "rewrite""#).unwrap(),
+        )
+        .unwrap();
+        let site = |id: &str, path: &str| {
+            let mut rules = crate::waf::tests::site_rules(None);
+            rules.site_id = id.into();
+            rules.rewrite_rules.push(cache::RewriteRule {
+                id: "same-rule".to_string(),
+                name: String::new(),
+                match_expression: String::new(),
+                direction: cache::RewriteDirection::Request,
+                operations: vec![cache::RewriteOperation {
+                    op_type: "set_path".to_string(),
+                    name: String::new(),
+                    value: path.to_string(),
+                    is_regex: None,
+                    greedy: None,
+                }],
+                enabled: true,
+                priority: 1,
+            });
+            Arc::new(rules)
+        };
+        let old = site("site-a", "/a");
+        for (rules, expected) in [
+            (old.clone(), "/a"),
+            (site("site-b", "/b"), "/b"),
+            (site("site-a", "/new"), "/new"),
+            (old, "/a"),
+        ] {
+            let mut s = session("GET", "/", "example.com").await;
+            crate::test_support::pin_site(&mut s, rules);
+            plugin
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(s.req_header().uri.path(), expected);
+        }
+        assert_eq!(plugin.site_rules.len(), 2);
     }
 
     mod agent_mode {
