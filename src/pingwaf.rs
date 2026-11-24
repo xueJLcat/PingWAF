@@ -232,23 +232,7 @@ fn extract_port(addr: &str) -> &str {
     addr.rsplit(':').next().unwrap_or("9090")
 }
 
-/// Whether this host can bind the IPv6 wildcard at all.
-///
-/// Probed once: a host with IPv6 disabled (`ipv6.disable=1`) or built without
-/// AF_INET6 refuses `bind("[::]:0")`, and the data plane must not fail to
-/// start there just because the default changed.
-fn ipv6_wildcard_bindable() -> bool {
-    static BINDABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *BINDABLE.get_or_init(|| std::net::TcpListener::bind("[::]:0").is_ok())
-}
-
-/// Publishes the listen address for a public data-plane port.
-///
-/// The default is the IPv6 wildcard `[::]`. The generated server config sets
-/// `ipv6_only = false` on it, so a single socket serves IPv4 and IPv6 alike —
-/// IPv4 peers simply arrive as `::ffff:a.b.c.d`, which the client-IP resolver
-/// canonicalises back to `a.b.c.d`. Hosts that cannot bind IPv6 fall back to
-/// the IPv4 wildcard instead of failing to start.
+/// Publishes the IPv4 wildcard by default. Explicit IPv6 addresses are supported.
 ///
 /// Overrides, in order: `env_key`, then `legacy_key` (the `PINGWAF_ANALYSIS_*`
 /// spelling the dhat analysis harness still sets), then the default.
@@ -265,11 +249,7 @@ pub(crate) fn public_listen_addr(
             }
         }
     }
-    if ipv6_wildcard_bindable() {
-        format!("[::]:{port}")
-    } else {
-        format!("0.0.0.0:{port}")
-    }
+    format!("0.0.0.0:{port}")
 }
 
 /// True when every address in a comma-separated listen list is IPv6.
@@ -1523,11 +1503,7 @@ fn convert_proxy_config(
              fail until one is issued or uploaded"
         );
     }
-    // Dual-stack by default: `[::]` plus `ipv6_only = false` serves IPv4 and
-    // IPv6 from one socket, and IPv4 peers stay recognisable because the
-    // client-IP resolver canonicalises their `::ffff:` form. A host without
-    // IPv6 falls back to the IPv4 wildcard (see `public_listen_addr`); both
-    // ports remain overridable for a non-root run or a split-family setup.
+    // Explicit IPv6 wildcard overrides can serve both address families.
     let public_http_addr = public_listen_addr(
         "PINGWAF_LISTEN_HTTP_ADDR",
         "PINGWAF_ANALYSIS_HTTP_ADDR",
@@ -5081,7 +5057,7 @@ tls_key = \"NEWKEY\"
     }
 
     #[test]
-    fn public_listen_addr_defaults_to_the_dual_stack_wildcard() {
+    fn public_listen_addr_defaults_to_the_ipv4_wildcard() {
         // `std::env` is process-global; hold the lock while switching keys so
         // no other test observes a half-configured environment.
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -5098,12 +5074,7 @@ tls_key = \"NEWKEY\"
         clear();
 
         let default = public_listen_addr(KEYS[0], KEYS[1], 80);
-        if ipv6_wildcard_bindable() {
-            assert_eq!(default, "[::]:80");
-        } else {
-            // A host with IPv6 disabled must still start.
-            assert_eq!(default, "0.0.0.0:80");
-        }
+        assert_eq!(default, "0.0.0.0:80");
 
         unsafe { std::env::set_var(KEYS[0], "127.0.0.1:8080") };
         assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "127.0.0.1:8080");

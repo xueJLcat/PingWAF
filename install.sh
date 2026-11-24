@@ -18,7 +18,7 @@
 #   --admin-email     Seed administrator e-mail (server / all-in-one)
 #   --admin-password  Seed administrator password (omit to generate a random one)
 #   --tls-sans        Comma separated names of the dashboard certificate
-#   --listen-public   Bind the admin API and gRPC on 0.0.0.0 instead of 127.0.0.1
+#   --listen-public   Also bind the agent gRPC endpoint to 0.0.0.0
 #   --no-systemd      Skip systemd service creation
 #   --interactive     Prompt even when the flags would normally skip the questions
 #   --non-interactive Run with the given values and defaults, never prompt
@@ -207,9 +207,7 @@ API_KEY=""
 ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
 TLS_SANS=""
-# Bind the admin API / gRPC on all interfaces. Off by default: a fresh install
-# with the seeded administrator account must not be reachable from the network
-# until the operator has changed its password (or put it behind a proxy).
+# Opt into public gRPC for remote agents. The dashboard already listens on all IPv4 interfaces.
 LISTEN_PUBLIC=false
 # Instance key for the at-rest sealing of notification/AI/backup credentials.
 # Taken from the environment when set; otherwise generated once and persisted
@@ -254,10 +252,7 @@ Options:
                            PINGWAF_ADMIN_PASSWORD) a random password is
                            generated and printed exactly once at the end.
   --tls-sans NAMES         Comma separated dashboard certificate names
-  --listen-public          Bind the dashboard/REST API (9080) and the agent
-                           gRPC endpoint (9090) on 0.0.0.0. The default is
-                           127.0.0.1: expose them only through a reverse proxy
-                           or after changing the administrator password.
+  --listen-public          Also bind the agent gRPC endpoint to 0.0.0.0.
   --no-systemd             Skip systemd service file creation
   --interactive            Ask the questions even when options were given
   --non-interactive, --yes Never prompt; use the given values and defaults
@@ -665,7 +660,7 @@ print_plan_summary() {
         if [[ "$LISTEN_PUBLIC" == "true" ]]; then
             echo "  listen:      0.0.0.0:9080 (admin) / 0.0.0.0:9090 (gRPC) — change the admin password before exposing"
         else
-            echo "  listen:      127.0.0.1:9080 (admin) / 127.0.0.1:9090 (gRPC) — loopback only"
+            echo "  listen:      0.0.0.0:9080 (admin) / 127.0.0.1:9090 (gRPC)"
         fi
         echo "  tls sans:    ${TLS_SANS:-none (the generated certificate covers the hostname used to reach it)}"
     fi
@@ -1163,13 +1158,9 @@ write_config() {
         fi
     fi
 
-    # Loopback by default: a fresh install still has the seeded administrator
-    # account, so the API/gRPC must not be reachable from the network until the
-    # password has been changed (or the operator opts into --listen-public /
-    # puts the console behind a reverse proxy).
-    local admin_addr="127.0.0.1:9080" grpc_addr="127.0.0.1:9090"
+    # The console is public by default. Remote agent enrollment is optional.
+    local admin_addr="0.0.0.0:9080" grpc_addr="127.0.0.1:9090"
     if [[ "$LISTEN_PUBLIC" == "true" ]]; then
-        admin_addr="0.0.0.0:9080"
         grpc_addr="0.0.0.0:9090"
     fi
 
@@ -1201,8 +1192,7 @@ write_config() {
 
 [server]
 db_url = "$(toml_string "$DB_URL")"
-# Admin API + gRPC listen on loopback unless --listen-public was given; agents
-# on other hosts and remote dashboards need an explicit choice (or a proxy).
+# Console and agent control endpoints.
 admin_addr = "${admin_addr}"
 grpc_addr = "${grpc_addr}"
 # gRPC control plane TLS: "tls" (default) serves agents over TLS, reusing the
@@ -1689,7 +1679,7 @@ else
     if [[ "$LISTEN_PUBLIC" == "true" ]]; then
         echo "  ${YELLOW}⚠ Admin/gRPC listen on 0.0.0.0 — change the password and restrict 9080/9090 to an admin network before exposing them.${NO_COLOR}"
     else
-        echo "  Listen:    127.0.0.1 only (admin 9080 / gRPC 9090); use --listen-public for remote agents or a dashboard proxy"
+        echo "  Listen:    0.0.0.0:9080 (admin), 127.0.0.1:9090 (gRPC); use --listen-public for remote agents"
     fi
     if [[ "$CONFIG_PRESENT" == "true" ]]; then
         echo "  Administrator: unchanged — ${CONFIG_DIR}/pingwaf.toml was left as it was."

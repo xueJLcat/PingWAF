@@ -856,8 +856,9 @@ async fn check_restore_ingress<C: ConnectionTrait>(
         let fields: crate::api::sites::IngressFields =
             serde::Deserialize::deserialize(row)
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
-        let (port, protocol) =
-            fields.resolve(None, true).map_err(RestoreError::Ingress)?;
+        let (port, protocol) = fields
+            .resolve(None, true, agents.admin_port)
+            .map_err(RestoreError::Ingress)?;
         if let (Some(port), Some(protocol)) = (port, protocol.as_deref()) {
             let id = uuid_field(row, "id").ok_or_else(|| {
                 DbErr::Custom("invalid restored site id".into())

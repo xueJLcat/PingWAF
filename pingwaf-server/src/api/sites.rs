@@ -371,6 +371,7 @@ impl IngressFields {
         &self,
         current: Option<&site::Model>,
         is_admin: bool,
+        admin_port: u16,
     ) -> Result<(Option<i32>, Option<String>), ApiError> {
         let invalid = |reason: &str| {
             ApiError::BadRequest(reason.to_owned())
@@ -382,6 +383,9 @@ impl IngressFields {
             (Some(Some(port)), Some(Some(protocol))) => {
                 let value = port.as_u64().filter(|p| (1..=65535).contains(p) && !matches!(p, 80 | 443))
                     .ok_or_else(|| invalid("ingress_port must be an integer from 1 to 65535 other than 80 or 443"))?;
+                if value == u64::from(admin_port) {
+                    return Err(invalid("the site ingress port is reserved for the management console"));
+                }
                 let protocol = protocol.as_str().filter(|p| matches!(*p, "http" | "https"))
                     .ok_or_else(|| invalid("ingress_protocol must be http or https"))?;
                 Some((value as i32, protocol.to_owned()))
@@ -1461,7 +1465,11 @@ async fn create(
             "name must be 1-100 characters".to_string(),
         ));
     }
-    let (port, protocol) = payload.ingress.resolve(None, current.is_admin())?;
+    let (port, protocol) = payload.ingress.resolve(
+        None,
+        current.is_admin(),
+        state.agents.admin_port,
+    )?;
     let domain = normalise_domain(&payload.domain)?;
     let alternate_domains = normalise_domain_list(
         &domain,
@@ -1898,8 +1906,11 @@ async fn clone_site(
         .await?;
     let source = load_site_write(&txn, source_id, &current).await?;
 
-    let (port, protocol) =
-        payload.ingress.resolve(Some(&source), current.is_admin())?;
+    let (port, protocol) = payload.ingress.resolve(
+        Some(&source),
+        current.is_admin(),
+        state.agents.admin_port,
+    )?;
     if port.is_some() && !current.is_admin() {
         return Err(ApiError::Forbidden(
             "only administrators may clone to a custom ingress".into(),
@@ -2350,8 +2361,11 @@ async fn update(
         .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
         .await?;
     let model = load_site_write(&txn, id, &current).await?;
-    let (port, protocol) =
-        payload.ingress.resolve(Some(&model), current.is_admin())?;
+    let (port, protocol) = payload.ingress.resolve(
+        Some(&model),
+        current.is_admin(),
+        state.agents.admin_port,
+    )?;
     let ingress_changed =
         port != model.ingress_port || protocol != model.ingress_protocol;
     let activating =
@@ -4269,6 +4283,7 @@ mod tests {
     fn ingress_fields_require_a_valid_pair() {
         use serde_json::json;
         for fields in [
+            json!({"ingress_port":19080,"ingress_protocol":"http"}),
             json!({"ingress_port":81}),
             json!({"ingress_protocol":null}),
             json!({"ingress_port":0,"ingress_protocol":"http"}),
@@ -4281,7 +4296,7 @@ mod tests {
             let dto: UpdateSiteRequest =
                 serde_json::from_value(fields).unwrap();
             assert_eq!(
-                dto.ingress.resolve(None, true).unwrap_err().code(),
+                dto.ingress.resolve(None, true, 19080).unwrap_err().code(),
                 "site.ingress_invalid"
             );
         }
@@ -4290,11 +4305,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            dto.ingress.resolve(None, true).unwrap(),
+            dto.ingress.resolve(None, true, 19080).unwrap(),
             (Some(65535), Some("https".into()))
         );
         assert_eq!(
-            dto.ingress.resolve(None, false).unwrap_err().code(),
+            dto.ingress.resolve(None, false, 19080).unwrap_err().code(),
             "forbidden"
         );
     }

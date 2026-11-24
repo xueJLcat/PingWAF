@@ -177,7 +177,22 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     })?;
 
     // ── 6. Build shared state ────────────────────────────────────────────────
-    let agents = AgentRegistry::new();
+    let http_listener = TcpListener::bind(http_addr).await.map_err(|err| {
+        anyhow::anyhow!("failed to bind HTTP address {http_addr}: {err}")
+    })?;
+    let admin_port = http_listener.local_addr()?.port();
+    {
+        use crate::models::site;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        if let Some(existing) = site::Entity::find()
+            .filter(site::Column::IngressPort.eq(i32::from(admin_port)))
+            .one(&db)
+            .await?
+        {
+            anyhow::bail!("dashboard port {admin_port} is configured as ingress for site {}; move that site or select another dashboard port", existing.id);
+        }
+    }
+    let agents = AgentRegistry::with_admin_port(admin_port);
     let shared_config = Arc::new(config);
 
     // ── 6b. Optional Elasticsearch log shipper ──────────────────────────────
@@ -315,9 +330,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     }
 
     // ── 7. HTTP (Axum) ───────────────────────────────────────────────────────
-    let http_listener = TcpListener::bind(http_addr).await.map_err(|err| {
-        anyhow::anyhow!("failed to bind HTTP address {http_addr}: {err}")
-    })?;
+
     let router = api::build_router(state.clone());
     if control_tls.is_enabled() {
         tracing::info!(%http_addr, "REST API and dashboard listening (HTTPS)");

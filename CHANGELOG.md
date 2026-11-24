@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Dashboard and site listener defaults use the IPv4 wildcard. The operator-configured dashboard port is excluded from site assignments and restores.
+
 - Updating one managed listener preserves traffic on other listeners with identical routes and policies, subject to their current session and lease.
 
 - Managed ingress deployment now reports a verified, current per-site receipt while a node prepares its proxy view.

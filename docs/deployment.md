@@ -84,17 +84,7 @@ thread 'Pingora HTTP Proxy Service' panicked at …/pingora-core-0.9.x/src/servi
 Failed to build listeners: … PermissionDenied … bind() failed on [::]:443
 ```
 
-Both listeners bind the IPv6 wildcard `[::]` by default with
-`IPV6_V6ONLY=false`, so one socket serves IPv4 and IPv6: an IPv4 client simply
-arrives as `::ffff:a.b.c.d` and the data plane canonicalises it back to
-`a.b.c.d` before IP access rules, rate-limit keys, auto-ban and logs see it. Two
-consequences worth knowing:
-
-- A host with IPv6 disabled at the kernel level cannot bind `[::]`, so the
-  default falls back to `0.0.0.0` automatically instead of failing to start.
-- To pin one family, set `PINGWAF_LISTEN_HTTP_ADDR` / `PINGWAF_LISTEN_HTTPS_ADDR`
-  (e.g. `0.0.0.0:80`), which is also what the `bind() failed on [::]:443`
-  message above is telling you to look at.
+The HTTP and HTTPS site listeners default to `0.0.0.0:80` and `0.0.0.0:443`. Operators can set `PINGWAF_LISTEN_HTTP_ADDR` and `PINGWAF_LISTEN_HTTPS_ADDR` explicitly for IPv6 or for a restricted interface. For a managed listener, `http@81` binds `0.0.0.0:81`; an explicit IP address is also supported. The dashboard defaults to `0.0.0.0:9080`. Its configured port is reserved across site creation, cloning and backup restore, including paused sites.
 
 Images built from this repository grant that capability to the binary at build
 time (`setcap cap_net_bind_service=+ep /usr/local/bin/pingwaf`, asserted with
@@ -478,8 +468,8 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_API_KEY` | `agent.api_key` |
 | `PINGWAF_CACHE_DIR` | `agent.cache_dir` |
 | `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
-| `PINGWAF_LISTEN_HTTP_ADDR` | — (data-plane `:80` listener; default `[::]:80`, automatic `0.0.0.0:80` fallback) |
-| `PINGWAF_LISTEN_HTTPS_ADDR` | — (data-plane `:443` listener; default `[::]:443`, automatic `0.0.0.0:443` fallback) |
+| `PINGWAF_LISTEN_HTTP_ADDR` | — (data-plane `:80` listener; default `0.0.0.0:80`) |
+| `PINGWAF_LISTEN_HTTPS_ADDR` | — (data-plane `:443` listener; default `0.0.0.0:443`) |
 | `PINGWAF_INGRESS_LISTENERS` | — (experimental managed ingress on Linux; unset by default) |
 | `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
 | `PINGWAF_ES_ENABLED` | — Elasticsearch shipper toggle |

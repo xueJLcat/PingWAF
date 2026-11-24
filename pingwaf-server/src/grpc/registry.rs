@@ -187,8 +187,9 @@ fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
 }
 
 /// Cheap-to-clone handle to the live agent connections.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AgentRegistry {
+    pub(crate) admin_port: u16,
     inner: Arc<RwLock<Inner>>,
 }
 
@@ -232,9 +233,22 @@ pub struct ConnectedAgent {
     pub queued_commands: usize,
 }
 
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self::with_admin_port(9080)
+    }
+}
+
 impl AgentRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_admin_port(admin_port: u16) -> Self {
+        Self {
+            admin_port,
+            inner: Default::default(),
+        }
     }
 
     /// Attaches a freshly opened heartbeat stream and returns everything that
@@ -627,7 +641,10 @@ impl AgentRegistry {
         report
             .listeners
             .iter()
-            .filter(|l| l.state() == IngressBindState::Bound)
+            .filter(|l| {
+                l.state() == IngressBindState::Bound
+                    && l.port != u32::from(self.admin_port)
+            })
             .filter_map(|l| match l.protocol() {
                 IngressProtocol::Http => Some((l.port as i32, "http")),
                 IngressProtocol::Https => Some((l.port as i32, "https")),

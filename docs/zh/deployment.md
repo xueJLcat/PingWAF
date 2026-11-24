@@ -175,3 +175,5 @@ pingwaf config rollback --scope global                    # 回滚配置版本
 ```
 
 详见英文 [deployment.md → Maintenance CLI](../deployment.md#maintenance-cli-break-glass)。
+
+管理控制台默认监听 `0.0.0.0:9080`，运维可配置管理端口。默认 HTTP/HTTPS 站点监听 IPv4 全部接口。自定义入口 `http@81` 表示 `0.0.0.0:81`，仍可指定 IPv4 或 IPv6 地址。站点创建、复制、编辑与恢复时均保留控制台实际使用的端口，暂停站点同样受限。

@@ -176,6 +176,19 @@ async fn site_ingress_migration_postgres() {
     let mut gated = legacy_snapshot.clone();
     gated["tables"]["sites"][0]["ingress_port"] = 81.into();
     gated["tables"]["sites"][0]["ingress_protocol"] = "http".into();
+    let reserved = config_restore::prepare_restore_with_agents(
+        &db,
+        &crate::grpc::AgentRegistry::with_admin_port(81),
+        scope,
+        &gated,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        crate::api::error::ApiError::from(reserved).code(),
+        "site.ingress_invalid"
+    );
     let denied = config_restore::prepare_restore_with_agents(
         &db,
         &crate::grpc::AgentRegistry::new(),

@@ -44,7 +44,10 @@ impl Endpoint {
             "https" => IngressProtocol::Https,
             _ => return None,
         };
-        let addr = addr.parse::<SocketAddr>().ok()?;
+        let addr = match addr.parse::<u16>() {
+            Ok(port) => SocketAddr::from(([0, 0, 0, 0], port)),
+            Err(_) => addr.parse::<SocketAddr>().ok()?,
+        };
         if addr.port() == 0
             || matches!(addr, SocketAddr::V6(v6) if v6.ip().to_ipv4_mapped().is_some())
         {
@@ -81,7 +84,7 @@ fn parse_list(value: &str) -> Vec<Endpoint> {
                 warn!(target: LOG_TARGET, port, "duplicate custom ingress port; no socket opened for this port");
             }).or_insert(Some(endpoint));
         } else {
-            warn!(target: LOG_TARGET, entry = index + 1, "invalid custom ingress; expected http@IP:port or https@IP:port");
+            warn!(target: LOG_TARGET, entry = index + 1, "invalid custom ingress; expected http@port or https@port, optionally with an explicit IP address");
         }
     }
     by_port.into_values().flatten().collect()
