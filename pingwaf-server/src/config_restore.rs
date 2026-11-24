@@ -1465,7 +1465,6 @@ pub async fn apply_restore(
          WHERE action = 'allow' AND mode = 'off'",
     )
     .await?;
-    // Report skipped validation rows, without implying the caller's
     crate::models::site_handler::check_redirects(txn).await?;
     if txn.query_one(Statement::from_string(txn.get_database_backend(),
         "SELECT 1 FROM sites s WHERE s.site_handler->>'kind'='zip' AND NOT EXISTS
@@ -1473,7 +1472,12 @@ pub async fn apply_restore(
     )).await?.is_some() {
         return Err(DbErr::Custom("uploaded static site has no matching release in backup".into()));
     }
-    // transaction has committed (deferred constraints can still fail).
+    txn.execute_unprepared("
+        INSERT INTO static_directory_versions(site_id,directory_id,digest)
+        SELECT id,site_handler->>'directory_id',site_handler->>'digest'
+        FROM sites WHERE site_handler->>'kind'='static' ON CONFLICT DO NOTHING
+    ").await?;
+    // The caller's transaction is still subject to deferred constraints.
     let restored: usize = report.rows_by_table.values().sum();
     tracing::info!(
         restored,

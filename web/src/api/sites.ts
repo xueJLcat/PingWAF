@@ -51,7 +51,7 @@ export const sitesApi = {
   uploadArchive: (file: File) => apiClient.post<{id: string; sha256: string; files: string[]}>('/static-drafts', file, {headers: {'Content-Type': 'application/zip'}}),
   discardArchive: (id: string) => apiClient.delete<void>(`/static-drafts/${id}`),
   previewArchive: (id: string) => apiClient.post<{url: string}>(`/static-drafts/${id}/preview-session`),
-  archiveVersions: (site: string) => apiClient.get<{digest: string; published_at: string}[]>(`/sites/${site}/static-versions`),
+  archiveVersions: (site: string) => apiClient.get<{digest: string; directory_id: string | null; published_at: string}[]>(`/sites/${site}/static-versions`),
 
   deployment: (id: string) => apiClient.get<SiteDeployment>(`/sites/${id}/deployment`),
 

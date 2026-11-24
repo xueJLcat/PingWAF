@@ -116,6 +116,7 @@ mod m20240101_000108_site_listeners;
 mod m20240101_000109_static_drafts;
 mod m20240101_000110_site_handlers;
 mod m20240101_000111_static_releases;
+mod m20240101_000112_directory_versions;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -249,6 +250,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000109_static_drafts::Migration),
             Box::new(m20240101_000110_site_handlers::Migration),
             Box::new(m20240101_000111_static_releases::Migration),
+            Box::new(m20240101_000112_directory_versions::Migration),
         ]
     }
 }
@@ -260,7 +262,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 111);
+        assert_eq!(migrations.len(), 112);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

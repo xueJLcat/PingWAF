@@ -2027,20 +2027,26 @@ async fn clone_site(
     );
     active.ingress_port = Set(port);
     active.additional_ingresses = Set(payload.ingress.additional(Some(&source), port, current.is_admin(), state.agents.admin_port)?);
+    if let Some(mut handler) = source.site_handler.clone().filter(|v| v["kind"] == "static") {
+        if let Some(object) = handler.as_object_mut() { object.remove("rollback"); }
+        active.site_handler = Set(Some(handler));
+    }
     active.ingress_protocol = Set(protocol);
     let model = active
         .insert(&txn)
         .await
         .map_err(map_site_domain_conflict)?;
 
-    // Upstream pools first: nodes and routes reference them by id, so the
+    if model.site_handler.as_ref().is_some_and(|v| v["kind"] == "static") {
+        super::static_drafts::bind_version(&txn, new_id, current.id, model.site_handler.as_ref(), None).await?;
+    }
     if let Some(digest) = model.site_handler.as_ref().filter(|h| h["kind"] == "zip").and_then(|h| h["digest"].as_str()) {
         let copied = txn.execute(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
             "INSERT INTO static_releases(site_id,digest,archive) SELECT $1,digest,archive FROM static_releases WHERE site_id=$2 AND digest=$3",
             [new_id.into(), source_id.into(), digest.into()])).await?;
         if copied.rows_affected() != 1 { return Err(ApiError::BadRequest("source version missing".into())); }
     }
-    // clone needs its own pool ids and a mapping from the source's.
+    // Nodes and routes reference pools by id, so the clone needs a pool-id mapping.
     let mut pool_ids: HashMap<Uuid, Uuid> = HashMap::new();
     let mut default_pool_id: Option<Uuid> = None;
     let pools = site_upstream_pools::Entity::find()

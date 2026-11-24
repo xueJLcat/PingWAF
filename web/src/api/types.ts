@@ -126,6 +126,7 @@ export interface RedirectHandler {
 
 export interface StaticDirectoryHandler {
   kind: 'static'
+  rollback?: boolean
   directory_id: string
   digest: string
 }

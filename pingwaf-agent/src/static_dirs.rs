@@ -113,14 +113,60 @@ pub fn release_path(
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "invalid release digest"
     );
-    let base = std::env::var_os("PINGWAF_SITE_CONTENT_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| "/var/lib/pingwaf/site-content".into());
+    let base = content_base();
     ensure!(
         base.is_absolute(),
         "site content directory must be absolute"
     );
     Ok(base.join(site.to_string()).join(digest))
+}
+
+fn content_base() -> std::path::PathBuf {
+    std::env::var_os("PINGWAF_SITE_CONTENT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/var/lib/pingwaf/site-content".into())
+}
+
+/// Inventory contains only published release names. The content itself is
+/// opened without following symlinks and rehashed before it is activated.
+pub fn retained_directories() -> Vec<String> {
+    let mut result = Vec::new();
+    let Ok(sites) = std::fs::read_dir(content_base()) else {
+        return result;
+    };
+    for site in sites.flatten() {
+        let Ok(id) = uuid::Uuid::parse_str(&site.file_name().to_string_lossy())
+        else {
+            continue;
+        };
+        if !site.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(site.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let digest = name.to_string_lossy();
+            if digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                && entry.file_type().is_ok_and(|t| t.is_dir())
+                && entry.path().join("index.html").is_file()
+            {
+                result.push(format!("{id}/{digest}"));
+                if result.len() == 2048 {
+                    break;
+                }
+            }
+        }
+        if result.len() == 2048 {
+            break;
+        }
+    }
+    result.sort_unstable();
+    result
 }
 
 /// The manifest stays outside the visitor-visible tree. Both are made visible

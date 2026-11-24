@@ -994,6 +994,7 @@ mod tests {
                 supports_site_handlers: false,
                 supports_site_archives: false,
                 static_directories: Default::default(),
+            prepared_directories: Vec::new(),
                 dynamic_bind: false,
                 listeners: endpoints
                     .iter()

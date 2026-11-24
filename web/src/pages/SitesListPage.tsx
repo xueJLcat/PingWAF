@@ -545,6 +545,10 @@ export function SitesListPage() {
     }))
   }
 
+  const directoryHistory = useQuery({
+    queryKey: ['static-versions', editing?.id], enabled: !!editing && !!form.directory,
+    queryFn: () => sitesApi.archiveVersions(editing!.id),
+  })
   const activeHandler = form.directory ?? form.handler ?? form.zip
   const selectedAgents = form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []
   const directoryNodes = (ingressInventory.data?.agents ?? []).filter(node => selectedAgents.includes(node.id))
@@ -580,7 +584,7 @@ export function SitesListPage() {
     }
 
     const ingress = ingressRequest(form.ingress, siteListener(editing))
-    if (form.directory && !directories.some(([id, digest]) => id === form.directory?.directory_id && digest === form.directory.digest))
+    if (form.directory && !form.directory.rollback && !directories.some(([id, digest]) => id === form.directory?.directory_id && digest === form.directory.digest))
       errors.top = t('pages.sites.selectDirectory')
     if (form.zip && !form.zip.digest) errors.top = t('pages.sites.uploadZip')
     if (form.handler && !redirectPreview(form.handler)) errors.upstream = t('pages.sites.redirectInvalid')
@@ -1078,6 +1082,17 @@ export function SitesListPage() {
               digest: directories.find(([id]) => id === e.target.value)?.[1] ?? '' } }))}>
             <option value="">{t('pages.sites.selectDirectory')}</option>
             {directories.map(([id]) => <option key={id} value={id}>{id}</option>)}
+          </Select>}
+          {form.directory && editing && <Select label={t('pages.sites.publishedVersions')}
+            value={form.directory.rollback ? form.directory.directory_id + ':' + form.directory.digest : ''}
+            onChange={event => {
+              const version = directoryHistory.data?.find(v => v.directory_id + ':' + v.digest === event.target.value)
+              if (version?.directory_id) setForm(f => ({ ...f, directory: { kind: 'static', rollback: true, directory_id: version.directory_id!, digest: version.digest } }))
+            }}>
+            <option value="">—</option>
+            {directoryHistory.data?.filter(v => v.directory_id).map(v => <option key={v.directory_id + ':' + v.digest} value={v.directory_id + ':' + v.digest}>
+              {v.directory_id} · {v.digest.slice(0, 16)} · {new Date(v.published_at).toLocaleString()}
+            </option>)}
           </Select>}
           {form.directory && mismatchedDirectories.map(id =>
             <details key={id} className="text-xs text-fg-subtle">

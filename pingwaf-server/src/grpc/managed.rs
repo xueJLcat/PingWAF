@@ -386,7 +386,9 @@ pub(crate) async fn check_agent_site(
             return Err(unavailable(&format!("node {id} does not support this site handler")));
         }
         if let Some(dir) = value.get("directory_id").and_then(|v| v.as_str()) {
-            if report.static_directories.get(dir).map(String::as_str) != value.get("digest").and_then(|v| v.as_str()) {
+            let digest = value["digest"].as_str().unwrap_or("");
+            let cached = value["rollback"] == true && report.prepared_directories.contains(&format!("{}/{digest}", site.id));
+            if !cached && report.static_directories.get(dir).map(String::as_str) != Some(digest) {
                 return Err(unavailable(&format!("registered directory {dir} is unavailable or differs on node {id}")));
             }
         }
@@ -918,6 +920,7 @@ pub(super) async fn check_postgres(
         supports_site_handlers: false,
                 supports_site_archives: false,
         static_directories: Default::default(),
+            prepared_directories: Vec::new(),
         dynamic_bind: false,
         listeners: vec![pingwaf_proto::IngressListenerStatus {
             port: 81,

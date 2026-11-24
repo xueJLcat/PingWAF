@@ -574,7 +574,7 @@ Read one draft entry using its preview ticket. Relative stylesheets and images c
 
 ### GET /sites/{id}/static-versions
 
-Return the site's uploaded ZIP versions with digest and publication time. Use the existing site update operation with a previously published digest to roll back. The node only downloads content for explicitly assigned active sites, in chunks of up to 256 KiB.
+Return the site's ZIP and registered-directory versions with digest, directory identifier (null for ZIP), and publication time. Use the existing site update operation with a previously published digest to roll back. A registered directory rollback sets `rollback: true` and can select a snapshot still held by every assigned node. Nodes download ZIP content in chunks of up to 256 KiB for explicitly assigned active sites.
 
 ### DELETE /static-drafts/{id}
 

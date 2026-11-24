@@ -20,6 +20,8 @@ pub enum SiteHandler {
     Static {
         directory_id: String,
         digest: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rollback: bool,
     },
     Redirect {
         target: String,
@@ -137,6 +139,7 @@ impl SiteHandler {
             Self::Static {
                 directory_id,
                 digest,
+                ..
             } => {
                 if directory_id.is_empty()
                     || directory_id.len() > 64

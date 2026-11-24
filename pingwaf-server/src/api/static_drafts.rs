@@ -34,6 +34,7 @@ pub(super) fn routes() -> Router<AppState> {
 
 #[derive(Serialize)]
 struct Version {
+    directory_id: Option<String>,
     digest: String,
     published_at: chrono::DateTime<chrono::Utc>,
 }
@@ -45,10 +46,13 @@ async fn versions(
 ) -> Result<Json<Vec<Version>>, ApiError> {
     super::common::load_site(&state.db, id, &current, false).await?;
     let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT digest,published_at FROM static_releases WHERE site_id=$1 ORDER BY published_at DESC,digest", [id.into()])).await?;
+        "SELECT digest,published_at,NULL::text AS directory_id FROM static_releases WHERE site_id=$1
+         UNION ALL SELECT digest,published_at,directory_id FROM static_directory_versions WHERE site_id=$1
+         ORDER BY published_at DESC,digest", [id.into()])).await?;
     let mut versions = Vec::with_capacity(rows.len());
     for row in rows {
         versions.push(Version {
+            directory_id: row.try_get("", "directory_id")?,
             digest: row.try_get("", "digest")?,
             published_at: row.try_get("", "published_at")?,
         });
@@ -65,6 +69,31 @@ pub(super) async fn bind_version(
     handler: Option<&serde_json::Value>,
     draft: Option<Uuid>,
 ) -> Result<(), ApiError> {
+    if let Some(directory) = handler.filter(|h| h["kind"] == "static") {
+        if draft.is_some() {
+            return Err(invalid(
+                "a registered directory cannot consume an upload",
+            ));
+        }
+        let name = directory["directory_id"]
+            .as_str()
+            .ok_or_else(|| invalid("missing directory id"))?;
+        let digest = directory["digest"]
+            .as_str()
+            .ok_or_else(|| invalid("missing digest"))?;
+        let args = [site.into(), name.into(), digest.into()];
+        if directory["rollback"] == true {
+            if tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+                "SELECT 1 FROM static_directory_versions WHERE site_id=$1 AND directory_id=$2 AND digest=$3", args)).await?.is_none() {
+                return Err(invalid("unknown registered directory version"));
+            }
+        } else {
+            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                "INSERT INTO static_directory_versions(site_id,directory_id,digest) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+                args)).await?;
+        }
+        return Ok(());
+    }
     let digest = handler
         .filter(|handler| handler["kind"] == "zip")
         .and_then(|handler| handler["digest"].as_str());

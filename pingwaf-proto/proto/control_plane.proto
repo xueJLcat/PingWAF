@@ -223,6 +223,8 @@ message IngressListeners {
   map<string, string> static_directories = 3;
   bool supports_site_handlers = 4;
   bool supports_site_archives = 5;
+  // Locally retained registered directory snapshots (site UUID / tree SHA-256).
+  repeated string prepared_directories = 6;
 }
 
 // Backend health of one upstream, reported per heartbeat.

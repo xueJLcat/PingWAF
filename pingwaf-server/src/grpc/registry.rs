@@ -167,6 +167,7 @@ fn repush_cooldown(repushes: u32) -> Duration {
 
 fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
     if report.listeners.len() > MAX_INGRESS_LISTENERS || report.static_directories.len() > 16
+        || report.prepared_directories.len() > 2048 || report.prepared_directories.iter().any(|v| v.len() != 101)
         || report.static_directories.iter().any(|(id, digest)| {
             id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
             || !(digest.is_empty() || digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
@@ -1431,6 +1432,7 @@ mod tests {
             supports_site_handlers: false,
                 supports_site_archives: false,
             static_directories: Default::default(),
+            prepared_directories: Vec::new(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,
@@ -1496,6 +1498,7 @@ mod tests {
             supports_site_handlers: false,
                 supports_site_archives: false,
             static_directories: Default::default(),
+            prepared_directories: Vec::new(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,
