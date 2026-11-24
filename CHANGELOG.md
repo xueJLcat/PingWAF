@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Updating one managed listener preserves traffic on other listeners with identical routes and policies, subject to their current session and lease.
+
 - Managed ingress deployment now reports a verified, current per-site receipt while a node prepares its proxy view.
 
 - Enable custom site ingress writes in migration 000107. Downgrading to the previous write gate requires a database with no custom sites.

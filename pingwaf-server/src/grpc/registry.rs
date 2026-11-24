@@ -25,12 +25,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use pingwaf_proto::MAX_INGRESS_LISTENERS;
 use pingwaf_proto::control_plane::{
-    CommandType, IngressBindState, IngressListeners, IngressProtocol,
-    ManagedConfigChangedCommand, ServerCommand, server_command::Payload,
+    server_command::Payload, CommandType, IngressBindState, IngressListeners,
+    IngressProtocol, ManagedConfigChangedCommand, ServerCommand,
 };
-use tokio::sync::{RwLock, mpsc};
+use pingwaf_proto::MAX_INGRESS_LISTENERS;
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 /// Buffer depth of the per-agent command channel.
@@ -449,9 +449,10 @@ impl AgentRegistry {
                 || conn.session != session
                 || Uuid::parse_str(&report.session_id).ok()? != session?
                 || report.generation <= 0
-                || (!report.sites.is_empty()
-                    && !report.received_sites.is_empty())
-                || report.sites.len().max(report.received_sites.len())
+                || report
+                    .sites
+                    .len()
+                    .saturating_add(report.received_sites.len())
                     > visible.len()
             {
                 return None;
@@ -463,14 +464,15 @@ impl AgentRegistry {
             let permitted: std::collections::HashSet<_> =
                 visible.iter().copied().collect();
             let mut seen = std::collections::HashSet::new();
-            let receiving = !report.received_sites.is_empty();
-            let rows = if receiving {
-                &report.received_sites
-            } else {
-                &report.sites
-            };
-            let mut sites = Vec::with_capacity(rows.len());
-            for row in rows {
+            let mut sites = Vec::with_capacity(report.sites.len());
+            let mut received_sites =
+                Vec::with_capacity(report.received_sites.len());
+            for (receiving, row) in report
+                .sites
+                .iter()
+                .map(|r| (false, r))
+                .chain(report.received_sites.iter().map(|r| (true, r)))
+            {
                 let site_id = Uuid::parse_str(&row.site_id).ok()?;
                 let ingress = row.ingress.as_ref()?;
                 if !permitted.contains(&site_id)
@@ -493,7 +495,12 @@ impl AgentRegistry {
                     IngressProtocol::Https => "https",
                     _ => return None,
                 };
-                sites.push(SiteApplication {
+                let destination = if receiving {
+                    &mut received_sites
+                } else {
+                    &mut sites
+                };
+                destination.push(SiteApplication {
                     site_id,
                     site_revision: row.site_revision.clone(),
                     port: u16::try_from(ingress.port).ok()?,
@@ -506,11 +513,7 @@ impl AgentRegistry {
                     observed_at: Utc::now(),
                     authority_epoch,
                     generation: report.generation,
-                    received_sites: if receiving {
-                        std::mem::take(&mut sites)
-                    } else {
-                        Vec::new()
-                    },
+                    received_sites,
                     sites,
                 },
             ))
@@ -1430,12 +1433,10 @@ mod tests {
                     .contains_key(&agent),
                 accepted
             );
-            assert!(
-                registry
-                    .application_observations(Duration::ZERO)
-                    .await
-                    .is_empty()
-            );
+            assert!(registry
+                .application_observations(Duration::ZERO)
+                .await
+                .is_empty());
         }
     }
 

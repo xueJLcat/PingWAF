@@ -72,7 +72,7 @@ impl Host {
         listener: Listener,
         shutdown: ShutdownWatch,
     ) {
-        if let Some(forwarding) = self.state.forwarding() {
+        if let Some(forwarding) = self.state.forwarding_for(listener) {
             let _ =
                 serve_http(forwarding, tcp, listener, shutdown, false).await;
         }

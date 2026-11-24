@@ -236,9 +236,9 @@
 开始前告诉你每个站点处于哪个桶里。
 详见：[GET /certificates/{cert_id}/usage](../api.md#get-certificatescert_idusage)。
 
-## Site Upstream Pools（上游池）
+`GET /sites/{site_id}/deployment` 返回逐节点部署状态。节点确认接收与期望版本相同的站点配置后显示 `received`；对应监听已绑定并发布有效代理配置后显示 `applied`。回报按当前会话、世代、站点 UUID 和版本核对。 其他端口变更时，只有新旧快照对当前监听的全部路由和策略完全一致、会话与租约仍有效，该监听才持续转发。
 
-`GET /sites/{site_id}/deployment` 返回逐节点部署状态。节点确认接收与期望版本相同的站点配置后显示 `received`；对应监听已绑定并发布有效代理配置后显示 `applied`。回报按当前会话、世代、站点 UUID 和版本核对。
+## Site Upstream Pools（上游池）
 
 ### GET /sites/{site_id}/upstream-pools
 

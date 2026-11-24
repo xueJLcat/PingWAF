@@ -1,11 +1,12 @@
-use std::future::{Future, poll_fn};
+use std::collections::HashMap;
+use std::future::{poll_fn, Future};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use super::{Candidate, Lease, Received, Version};
+use super::{Candidate, Lease, Listener, Received, Version};
 
 /// A full, immutable proxy view is published as a unit. A caller must not use
 /// this store to publish a reference to providers that can be reloaded in place.
@@ -16,6 +17,7 @@ struct State<T> {
     latest: Option<Version>,
     receipt: Option<(Lease, pingwaf_proto::ManagedApplyReport)>,
     active: Option<Arc<Applied<T>>>,
+    listeners: HashMap<Listener, Forwarding<T>>,
 }
 
 struct Applied<T> {
@@ -48,7 +50,13 @@ impl Pending {
 
 /// Pin an applied view for one connection. The caller must run *all* I/O,
 /// including the handshake and keep-alive streams, inside `run`.
-pub struct Forwarding<T>(Arc<Applied<T>>);
+pub struct Forwarding<T>(Arc<Applied<T>>, watch::Sender<Authorization>);
+
+impl<T> Clone for Forwarding<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), self.1.clone())
+    }
+}
 
 impl<T> Default for AppliedState<T> {
     fn default() -> Self {
@@ -57,12 +65,20 @@ impl<T> Default for AppliedState<T> {
             latest: None,
             receipt: None,
             active: None,
+            listeners: HashMap::new(),
         }))
     }
 }
 
 impl<T> State<T> {
     fn revoke(&mut self) {
+        for (_, scoped) in self.listeners.drain() {
+            scoped.1.send_modify(|a| a.revoked = true);
+        }
+        self.revoke_snapshot();
+    }
+
+    fn revoke_snapshot(&mut self) {
         self.receipt = None;
         if let Some(active) = self.active.take() {
             active.authorization.send_modify(|a| a.revoked = true);
@@ -111,16 +127,34 @@ impl<T> AppliedState<T> {
             return Ok(None);
         }
         state.latest = Some(version);
-        let mut pending = Some(Pending { received });
-        let renewable = state.active.as_ref().filter(|active| {
-            pending.as_ref().is_some_and(|candidate| {
-                candidate.received.lease.permits(version)
-                    && active.authorization.borrow().is_live()
-                    && active.policy.same_policy(candidate.candidate())
-            })
+        // Keep only listeners whose entire routing table and decoded site
+        // envelopes are authorized by both snapshots, including TLS and rules.
+        let mut failure = None;
+        state.listeners.retain(|listener, scoped| {
+            if scoped
+                .0
+                .policy
+                .same_listener_policy(&received.candidate, *listener)
+            {
+                match renew_authorization(&scoped.1, &received.lease) {
+                    Ok(true) => return true,
+                    Err(error) => failure = Some(error),
+                    Ok(false) => {},
+                }
+            }
+            scoped.1.send_modify(|a| a.revoked = true);
+            false
         });
-        if let Some(active) = renewable {
-            match active.renew(&mut pending) {
+        if let Some(error) = failure {
+            state.revoke();
+            return Err(error);
+        }
+        if let Some(active) = state
+            .active
+            .as_ref()
+            .filter(|a| a.policy.same_policy(&received.candidate))
+        {
+            match renew_authorization(&active.authorization, &received.lease) {
                 Ok(true) => return Ok(None),
                 Ok(false) => {},
                 Err(error) => {
@@ -129,8 +163,11 @@ impl<T> AppliedState<T> {
                 },
             }
         }
-        state.revoke();
-        let pending = pending.filter(|p| p.received.lease.permits(version));
+        state.revoke_snapshot();
+        let pending = received
+            .lease
+            .permits(version)
+            .then_some(Pending { received });
         if let Some(p) = &pending {
             let received_sites = p
                 .candidate()
@@ -170,18 +207,27 @@ impl<T> AppliedState<T> {
         {
             return Ok(false);
         }
-        let timer = lease.expiry_timer()?;
-        let (authorization, _) = watch::channel(Authorization {
-            lease,
-            revoked: false,
-        });
-        watch_expiry(authorization.clone(), version, timer);
-        state.receipt = None;
-        state.active = Some(Arc::new(Applied {
+        let active = Arc::new(Applied {
+            authorization: new_authorization(&lease)?,
             policy: pending.received.candidate,
             view,
-            authorization,
-        }));
+        });
+        let mut listeners = HashMap::new();
+        for listener in active
+            .policy
+            .routes
+            .keys()
+            .filter(|l| **l != Listener::Default)
+        {
+            let auth = match state.listeners.get(listener) {
+                Some(scoped) if scoped.is_live() => scoped.1.clone(),
+                _ => new_authorization(&lease)?,
+            };
+            listeners.insert(*listener, Forwarding(active.clone(), auth));
+        }
+        state.receipt = None;
+        state.listeners = listeners;
+        state.active = Some(active);
         Ok(true)
     }
 
@@ -192,7 +238,34 @@ impl<T> AppliedState<T> {
     ) -> Option<pingwaf_proto::ManagedApplyReport> {
         let state = self.lock();
         if let Some((lease, receipt)) = &state.receipt {
-            return lease.permits(lease.version()).then(|| receipt.clone());
+            if !lease.permits(lease.version()) {
+                return None;
+            }
+            let mut report = receipt.clone();
+            (report.sites, report.received_sites) =
+                report.received_sites.into_iter().partition(|row| {
+                    let Some(ingress) = &row.ingress else {
+                        return false;
+                    };
+                    let Ok(port) = u16::try_from(ingress.port) else {
+                        return false;
+                    };
+                    let listener = Listener::Custom {
+                        port,
+                        protocol: ingress.protocol(),
+                    };
+                    state
+                        .listeners
+                        .get(&listener)
+                        .is_some_and(Forwarding::is_live)
+                        && bound.listeners.iter().any(|socket| {
+                            socket.port == ingress.port
+                                && socket.protocol == ingress.protocol
+                                && socket.state()
+                                    == pingwaf_proto::IngressBindState::Bound
+                        })
+                });
+            return Some(report);
         }
         let active = state.active.as_ref()?;
         let auth = active.authorization.borrow();
@@ -236,40 +309,54 @@ impl<T> AppliedState<T> {
     pub fn forwarding(&self) -> Option<Forwarding<T>> {
         let state = self.lock();
         let active = state.active.as_ref()?;
-        let forwarding = Forwarding(active.clone());
+        let forwarding =
+            Forwarding(active.clone(), active.authorization.clone());
         forwarding.is_live().then_some(forwarding)
+    }
+
+    /// The caller must derive this identity from the accepting socket.
+    pub fn forwarding_for(&self, listener: Listener) -> Option<Forwarding<T>> {
+        let state = self.lock();
+        if let Some(scoped) = state.listeners.get(&listener) {
+            return scoped.is_live().then(|| scoped.clone());
+        }
+        // Empty listeners still produce the published view's unknown-host
+        // response. Revocation clears this fallback before replacement.
+        let active = state.active.as_ref()?;
+        let handle = Forwarding(active.clone(), active.authorization.clone());
+        handle.is_live().then_some(handle)
     }
 }
 
-impl<T> Applied<T> {
-    fn renew(&self, pending: &mut Option<Pending>) -> anyhow::Result<bool> {
-        let Some(candidate) = pending.as_ref() else {
-            return Ok(false);
-        };
-        let version = candidate.candidate().version();
-        // Start the timer first; never resurrect a connection when either
-        // lease expired while comparison or timer setup was in progress.
-        let timer = candidate.received.lease.expiry_timer()?;
-        let auth = &self.authorization;
-        let renewed = auth.send_if_modified(|current| {
-            if !current.is_live()
-                || !pending
-                    .as_ref()
-                    .is_some_and(|p| p.received.lease.permits(version))
-            {
-                return false;
-            }
-            let Some(pending) = pending.take() else {
-                return false;
-            };
-            current.lease = pending.received.lease;
-            true
-        });
-        if renewed {
-            watch_expiry(auth.clone(), version, timer);
+fn new_authorization(
+    lease: &Lease,
+) -> anyhow::Result<watch::Sender<Authorization>> {
+    let timer = lease.expiry_timer()?;
+    let (auth, _) = watch::channel(Authorization {
+        lease: lease.clone(),
+        revoked: false,
+    });
+    watch_expiry(auth.clone(), lease.version(), timer);
+    Ok(auth)
+}
+
+fn renew_authorization(
+    auth: &watch::Sender<Authorization>,
+    lease: &Lease,
+) -> anyhow::Result<bool> {
+    let version = lease.version();
+    let timer = lease.expiry_timer()?;
+    let renewed = auth.send_if_modified(|current| {
+        if !current.is_live() || !lease.permits(version) {
+            return false;
         }
-        Ok(renewed)
+        current.lease = lease.clone();
+        true
+    });
+    if renewed {
+        watch_expiry(auth.clone(), version, timer);
     }
+    Ok(renewed)
 }
 
 fn watch_expiry(
@@ -302,11 +389,11 @@ impl<T> Drop for AppliedState<T> {
 
 impl<T> Forwarding<T> {
     pub fn version(&self) -> Version {
-        self.0.authorization.borrow().lease.version()
+        self.1.borrow().lease.version()
     }
 
     fn is_live(&self) -> bool {
-        self.0.authorization.borrow().is_live()
+        self.1.borrow().is_live()
     }
 
     pub async fn run<'a, F, R>(
@@ -316,7 +403,7 @@ impl<T> Forwarding<T> {
     where
         F: Future<Output = R>,
     {
-        let mut notice = self.0.authorization.subscribe();
+        let mut notice = self.1.subscribe();
         if !self.is_live() {
             return None;
         }
@@ -507,11 +594,9 @@ mod tests {
             .prepare(received(&mut receiver, session, epoch, 1, 10))
             .unwrap()
             .unwrap();
-        assert!(
-            state
-                .publish(pending, origin.local_addr().unwrap())
-                .unwrap()
-        );
+        assert!(state
+            .publish(pending, origin.local_addr().unwrap())
+            .unwrap());
         let forwarding = state.forwarding().unwrap();
         let mut client = TcpStream::connect(ingress.local_addr().unwrap())
             .await
@@ -606,6 +691,72 @@ mod tests {
         state.end_session(session);
         assert!(state.application_report(&Default::default()).is_none());
         assert!(!state.publish(pending, ()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn changing_one_listener_keeps_only_equivalent_sockets_authorized() {
+        let state = AppliedState::default();
+        let (session, epoch) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        state.start_session(session);
+        let listener = |port| Listener::Custom {
+            port,
+            protocol: pingwaf_proto::IngressProtocol::Http,
+        };
+        let mut wire = ManagedSiteConfig::default();
+        for port in [81, 82] {
+            let mut seed = ManagedSiteConfig::decode(
+                config(Uuid::new_v4(), "rules", 1).as_slice(),
+            )
+            .unwrap();
+            let mut site = seed.sites.remove(0);
+            site.ingress = Some(pingwaf_proto::SiteIngress {
+                port,
+                protocol: pingwaf_proto::IngressProtocol::Http as i32,
+            });
+            site.site_revision = "ab".repeat(32);
+            wire.sites.push(site);
+        }
+        let first = receive_config(
+            &mut receiver,
+            session,
+            epoch,
+            1,
+            10,
+            wire.encode_to_vec(),
+        );
+        let initial = state.prepare(first).unwrap().unwrap();
+        assert!(state.publish(initial, 1).unwrap());
+        let old_a = state.forwarding_for(listener(81)).unwrap();
+        let old_b = state.forwarding_for(listener(82)).unwrap();
+        wire.sites.remove(0);
+        let second = receive_config(
+            &mut receiver,
+            session,
+            epoch,
+            2,
+            10,
+            wire.encode_to_vec(),
+        );
+        let pending = state.prepare(second).unwrap().unwrap();
+        assert!(!old_a.is_live());
+        assert!(state.forwarding_for(listener(81)).is_none());
+        assert!(old_b.is_live());
+        assert!(state.forwarding_for(listener(82)).is_some());
+        assert!(state.publish(pending, 2).unwrap());
+        assert_eq!(old_b.run(|v| std::future::ready(*v)).await, Some(1));
+        assert_eq!(
+            state
+                .forwarding_for(listener(82))
+                .unwrap()
+                .run(|v| std::future::ready(*v))
+                .await,
+            Some(2)
+        );
+        state.end_session(session);
+        assert!(!old_b.is_live());
+        assert!(state.forwarding_for(listener(82)).is_none());
     }
 
     #[tokio::test]

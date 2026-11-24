@@ -91,6 +91,17 @@ impl Candidate {
         self.sites == other.sites
     }
 
+    #[cfg(target_os = "linux")]
+    fn same_listener_policy(&self, other: &Self, listener: Listener) -> bool {
+        let Some(routes) = self.routes.get(&listener) else {
+            return false;
+        };
+        other.routes.get(&listener) == Some(routes)
+            && routes
+                .values()
+                .all(|id| self.sites.get(id) == other.sites.get(id))
+    }
+
     /// Takes the hostname only, not an HTTP authority or a forwarding header.
     /// A non-default listener cannot fall back to the default namespace.
     pub fn site_id(&self, listener: Listener, hostname: &str) -> Option<Uuid> {
