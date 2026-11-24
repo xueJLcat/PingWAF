@@ -18,6 +18,10 @@ use crate::cache::lookup_with_wildcard;
 mod lease;
 #[cfg(target_os = "linux")]
 pub use lease::{Lease, PullWindow, Received};
+#[cfg(target_os = "linux")]
+mod applied;
+#[cfg(target_os = "linux")]
+pub use applied::{AppliedState, Forwarding, Pending};
 
 /// Trusted listener identity, supplied by the owner of the accepting socket.
 /// The default pair of listeners share one hostname namespace.

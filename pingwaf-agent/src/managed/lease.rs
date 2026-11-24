@@ -98,23 +98,37 @@ impl Lease {
     /// Completes on expiry, including if the kernel crossed the deadline
     /// while suspended. A timer error must also stop forwarding.
     pub async fn wait_for_expiry(&self) -> anyhow::Result<()> {
-        if now() >= self.deadline {
-            return Ok(());
-        }
-        let timer = AsyncFd::new(timerfd_create(
+        self.expiry_timer()?.wait().await
+    }
+
+    pub(super) fn expiry_timer(&self) -> anyhow::Result<ExpiryTimer> {
+        let fd = timerfd_create(
             TimerfdClockId::Boottime,
             TimerfdFlags::NONBLOCK | TimerfdFlags::CLOEXEC,
-        )?)?;
+        )?;
         timerfd_settime(
-            timer.get_ref(),
+            &fd,
             TimerfdTimerFlags::ABSTIME,
             &Itimerspec {
                 it_interval: Timespec::default(),
                 it_value: self.deadline,
             },
         )?;
+        // SAFETY: OwnedFd keeps this nonblocking timer descriptor open and
+        // unchanged until AsyncFd deregisters and drops it.
+        let timer = unsafe {
+            AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE)
+        }?;
+        Ok(ExpiryTimer(timer))
+    }
+}
+
+pub(super) struct ExpiryTimer(AsyncFd<rustix::fd::OwnedFd>);
+
+impl ExpiryTimer {
+    pub(super) async fn wait(&self) -> anyhow::Result<()> {
         let mut fired = [0; 8];
-        let _ = timer
+        self.0
             .async_io(tokio::io::Interest::READABLE, |fd| {
                 rustix::io::read(fd, &mut fired).map_err(Into::into)
             })
