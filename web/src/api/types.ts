@@ -115,6 +115,8 @@ export type SiteStatus = 'active' | 'paused' | 'pending'
 
 /** `api::sites::SiteResponse` */
 export interface Site {
+  ingress_port?: number | null
+  ingress_protocol?: 'http' | 'https' | null
   id: string
   name: string
   /** Primary hostname; certificate issuance and display default to it. */

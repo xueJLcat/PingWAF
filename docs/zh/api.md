@@ -396,6 +396,10 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 详见：[GET /system/nodes](../api.md#get-systemnodes)。
 
+## 站点访问入口
+
+站点列表和详情返回 `ingress_port`、`ingress_protocol`。默认入口的两项均为 null，同一主域名下的站点用 UUID 区分。 使用 `:8443` 或 `example.com:8443` 可筛选对应端口。
+
 ## Sites：response_replace（响应体替换）
 
 ### Response body replacement (`response_replace`)

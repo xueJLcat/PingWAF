@@ -1,3 +1,4 @@
+import { formatSiteAddress } from '@/lib/format'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
@@ -40,7 +41,7 @@ export function GlobalTrafficPage() {
             value={siteId}
             options={[
               { value: '', label: t('pages.traffic.allSites') },
-              ...sites.map((s) => ({ value: s.id, label: s.domain })),
+              ...sites.map((s) => ({ value: s.id, label: formatSiteAddress(s) })),
             ]}
             onChange={(e) => setSiteId(e.target.value)}
           />

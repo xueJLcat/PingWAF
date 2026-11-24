@@ -199,6 +199,39 @@ async fn site_ingress_migration_postgres() {
         .await,
         4
     );
+    let state = crate::api::state::AppState::new(
+        db.clone(),
+        crate::config::ServerConfig::default(),
+        crate::grpc::AgentRegistry::new(),
+    );
+    let owner = crate::mcp::tools::ToolContext {
+        state: &state,
+        actor: "regression",
+        can_write: true,
+        subject: USER.parse().unwrap(),
+        is_admin: false,
+    };
+    let args = serde_json::json!({"domain":"app.test","status":"paused"});
+    let write = |ctx| crate::mcp::tools::call(ctx, "set_site_status", &args);
+    assert!(write(&owner).await.unwrap_err().contains("multiple sites"));
+    let stranger = crate::mcp::tools::ToolContext {
+        subject: uuid::Uuid::new_v4(),
+        ..owner
+    };
+    assert_eq!(write(&stranger).await.unwrap_err(), "site not found");
+    let listed =
+        crate::mcp::tools::call(&owner, "list_sites", &serde_json::json!({}))
+            .await
+            .unwrap();
+    let rows = listed["sites"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let explicit = rows.iter().find(|site| site["ingress_port"] == 82).unwrap();
+    assert_eq!(explicit["ingress_protocol"], "http");
+    assert!(rows.iter().any(|site| serde_json::Value::is_null(
+        &site["ingress_port"]
+    ) && serde_json::Value::is_null(
+        &site["ingress_protocol"]
+    )));
     for invalid in [
         "ingress_protocol = NULL",
         "ingress_port = NULL",

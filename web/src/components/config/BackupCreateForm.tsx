@@ -1,3 +1,4 @@
+import { formatSiteAddress } from '@/lib/format'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -55,7 +56,7 @@ export function BackupCreateForm({ targets, canWrite }: { targets: BackupTarget[
           onChange={(event) => setSiteId(event.target.value)}
           options={[
             { value: '', label: t('pages.backups.selectSite') },
-            ...(sites.data ?? []).map((site) => ({ value: site.id, label: site.domain })),
+            ...(sites.data ?? []).map((site) => ({ value: site.id, label: formatSiteAddress(site) })),
           ]}
         />
       ) : <div />}

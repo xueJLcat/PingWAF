@@ -89,6 +89,8 @@ const MAX_ROUTE_REWRITE_PATH_LEN: usize = 2048;
 /// Public representation of a site.
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteResponse {
+    pub ingress_port: Option<i32>,
+    pub ingress_protocol: Option<String>,
     pub id: Uuid,
     pub name: String,
     pub domain: String,
@@ -136,6 +138,8 @@ impl From<site::Model> for SiteResponse {
         Self {
             id: model.id,
             name: model.name,
+            ingress_port: model.ingress_port,
+            ingress_protocol: model.ingress_protocol,
             domain: model.domain,
             alternate_domains: model.alternate_domains,
             status: model.status,
@@ -171,6 +175,8 @@ impl From<site::Model> for SiteResponse {
 /// selecting them was pure per-request allocation.
 #[derive(Debug, FromQueryResult)]
 struct SiteListRow {
+    ingress_port: Option<i32>,
+    ingress_protocol: Option<String>,
     id: Uuid,
     user_id: Uuid,
     name: String,
@@ -198,6 +204,8 @@ impl From<SiteListRow> for SiteResponse {
         Self {
             id: row.id,
             name: row.name,
+            ingress_port: row.ingress_port,
+            ingress_protocol: row.ingress_protocol,
             domain: row.domain,
             alternate_domains: row.alternate_domains,
             status: row.status,
@@ -1183,11 +1191,21 @@ async fn list(
             "%{}%",
             crate::api::logs::escape_like(&search.to_lowercase())
         );
-        condition = condition.add(
-            Condition::any()
-                .add(site::Column::Domain.like(&pattern))
-                .add(site::Column::Name.like(&pattern)),
-        );
+        let mut matching = Condition::any()
+            .add(site::Column::Domain.like(&pattern))
+            .add(site::Column::Name.like(&pattern));
+        if let Some((host, port)) = search.rsplit_once(':') {
+            if let Ok(port) = port.parse::<u16>() {
+                let mut ingress = Condition::all()
+                    .add(site::Column::IngressPort.eq(i32::from(port)));
+                if !host.is_empty() {
+                    ingress = ingress
+                        .add(site::Column::Domain.eq(host.to_lowercase()));
+                }
+                matching = matching.add(ingress);
+            }
+        }
+        condition = condition.add(matching);
     }
 
     let paginator = site::Entity::find()
@@ -1197,6 +1215,8 @@ async fn list(
             site::Column::UserId,
             site::Column::Name,
             site::Column::Domain,
+            site::Column::IngressPort,
+            site::Column::IngressProtocol,
             site::Column::AlternateDomains,
             site::Column::Status,
             site::Column::Plan,

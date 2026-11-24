@@ -37,7 +37,7 @@ import { analyticsApi } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue, useNow, useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { peerAddressHint } from '@/lib/agentAddress'
-import { formatDateTime, formatLatency, formatNumber, formatRelative, formatSize } from '@/lib/format'
+import { formatSiteAddress, formatDateTime, formatLatency, formatNumber, formatRelative, formatSize } from '@/lib/format'
 import type { Agent, AgentCommand, AgentEnrollRequest, AgentEnrollResponse, AgentStatus } from '@/api/types'
 
 const STATUS_TONE: Record<AgentStatus, 'success' | 'warning' | 'neutral'> = {
@@ -258,7 +258,7 @@ export function AgentsPage() {
   const siteOptions = useMemo(
     () => [
       { value: '', label: t('pages.agents.allSites') },
-      ...(sites ?? []).map((s) => ({ value: s.id, label: s.domain })),
+      ...(sites ?? []).map((s) => ({ value: s.id, label: formatSiteAddress(s) })),
     ],
     [sites, t],
   )

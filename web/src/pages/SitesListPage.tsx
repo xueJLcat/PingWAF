@@ -38,6 +38,7 @@ import {
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import {
+  formatSiteAddress,
   formatDateTime,
   formatDateTimeWithZone,
   formatNumber,
@@ -628,7 +629,7 @@ export function SitesListPage() {
     {
       key: 'domain',
       header: t('pages.sites.domain'),
-      accessor: (r) => r.domain,
+      accessor: (r) => formatSiteAddress(r),
       sortable: true,
       cell: (r) => (
         <div className="flex items-center gap-3">
@@ -637,7 +638,7 @@ export function SitesListPage() {
           </span>
           <div className="min-w-0">
             <p className="pw-mono truncate font-medium text-fg-strong">
-              {r.domain}
+              {formatSiteAddress(r)}
               {(r.alternate_domains?.length ?? 0) > 0 && (
                 <span className="ml-1.5 text-xs font-normal text-fg-subtle">
                   +{r.alternate_domains.length}
@@ -745,7 +746,7 @@ export function SitesListPage() {
         >
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span className="pw-mono truncate font-medium text-fg-strong">
-              {r.domain}
+              {formatSiteAddress(r)}
               {(r.alternate_domains?.length ?? 0) > 0 && (
                 <span className="ml-1.5 text-xs font-normal text-fg-subtle">
                   +{r.alternate_domains.length}
@@ -1085,7 +1086,7 @@ export function SitesListPage() {
             <p className="flex items-center gap-1.5 text-[13px] text-fg-subtle">
               <Globe weight="duotone" className="h-3.5 w-3.5 shrink-0" />
               <span>
-                {t('pages.sites.cloneFrom', { domain: cloneSource.domain })}
+                {t('pages.sites.cloneFrom', { domain: formatSiteAddress(cloneSource) })}
               </span>
             </p>
           )}
@@ -1232,7 +1233,7 @@ export function SitesListPage() {
         {pendingToggle && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
             <p className="pw-mono text-[13px] font-medium text-fg-strong">
-              {pendingToggle.domain}
+              {formatSiteAddress(pendingToggle)}
             </p>
           </div>
         )}
@@ -1250,7 +1251,7 @@ export function SitesListPage() {
       >
         {pendingDelete && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
-            <p className="pw-mono text-[13px] font-medium text-fg-strong">{pendingDelete.domain}</p>
+            <p className="pw-mono text-[13px] font-medium text-fg-strong">{formatSiteAddress(pendingDelete)}</p>
             <p className="mt-0.5 text-xs text-fg-subtle">
               {t('pages.sites.deleteMeta', {
                 requests: formatNumber(trafficBySite.get(pendingDelete.id)?.requests ?? 0),
@@ -1290,7 +1291,7 @@ export function SitesListPage() {
             )
             .map((s) => (
               <p key={s.id} className="pw-mono truncate text-[13px] text-fg-strong">
-                {s.domain}
+                {formatSiteAddress(s)}
               </p>
             ))}
         </div>
@@ -1310,7 +1311,7 @@ export function SitesListPage() {
             .filter((s) => selected.has(s.id))
             .map((s) => (
               <p key={s.id} className="pw-mono truncate text-[13px] text-fg-strong">
-                {s.domain}
+                {formatSiteAddress(s)}
               </p>
             ))}
         </div>

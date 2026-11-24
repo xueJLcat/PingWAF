@@ -53,6 +53,7 @@ import {
   useRetryBackoff,
 } from '@/lib/errorMessages'
 import {
+  formatSiteAddress,
   displayTimeZone,
   formatBitrate,
   formatBucket,
@@ -264,7 +265,7 @@ export function DashboardPage() {
   const siteOptions = useMemo(
     () => [
       { value: '', label: t('pages.dashboard.allSites') },
-      ...(sites ?? []).map((s) => ({ value: s.id, label: s.domain })),
+      ...(sites ?? []).map((s) => ({ value: s.id, label: formatSiteAddress(s) })),
     ],
     [sites, t],
   )

@@ -471,6 +471,8 @@ posture: the plaintext-gRPC flag moved to the admin-only
 
 ## Sites
 
+Site list and detail responses include nullable `ingress_port` and `ingress_protocol`. Both are null for the default ingress. Sites sharing a primary hostname are identified by UUID. Search by `:8443` or `example.com:8443` to filter explicit listeners.
+
 A site is one protected domain plus its origin pools, rules and TLS posture. A
 site may serve several hostnames: `domain` is the primary one and
 `alternate_domains` lists the rest, all sharing the same routing, WAF and cache

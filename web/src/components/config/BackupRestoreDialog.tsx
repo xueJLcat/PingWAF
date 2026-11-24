@@ -1,3 +1,4 @@
+import { formatSiteAddress } from '@/lib/format'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -157,7 +158,7 @@ export function BackupRestoreDialog({
                 }}
                 options={[
                   { value: '', label: t('pages.backups.selectSite') },
-                  ...(sites.data ?? []).map((site) => ({ value: site.id, label: site.domain })),
+                  ...(sites.data ?? []).map((site) => ({ value: site.id, label: formatSiteAddress(site) })),
                 ]}
               />
             )}

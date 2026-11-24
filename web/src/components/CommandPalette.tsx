@@ -1,3 +1,4 @@
+import { formatSiteAddress } from '@/lib/format'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
@@ -170,7 +171,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     }))
     const siteCmds: Command[] = (sites ?? []).map((s) => ({
       id: `site:${s.id}`,
-      label: s.domain || s.name,
+      label: formatSiteAddress(s) || s.name,
       group: t('palette.sites'),
       icon: Globe,
       run: () => go(`/sites/${s.id}/basic`),

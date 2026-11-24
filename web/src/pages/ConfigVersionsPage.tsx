@@ -31,7 +31,7 @@ import {
 import { configBackupsApi, configBackupKeys } from '@/api/configBackups'
 import { errorMessage } from '@/api/errors'
 import { useCanWrite, useSitesList } from '@/hooks'
-import { formatDateTime } from '@/lib/format'
+import { formatSiteAddress, formatDateTime } from '@/lib/format'
 
 /**
  * How many versions one request asks for. The console keeps its own
@@ -548,7 +548,7 @@ export function ConfigVersionsPage() {
       },
       ...(sites.data ?? []).map((site) => ({
         value: site.id,
-        label: site.domain,
+        label: formatSiteAddress(site),
       })),
     ],
     [t, sites.data],

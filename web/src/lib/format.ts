@@ -1,3 +1,5 @@
+import type { Site } from '@/api/types'
+
 /**
  * Presentation helpers shared by every page.
  *
@@ -342,4 +344,11 @@ export function formatSeconds(seconds: number | null | undefined): string {
     return '—'
   }
   return formatLatency(seconds * 1000)
+}
+
+/** Explicit listener addresses distinguish sites sharing a hostname. */
+export function formatSiteAddress(site: Pick<Site, 'domain' | 'ingress_port' | 'ingress_protocol'>): string {
+  return site.ingress_port && site.ingress_protocol
+    ? `${site.ingress_protocol}://${site.domain}:${site.ingress_port}`
+    : site.domain
 }

@@ -30,6 +30,7 @@ import { ErrorState } from '@/components/ErrorState'
 import { AgentStatusBanner } from '@/components/AgentStatusBanner'
 import { sitesApi, siteKeys } from '@/api/sites'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
+import { formatSiteAddress } from '@/lib/format'
 import { useCanWrite, useSiteDetail } from '@/hooks'
 import { useAnyUnsaved, useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import { useSiteStore } from '@/stores/siteStore'
@@ -62,10 +63,8 @@ export function SiteDetailPage() {
   // drop edits (the Basic page's timeout/trust cards included).
   const unsavedDialog = useUnsavedGuard(useAnyUnsaved())
   const site = detail.data?.site
-  // The per-site detail bundles the SSL state: with a certificate the site is
-  // safely reachable over HTTPS, otherwise fall back to plain HTTP.
-  const hasCertificate = Boolean(detail.data?.ssl?.has_certificate)
-  const visitTitle = hasCertificate
+  const scheme = site?.ingress_protocol ?? (detail.data?.ssl?.has_certificate ? 'https' : 'http')
+  const visitTitle = scheme === 'https'
     ? t('pages.siteDetail.visitSite')
     : t('pages.siteDetail.visitSiteHttpHint')
 
@@ -201,7 +200,7 @@ export function SiteDetailPage() {
             <div className="flex items-center gap-2">
               {site ? (
                 <h1 className="pw-mono truncate text-lg font-semibold tracking-tight text-fg-strong">
-                  {site.domain}
+                  {formatSiteAddress(site)}
                 </h1>
               ) : (
                 <Skeleton className="h-6 w-56 rounded-md" />
@@ -213,7 +212,7 @@ export function SiteDetailPage() {
               )}
               {site && (
                 <a
-                  href={`${hasCertificate ? 'https' : 'http'}://${site.domain}`}
+                  href={site.ingress_port ? formatSiteAddress(site) : `${scheme}://${site.domain}`}
                   target="_blank"
                   rel="noreferrer"
                   title={visitTitle}
@@ -364,7 +363,7 @@ export function SiteDetailPage() {
       >
         {site && (
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
-            <p className="pw-mono text-[13px] font-medium text-fg-strong">{site.domain}</p>
+            <p className="pw-mono text-[13px] font-medium text-fg-strong">{formatSiteAddress(site)}</p>
           </div>
         )}
       </ConfirmDialog>

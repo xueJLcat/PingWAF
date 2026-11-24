@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Show the explicit ingress address in site management. MCP site listings include the protocol and port, and domain-based status changes require a UUID when multiple visible sites match.
+
 - Managed agents report the individual revisions served on bound custom
   listeners. The admin node API exposes the latest session-scoped observation
   with its timestamp and discards it on reconnect or expiry.

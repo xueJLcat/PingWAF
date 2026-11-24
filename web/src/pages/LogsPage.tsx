@@ -60,6 +60,7 @@ import {
 } from '@/lib/logQuery'
 import { requestLines, responseLines, type RawLine } from '@/lib/rawHttp'
 import {
+  formatSiteAddress,
   formatDateTime,
   formatDateTimeWithZone,
   formatLatency,
@@ -825,7 +826,7 @@ export function LogsPage() {
   const siteOptions = useMemo(
     () => [
       { value: '', label: t('pages.logs.allSites') },
-      ...(sites ?? []).map((s) => ({ value: s.id, label: s.domain })),
+      ...(sites ?? []).map((s) => ({ value: s.id, label: formatSiteAddress(s) })),
       { value: 'none', label: t('pages.logs.unassigned') },
     ],
     [sites, t],

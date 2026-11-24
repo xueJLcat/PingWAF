@@ -227,7 +227,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "set_site_status",
-            description: "Activate or pause one site. Paused sites keep serving detection but stop proxying. Identify the site by id or exact domain.",
+            description: "Activate or pause one site. Paused sites keep serving detection but stop proxying. Identify the site by UUID or a unique visible primary domain.",
             write: true,
             schema: json!({
                 "type": "object",
@@ -458,6 +458,8 @@ async fn list_sites(
                 "id": row.id,
                 "name": row.name,
                 "domain": row.domain,
+                "ingress_port": row.ingress_port,
+                "ingress_protocol": row.ingress_protocol,
                 "alternate_domains": row.alternate_domains,
                 "status": row.status,
                 "online_agents": online.get(&row.id).copied().unwrap_or(0),
@@ -975,22 +977,23 @@ async fn set_site_status(
 
     let site_id = arg_uuid(args, "site_id")?;
     let domain = arg_string(args, "domain");
-    let row = match (site_id, domain) {
-        (Some(id), _) => site::Entity::find_by_id(id).one(&ctx.state.db).await,
-        (None, Some(domain)) => {
-            site::Entity::find()
-                .filter(site::Column::Domain.eq(domain))
-                .one(&ctx.state.db)
-                .await
-        },
+    let mut query = site::Entity::find();
+    if !ctx.is_admin {
+        query = query.filter(site::Column::UserId.eq(ctx.subject));
+    }
+    query = match (site_id, domain) {
+        (Some(id), _) => query.filter(site::Column::Id.eq(id)),
+        (None, Some(domain)) => query.filter(site::Column::Domain.eq(domain)),
         (None, None) => return Err("provide 'site_id' or 'domain'".to_string()),
+    };
+    let mut matches =
+        query.limit(2).all(&ctx.state.db).await.map_err(db_error)?;
+    if matches.len() > 1 {
+        return Err(
+            "domain matches multiple sites; provide 'site_id'".to_string()
+        );
     }
-    .map_err(db_error)?
-    .ok_or_else(|| "site not found".to_string())?;
-    // Non-admins may only change the status of their own sites.
-    if !ctx.is_admin && row.user_id != ctx.subject {
-        return Err("site not found".to_string());
-    }
+    let row = matches.pop().ok_or_else(|| "site not found".to_string())?;
 
     let id = row.id;
     let previous = row.status.clone();

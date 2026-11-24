@@ -36,7 +36,7 @@ import { errorMessage } from '@/api/errors'
 import { ApiError } from '@/api/client'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
 import { useCanWrite, useNow, useSitesList } from '@/hooks'
-import { formatDateTime } from '@/lib/format'
+import { formatSiteAddress, formatDateTime } from '@/lib/format'
 import { bindingKind, deleteBlockers, mergeBindResults } from '@/lib/certFlow'
 import {
   ACME_CHALLENGE_TYPES,
@@ -643,7 +643,7 @@ export function GlobalSslPage() {
 
   const siteOptions = [
     { value: '', label: t('pages.sslGlobal.allSites') },
-    ...sites.map((s) => ({ value: s.id, label: s.domain })),
+    ...sites.map((s) => ({ value: s.id, label: formatSiteAddress(s) })),
   ]
   const statusOptions = [
     { value: '', label: t('pages.sslGlobal.allStatuses') },
@@ -916,7 +916,7 @@ export function GlobalSslPage() {
                 // Unbound upload: the certificate is stored without a site and
                 // can be bound to one or more sites afterwards.
                 { value: '', label: t('pages.sslGlobal.noSiteOption') },
-                ...sites.map((s) => ({ value: s.id, label: `${s.domain} · ${s.name}` })),
+                ...sites.map((s) => ({ value: s.id, label: `${formatSiteAddress(s)} · ${s.name}` })),
               ]}
               value={form.siteId}
               onChange={(e) => {

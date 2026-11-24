@@ -20,7 +20,7 @@ import { blockedIpsApi, blockedIpKeys } from '@/api/blockedIps'
 import { errorMessage } from '@/api/errors'
 import { validateIpOrCidr } from '@/api/ipRules'
 import { useCanWrite, useSitesList } from '@/hooks'
-import { formatDateTime, formatNumber, formatRelative } from '@/lib/format'
+import { formatSiteAddress, formatDateTime, formatNumber, formatRelative } from '@/lib/format'
 import type { GlobalBlockedIp } from '@/api/types'
 
 /** Block durations offered by the manual-block dialog, in seconds (0 = permanent). */
@@ -370,7 +370,7 @@ export function BlockedIpsPage() {
                 { value: '', label: t('pages.blockedIps.filterAllSites') },
                 ...(sites ?? []).map((s) => ({
                   value: s.id,
-                  label: s.name || s.domain,
+                  label: s.ingress_port ? formatSiteAddress(s) : s.name || s.domain,
                 })),
               ]}
             />
@@ -534,7 +534,7 @@ function ManualBlockDialog({ onClose, onBlocked }: ManualBlockDialogProps) {
             { value: '', label: t('pages.blockedIps.fieldSitePh') },
             ...(sites ?? []).map((s) => ({
               value: s.id,
-              label: s.name || s.domain,
+              label: s.ingress_port ? formatSiteAddress(s) : s.name || s.domain,
             })),
           ]}
         />
