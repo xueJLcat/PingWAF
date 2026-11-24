@@ -4,7 +4,7 @@ import { apiClient } from '@/api/client'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 
-type Rule = { id: string; path: string; mode: string; active_version: number | null }
+type Rule = { id: string; path: string; mode: string; active_version: number | null; candidate_digest: string | null; dynamic_stage: 'off' | 'test' | 'live' }
 type Preview = {
   path: string; mode: string; candidate_digest: string | null; candidate_type: string | null
   dynamic_stage: string; dynamic_region: string;
@@ -53,10 +53,12 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
       <Button type="submit" disabled={!path || mutation.isPending}>登记页面</Button>
     </form>}
     {error && <p role="alert">{error.message}</p>}
-    <ul>{list.data?.map(rule => <li key={rule.id}>
+    {list.data?.length===0 && <p className="text-sm text-fg-subtle">尚未登记公开页面。登记路径后，访问该页以获取可预览的正文。</p>}
+    <ul className="divide-y divide-border">{list.data?.map(rule => <li className="flex flex-wrap items-center justify-between gap-2" key={rule.id}>
       <button type="button" className="py-2 underline" onClick={() => { select(rule.id); setMode(rule.mode); setConfirmRemoval(false) }}>
         {rule.path} · {rule.active_version ? `版本 ${rule.active_version}` : '等待审批'}
       </button>
+      <span className="text-xs text-fg-subtle">{rule.active_version ? (rule.mode==='trusted_copy'?'可信副本':'仅告警') : rule.candidate_digest?'候选可预览':'等待公开访问'} · 动态防护{{off:'关闭',test:'测试中',live:'已发布'}[rule.dynamic_stage]}</span>
     </li>)}</ul>
     {preview && <div className="space-y-3">
       <h3>{preview.path}</h3>

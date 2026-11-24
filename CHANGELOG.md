@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Expose protection reports and the live screen in navigation, group static sources in site setup, and show page policy stages and report periods in the console.
+
 - Add opt-in public HTML text transformation with preview, a test visitor
   header, per-page publication and site-wide disable after integrity checking.
 

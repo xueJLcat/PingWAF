@@ -38,6 +38,8 @@ const langLabels: Record<string, string> = {
 // Map the first path segment(s) to a translation key for breadcrumbs.
 const crumbKeys: Record<string, string> = {
   dashboard: 'pages.dashboard.title',
+  reports: 'nav.protectionReports',
+  'live-protection': 'nav.liveProtection',
   sites: 'pages.sites.title',
   security: 'nav.security',
   waf: 'pages.waf.title',

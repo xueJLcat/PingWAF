@@ -53,7 +53,11 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
   const groups: NavGroup[] = [
     {
       labelKey: 'nav.group.overview',
-      items: [{ to: '/dashboard', labelKey: 'nav.dashboard', icon: House }],
+      items: [
+        { to: '/dashboard', labelKey: 'nav.dashboard', icon: House },
+        { to: '/reports', labelKey: 'nav.protectionReports', icon: ChartLine },
+        { to: '/live-protection', labelKey: 'nav.liveProtection', icon: Desktop },
+      ],
     },
     {
       labelKey: 'nav.group.trafficLogs',

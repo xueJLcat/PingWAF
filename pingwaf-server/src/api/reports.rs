@@ -98,7 +98,8 @@ async fn list(
     user: AuthUser,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let rows=s.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT jsonb_build_object('id',id,'created_at',created_at,'expires_at',expires_at,'status',status,'error',error)
+        "SELECT jsonb_build_object('id',id,'created_at',created_at,'expires_at',expires_at,'status',status,'error',error,
+         'from',selection->'from','to',selection->'to','timezone',selection->'timezone')
          FROM protection_reports WHERE owner_id=$1 AND expires_at>now() ORDER BY created_at DESC LIMIT 64",[user.id.into()])).await?;
     Ok(Json(
         rows.into_iter()

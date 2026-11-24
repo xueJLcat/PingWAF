@@ -48,6 +48,8 @@ interface Command {
 /** All top-level navigation destinations, grouped like the sidebar. */
 const NAV_PAGES: { to: string; labelKey: string; icon: Icon }[] = [
   { to: '/dashboard', labelKey: 'nav.dashboard', icon: House },
+  { to: '/reports', labelKey: 'nav.protectionReports', icon: ChartLine },
+  { to: '/live-protection', labelKey: 'nav.liveProtection', icon: Desktop },
   { to: '/traffic', labelKey: 'nav.traffic', icon: ChartLine },
   { to: '/logs', labelKey: 'nav.logs', icon: List },
   { to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },

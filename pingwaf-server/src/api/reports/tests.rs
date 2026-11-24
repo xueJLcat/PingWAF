@@ -77,6 +77,10 @@ async fn fixed_report_postgres() {
         .await
         .unwrap()
         .0;
+    let queued = list(state.clone(), user.clone()).await.unwrap().0;
+    assert_eq!(queued[0]["timezone"], selection.timezone);
+    assert_eq!(queued[0]["from"], json!(selection.from));
+    assert_eq!(queued[0]["to"], json!(selection.to));
     worker::run(&db).await.unwrap();
     async fn bytes(r: Response) -> Vec<u8> {
         axum::body::to_bytes(r.into_body(), 12 * 1024 * 1024)

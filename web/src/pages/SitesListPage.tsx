@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -550,6 +550,19 @@ export function SitesListPage() {
     queryFn: () => sitesApi.archiveVersions(editing!.id),
   })
   const activeHandler = form.directory ?? form.handler ?? form.zip
+  const siteMode = activeHandler?.kind === 'zip' ? 'static' : activeHandler?.kind ?? 'proxy'
+  function changeHandler(kind: 'proxy' | 'static' | 'zip' | 'redirect') {
+    setForm(previous => ({
+      ...previous,
+      draftId: undefined,
+      zip: kind === 'zip' ? {kind, digest: ''} : null,
+      directory: kind === 'static' ? {kind, directory_id: '', digest: ''} : null,
+      handler: kind === 'redirect' ? {kind, target: '', status: 302, preserve_path: true, preserve_query: true} : null,
+      ingress: previous.ingress.listener || kind === 'proxy' ? previous.ingress : {
+        ...previous.ingress, listener: 'http:80', additional: ['https:443'],
+      },
+    }))
+  }
   const selectedAgents = form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []
   const directoryNodes = (ingressInventory.data?.agents ?? []).filter(node => selectedAgents.includes(node.id))
   const directories = Object.entries(directoryNodes[0]?.static_directories ?? {}).filter(([id, digest]) =>
@@ -727,6 +740,11 @@ export function SitesListPage() {
               )}
             </p>
             <p className="truncate text-xs text-fg-subtle">{r.name}</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+              <Badge tone="neutral">{t('pages.sites.' + ({zip:'modeZip',static:'modeDirectory',redirect:'modeRedirect',proxy:'modeProxy'}[r.site_handler?.kind ?? 'proxy']))}</Badge>
+              {r.ingress_port && r.site_handler?.kind !== 'redirect' && <Link className="text-fg-brand-strong underline" onClick={e=>e.stopPropagation()}
+                to={`/sites/${r.id}/security/protection?tab=integrity`}>{t('pages.sites.pageProtection')}</Link>}
+            </div>
           </div>
         </div>
       ),
@@ -1061,17 +1079,22 @@ export function SitesListPage() {
             required
           />
 
-          <Select label={t('pages.sites.siteMode')} disabled={!!editing} value={activeHandler?.kind ?? 'proxy'}
-            onChange={event => setForm(f => event.target.value !== 'proxy' ? {
-              ...f, draftId: undefined, zip: event.target.value === 'zip' ? {kind: 'zip', digest: ''} : null, directory: event.target.value === 'static' ? { kind: 'static', directory_id: '', digest: '' } : null,
-              handler: event.target.value === 'redirect' ? { kind: 'redirect', target: '', status: 302, preserve_path: true, preserve_query: true } : null,
-              ingress: { ...f.ingress, listener: f.ingress.listener || 'http:80', additional: f.ingress.listener ? f.ingress.additional : ['https:443'], agents: [] },
-            } : { ...f, draftId: undefined, zip: null, directory: null, handler: null, ingress: defaultIngress })}>
-            <option value="proxy">{t('pages.sites.modeProxy')}</option>
-            <option value="static">{t('pages.sites.modeDirectory')}</option>
-            <option value="zip">{t('pages.sites.modeZip')}</option>
-            <option value="redirect">{t('pages.sites.modeRedirect')}</option>
-          </Select>
+          <fieldset disabled={!!editing} className="space-y-2">
+            <legend className="text-sm font-medium">{t('pages.sites.siteMode')}</legend>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {(['proxy','static','redirect'] as const).map(kind => <label key={kind}
+                className="flex items-center gap-2 rounded-md border border-border p-3 has-[:checked]:border-brand">
+                <input type="radio" name="site-type" value={kind} checked={siteMode === kind}
+                  onChange={() => changeHandler(kind === 'static' ? 'zip' : kind)} />
+                {t('pages.sites.' + ({proxy:'modeProxy',static:'modeStatic',redirect:'modeRedirect'}[kind]))}
+              </label>)}
+            </div>
+            {siteMode === 'static' && <Select label={t('pages.sites.staticSource')} value={activeHandler?.kind}
+              onChange={e => changeHandler(e.target.value === 'zip' ? 'zip' : 'static')}>
+              <option value="zip">{t('pages.sites.modeZip')}</option>
+              <option value="static">{t('pages.sites.modeDirectory')}</option>
+            </Select>}
+          </fieldset>
           <SiteIngressFields archive={!!form.zip} terminal={!!activeHandler} value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
             inventory={ingressInventory.data}
             loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />

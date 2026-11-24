@@ -39,7 +39,7 @@ async fn list(
     common::load_site_read(&s.db, id, &user).await?;
     let rows = s.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT jsonb_build_object('id',id,'path',path,'mode',mode,'active_version',active_version,
-         'candidate_digest',candidate_digest,'candidate_at',candidate_at) FROM page_integrity_rules WHERE site_id=$1 ORDER BY path",
+         'candidate_digest',candidate_digest,'candidate_at',candidate_at,'dynamic_stage',dynamic_stage) FROM page_integrity_rules WHERE site_id=$1 ORDER BY path",
         [id.into()])).await?;
     Ok(Json(
         rows.into_iter()

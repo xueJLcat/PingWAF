@@ -106,6 +106,8 @@
     "tagline": "Web アプリケーションファイアウォール コントロールプレーン"
   },
   "nav": {
+    "protectionReports": "防御レポート",
+    "liveProtection": "リアルタイム画面",
     "dashboard": "ダッシュボード",
     "sites": "サイト",
     "security": "セキュリティ",
@@ -562,6 +564,9 @@
       "ingressLabel": "アクセス入口",
       "ingressPort": "サイトの待受ポート",
       "siteMode": "サイト種別",
+      "modeStatic": "静的ファイル",
+      "staticSource": "静的コンテンツの取得元",
+      "pageProtection": "ページ保護",
       "modeProxy": "リバースプロキシ",
       "modeZip": "静的ファイル（ZIP アップロード）",
       "uploadZip": "ZIP をアップロード",

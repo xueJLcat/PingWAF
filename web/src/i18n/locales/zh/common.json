@@ -106,6 +106,8 @@
     "tagline": "Web 应用防火墙控制平面"
   },
   "nav": {
+    "protectionReports": "防护报告",
+    "liveProtection": "实时大屏",
     "dashboard": "概览",
     "sites": "站点",
     "security": "安全",
@@ -562,6 +564,9 @@
       "ingressLabel": "访问入口",
       "ingressPort": "站点监听端口",
       "siteMode": "站点类型",
+      "modeStatic": "静态文件",
+      "staticSource": "静态内容来源",
+      "pageProtection": "页面防护",
       "modeProxy": "反向代理",
       "modeZip": "静态文件（上传 ZIP）",
       "uploadZip": "上传 ZIP",

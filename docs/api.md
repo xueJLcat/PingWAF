@@ -578,7 +578,7 @@ Return the site's ZIP and registered-directory versions with digest, directory i
 
 ### GET /sites/{id}/integrity
 
-List exact paths registered for public-page integrity monitoring, the latest candidate digest and approved version. Site read permission is required.
+List exact paths registered for public-page integrity monitoring, the latest candidate digest, approved version and dynamic stage (`off`, `test` or `live`). Site read permission is required.
 
 ### POST /sites/{id}/integrity
 
@@ -586,7 +586,7 @@ Register an exact path with `{"path":"/index.html"}` on a managed proxy or stati
 
 ### GET /reports
 
-List the authenticated user's report jobs and their generation status.
+List the authenticated user's report jobs, their generation status and the selected interval (`from`, `to`, `timezone`).
 
 ### POST /reports
 

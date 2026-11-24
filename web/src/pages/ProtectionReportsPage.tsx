@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useAuthStore } from '@/stores/authStore'
 
-type Job = { id: string; created_at: string; status: string; error: string | null }
+type Job = { from: string; to: string; timezone: string; id: string; created_at: string; status: string; error: string | null }
 type Measures = { requests: number | null; blocked: number | null; challenged: number | null }
 type Row = Measures & { site: string; domain: string; bucket: string; local_time: string; covered: boolean }
 type Live = { generated_at: string; metrics: Row[]; nodes: { id: string; name: string; heartbeat: string | null; online: boolean }[] }
@@ -16,6 +16,15 @@ const blank = (): Measures => ({ requests: null, blocked: null, challenged: null
 function totals(target: Measures, row: Measures) {
   for (const key of ['requests','blocked','challenged'] as const) {
     if (row[key] !== null) target[key] = (target[key] ?? 0) + row[key]
+  }
+}
+
+function reportInterval(job: Job) {
+  try {
+    const local = new Intl.DateTimeFormat(undefined, {dateStyle:'short',timeStyle:'short',timeZone:job.timezone})
+    return local.formatRange(new Date(job.from),new Date(job.to)) + ' · ' + job.timezone
+  } catch {
+    return job.from + ' – ' + job.to
   }
 }
 
@@ -56,7 +65,10 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
   const data=denied?undefined:offline && lastOnline?.scope===scopeKey?lastOnline.value:screen.data
   const buckets=new Map<string,{label:string;covered:boolean} & Measures>()
   const ranked=new Map<string,{domain:string;covered:boolean} & Measures>()
+  const summary = blank()
+  const incomplete = data?.metrics.some(row=>!row.covered)
   for(const row of data?.metrics ?? []){
+    totals(summary,row)
     const bucket=buckets.get(row.bucket)??{...blank(),label:row.local_time.slice(11),covered:true}
     const site=ranked.get(row.site)??{...blank(),domain:row.domain,covered:true}
     totals(bucket,row);totals(site,row);bucket.covered&&=row.covered;site.covered&&=row.covered
@@ -93,13 +105,21 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
         <Button disabled={create.isPending || !ids.length || !from || !to || !timezone} onClick={()=>create.mutate()}>生成报告</Button></>}
     </div>
     {alerts.map((message,i)=><p key={i} role="alert">{message}</p>)}
-    {!live && <table className="w-full text-left"><thead><tr><th>提交时间</th><th>状态</th><th>下载</th></tr></thead>
+    {!live && <table className="w-full text-left"><thead><tr><th>提交时间</th><th>统计时段</th><th>状态</th><th>下载</th></tr></thead>
       <tbody>{jobs.data?.map(job=><tr key={job.id}><td>{new Date(job.created_at).toLocaleString()}</td>
+        <td>{reportInterval(job)}</td>
         <td>{({queued:'排队中',running:'生成中',ready:'已生成',failed:'失败'} as Record<string,string>)[job.status]} {job.error}</td>
         <td>{job.status==='ready' && ['pdf','csv'].map(format=><Button key={format} onClick={()=>void download(job.id,format)}>{format.toUpperCase()}</Button>)}</td></tr>)}</tbody></table>}
     {live && data && <><p>更新于 {new Date(data.generated_at).toLocaleString()} · 每 15 秒刷新
       {(offline || screen.isError || now-Date.parse(data.generated_at)>45000) && ' · 部分节点或数据已过期'}
       {data.metrics.some(r=>!r.covered) && ' · 部分时段缺少采集记录'}</p>
+      <dl className="grid gap-3 sm:grid-cols-3">
+        {(['requests','blocked','challenged'] as const).map(key=><div key={key} className="rounded-lg border border-border p-4">
+          <dt className="text-sm text-fg-subtle">{labels[key]} · 最近 15 分钟</dt>
+          <dd className="mt-1 text-2xl font-semibold tabular-nums">{summary[key]===null || (incomplete && summary[key]===0) ? '缺失' : summary[key]?.toLocaleString()}</dd>
+          {incomplete && (summary[key]??0)>0 && <span className="text-xs text-fg-subtle">已观测数量</span>}
+        </div>)}
+      </dl>
       <section><h2>最近 15 分钟请求与处置趋势</h2><div className="h-64"><ResponsiveContainer width="100%" height="100%">
         <LineChart data={[...buckets.values()]}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="label"/><YAxis allowDecimals={false}/><Tooltip/><Legend/>
           {(['requests','blocked','challenged'] as const).map((key,i)=><Line key={key} dataKey={key} name={labels[key]} stroke={['#3986c8','#cd6148','#a18130'][i]} connectNulls={false} isAnimationActive={false}/>)}

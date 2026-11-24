@@ -106,6 +106,8 @@
     "tagline": "Web Application Firewall Control Plane"
   },
   "nav": {
+    "protectionReports": "Protection reports",
+    "liveProtection": "Live dashboard",
     "dashboard": "Dashboard",
     "sites": "Sites",
     "security": "Security",
@@ -562,6 +564,9 @@
       "ingressLabel": "Access listener",
       "ingressPort": "Site listening port",
       "siteMode": "Site type",
+      "modeStatic": "Static files",
+      "staticSource": "Static content source",
+      "pageProtection": "Page protection",
       "modeProxy": "Reverse proxy",
       "modeZip": "Static files (ZIP upload)",
       "uploadZip": "Upload ZIP",
