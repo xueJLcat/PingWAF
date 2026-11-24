@@ -5391,6 +5391,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-test",
  "toml",
  "tracing",

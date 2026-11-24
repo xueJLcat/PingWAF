@@ -3,7 +3,7 @@
 use super::{LOG_TARGET, public_listen_addr};
 use pingap_proxy::{AppContext, Server, ServerConf, ServerLocationsProvider};
 use pingora::apps::HttpServerOptions;
-use pingora::protocols::l4::stream::Stream;
+use pingora::protocols::{GetSocketDigest, SocketDigest, l4::stream::Stream};
 use pingora::proxy::HttpProxy;
 use pingora::server::{ShutdownWatch, configuration};
 use pingora::services::listening::Service;
@@ -16,9 +16,13 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
@@ -126,6 +130,22 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
+/// We own the accept loop, so attach the socket metadata Pingora's
+/// listener would normally supply to the request and TLS layers.
+pub(super) fn downstream_stream(tcp: TcpStream) -> Stream {
+    #[cfg(unix)]
+    let digest = SocketDigest::from_raw_fd(tcp.as_raw_fd());
+    #[cfg(windows)]
+    let digest = SocketDigest::from_raw_socket(tcp.as_raw_socket());
+    // Snapshot both addresses before ownership can pass to an H2 request
+    // outliving the connection. A recycled fd then cannot supply its IP.
+    let _ = digest.peer_addr.set(tcp.peer_addr().ok().map(Into::into));
+    let _ = digest.local_addr.set(tcp.local_addr().ok().map(Into::into));
+    let mut stream = Stream::from(tcp);
+    stream.set_socket_digest(digest);
+    stream
+}
+
 // Deliberate deny-all until custom ingress has an authorized applied view.
 // The default proxy's live locations must never be used on these sockets.
 struct Unassigned;
@@ -199,7 +219,7 @@ async fn serve(
                     {
                         let _ = tcp.set_nodelay(true);
                         connections.spawn(Service::handle_event(
-                            Box::new(Stream::from(tcp)), app.clone(), shutdown.clone(),
+                            Box::new(downstream_stream(tcp)), app.clone(), shutdown.clone(),
                         ));
                     }
                 },
@@ -276,6 +296,21 @@ fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn downstream_addresses_survive_transport_drop() {
+        let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let local = listener.local_addr().unwrap();
+        let client = TcpStream::connect(local).await.unwrap();
+        let (accepted, peer) = listener.accept().await.unwrap();
+        let stream = downstream_stream(accepted);
+        let digest = stream.get_socket_digest().unwrap();
+        drop(stream);
+        assert_eq!(client.local_addr().unwrap(), peer);
+        assert_eq!(digest.peer_addr().unwrap().as_inet(), Some(&peer));
+        assert_eq!(digest.local_addr().unwrap().as_inet(), Some(&local));
+    }
 
     #[test]
     fn list_accepts_ip_literals_only_and_rejects_every_duplicate() {

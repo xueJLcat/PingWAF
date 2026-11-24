@@ -18,9 +18,14 @@ use uuid::Uuid;
 
 use super::convert_proxy_config;
 
+#[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+mod tls;
+
 struct View {
     rules: Compiled,
     sites: HashMap<Uuid, ManagedRequestSite>,
+    #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+    tls: HashMap<Uuid, tls::TlsSite>,
 }
 
 impl View {
@@ -30,7 +35,39 @@ impl View {
             .sites()
             .map(|(id, site)| Ok((id, build_site(site, cache_dir)?)))
             .collect::<anyhow::Result<_>>()?;
-        Ok(Self { rules, sites })
+        #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+        let tls = candidate
+            .sites()
+            .iter()
+            .filter(|(_, site)| {
+                site.ingress.as_ref().is_some_and(|ingress| {
+                    ingress.protocol() == pingwaf_proto::IngressProtocol::Https
+                })
+            })
+            .map(|(id, _)| {
+                use anyhow::Context;
+                let ssl = rules
+                    .site(*id)
+                    .and_then(|site| site.rules.ssl_config.as_ref())
+                    .with_context(|| {
+                        format!(
+                            "missing TLS configuration for managed site {id}"
+                        )
+                    })?;
+                Ok((
+                    *id,
+                    tls::TlsSite::build(ssl).with_context(|| {
+                        format!("TLS configuration for managed site {id}")
+                    })?,
+                ))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Self {
+            rules,
+            sites,
+            #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+            tls,
+        })
     }
 }
 
@@ -73,6 +110,7 @@ fn build_site(
 struct Selector {
     view: Arc<View>,
     listener: Listener,
+    tls_site: Option<Uuid>,
 }
 
 impl ManagedSiteSelector for Selector {
@@ -82,6 +120,9 @@ impl ManagedSiteSelector for Selector {
         hostname: &str,
     ) -> Option<ManagedRequestSite> {
         let (id, _) = self.view.rules.select(self.listener, hostname)?;
+        if self.tls_site.is_some_and(|selected| selected != id) {
+            return None;
+        }
         self.view.sites.get(&id).cloned()
     }
 }
@@ -123,11 +164,9 @@ async fn serve_http(
     shutdown: ShutdownWatch,
     h2c: bool,
 ) -> Option<anyhow::Result<()>> {
-    use pingora::{
-        protocols::l4::stream::Stream, services::listening::Service,
-    };
+    use pingora::services::listening::Service;
 
-    let Listener::Custom { port, .. } = listener else {
+    let Listener::Custom { port, protocol } = listener else {
         return Some(Err(anyhow::anyhow!(
             "expected a custom ingress listener"
         )));
@@ -135,26 +174,39 @@ async fn serve_http(
     let forwarding = Arc::new(forwarding);
     forwarding
         .run(|view| async {
+            let stream = super::ingress::downstream_stream(tcp);
+            let (stream, tls_site): (pingora::protocols::Stream, _) =
+                match protocol {
+                    pingwaf_proto::IngressProtocol::Http => {
+                        (Box::new(stream), None)
+                    },
+                    #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+                    pingwaf_proto::IngressProtocol::Https => {
+                        let (stream, id) = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            tls::accept(stream, view, listener),
+                        )
+                        .await??;
+                        (stream, Some(id))
+                    },
+                    _ => anyhow::bail!("unsupported managed ingress transport"),
+                };
             let selector = Arc::new(Selector {
                 view: view.clone(),
                 listener,
+                tls_site,
             });
             let mut app = super::ingress::http_proxy(port, |server| {
                 server.with_managed_selector(selector)
             })?;
             if let Some(options) = app.server_options.as_mut() {
-                options.h2c = h2c;
+                options.h2c = h2c && tls_site.is_none();
             }
             let app = AuthorizedProxy {
                 forwarding: forwarding.clone(),
                 app: Arc::new(app),
             };
-            Service::handle_event(
-                Box::new(Stream::from(tcp)),
-                Arc::new(app),
-                shutdown,
-            )
-            .await;
+            Service::handle_event(stream, Arc::new(app), shutdown).await;
             Ok(())
         })
         .await
@@ -257,6 +309,187 @@ mod tests {
             Arc::new(View::build(pending.candidate(), cache_dir).unwrap());
         assert!(state.publish(pending, view).unwrap());
         (state, session)
+    }
+
+    #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+    #[tokio::test]
+    async fn managed_https_pins_sni_site_and_uses_its_client_ca() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer,
+            ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+        };
+        use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+        use tokio_rustls::TlsConnector;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut tasks = JoinSet::new();
+            let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = proxy.local_addr().unwrap();
+            let listener = Listener::Custom { port: addr.port(), protocol: IngressProtocol::Https };
+            let mut roots = RootCertStore::empty();
+            let mut sites = Vec::new();
+            let mut client_identities = Vec::new();
+            for (name, alias) in [("shared.example", "alias.example"), ("other.example", "other-alias.example")] {
+                let origin_socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let mut item = site(Some(addr.port()), origin_socket.local_addr().unwrap());
+                item.ingress.as_mut().unwrap().protocol = IngressProtocol::Https as i32;
+                let row = item.site.as_mut().unwrap();
+                row.domain = name.into();
+                row.alternate_domains = vec![alias.into()];
+                let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+                // A distinct issuer name lets clients select their certificate
+                // by the advertised CA, as they would in a real handshake.
+                ca.distinguished_name.push(rcgen::DnType::CommonName, name);
+                ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+                ca.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyCertSign];
+                let ca = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
+                roots.add(ca.der().clone()).unwrap();
+                let mut server = CertificateParams::new(vec![name.to_owned(), alias.to_owned()]).unwrap();
+                server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+                let server_key = KeyPair::generate().unwrap();
+                let server = server.signed_by(&server_key, &ca).unwrap();
+                let mut client = CertificateParams::new(Vec::<String>::new()).unwrap();
+                client.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+                let client_key = KeyPair::generate().unwrap();
+                let client = client.signed_by(&client_key, &ca).unwrap();
+                client_identities.push((client.der().clone(), client_key.serialized_der().to_vec()));
+                row.rules.as_mut().unwrap().ssl = Some(pingwaf_proto::SslConfig {
+                    enabled: true,
+                    min_tls_version: if name == "shared.example" { "1.3" } else { "1.2" }.into(),
+                    max_tls_version: if name == "shared.example" { "1.3" } else { "1.2" }.into(),
+                    mtls_enabled: true,
+                    http2_enabled: Some(name == "shared.example"),
+                    mtls_require_client_cert: true,
+                    mtls_client_ca: ca.pem(),
+                    cert_pem: server.pem(),
+                    key_pem: server_key.serialize_pem(),
+                    ..Default::default()
+                });
+                sites.push(item);
+                tasks.spawn(origin(origin_socket, name));
+            }
+
+            let cache = tempfile::tempdir().unwrap();
+            let (state, _) = apply(sites, cache.path());
+            for name in ["shared.example", "other.example"] {
+                let upstream = state.forwarding().unwrap().run(|view| {
+                    let id = view.rules.select(listener, name).unwrap().0;
+                    std::future::ready(view.sites[&id].upstreams.get("same-pool").unwrap())
+                }).await.unwrap();
+                upstream.run_health_check().await.unwrap();
+            }
+
+            let config = |identity: Option<usize>, alpn: &[u8], sni: bool, tls12_only: bool| {
+                use rustls::version::{TLS12, TLS13};
+                let versions = if tls12_only { &[&TLS12][..] } else { &[&TLS13, &TLS12][..] };
+                let builder = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+                    .with_protocol_versions(versions).unwrap().with_root_certificates(roots.clone());
+                let mut config = if let Some(i) = identity {
+                    let (cert, key) = &client_identities[i];
+                    builder.with_client_auth_cert(vec![cert.clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(key.clone()).into()).unwrap()
+                } else {
+                    builder.with_no_client_auth()
+                };
+                config.enable_sni = sni;
+                config.alpn_protocols.push(alpn.to_vec());
+                TlsConnector::from(Arc::new(config))
+            };
+            let connect = |client: TlsConnector, name: &'static str| {
+                let proxy = &proxy;
+                let state = &state;
+                async move {
+                    let join = tokio::spawn({
+                        let io = TcpStream::connect(addr).await.unwrap();
+                        async move { client.connect(ServerName::try_from(name).unwrap(), io).await }
+                    });
+                    let (tcp, _) = proxy.accept().await.unwrap();
+                    let forwarding = state.forwarding().unwrap();
+                    let server = tokio::spawn(async move {
+                        let (_shutdown, watch) = tokio::sync::watch::channel(false);
+                        serve_http(forwarding, tcp, listener, watch, false).await.unwrap()
+                    });
+                    (join.await.unwrap(), server)
+                }
+            };
+
+            for (identity, name, sni) in [(None, "shared.example", true), (Some(1), "shared.example", true), (Some(0), "unknown.example", true), (Some(0), "shared.example", false)] {
+                let (client, server) = connect(config(identity, b"http/1.1", sni, false), name).await;
+                // TLS 1.3 clients may finish their side before seeing the
+                // server's rejection; assert at the accepting server.
+                assert!(server.await.unwrap().is_err());
+                drop(client);
+            }
+
+            for (name, config) in [
+                ("shared.example", config(Some(0), b"http/1.1", true, true)),
+                ("other.example", config(Some(1), b"h2", true, false)),
+            ] {
+                let (client, server) = connect(config, name).await;
+                assert!(server.await.unwrap().is_err());
+                drop(client);
+            }
+
+            let reusable_client = config(Some(0), b"http/1.1", true, false);
+            for _ in 0..2 {
+                let (client, server) = connect(reusable_client.clone(), "shared.example").await;
+                let mut client = client.unwrap();
+                let session = client.get_ref().1;
+                assert_eq!(session.alpn_protocol(), Some(&b"http/1.1"[..]));
+                assert_ne!(session.handshake_kind().unwrap(), rustls::HandshakeKind::Resumed);
+                client.write_all(b"GET /route HTTP/1.1\r\nHost: other.example\r\nConnection: close\r\n\r\n").await.unwrap();
+                client.flush().await.unwrap();
+                let response = read_closed_tls_response(&mut client).await;
+                server.await.unwrap().unwrap();
+                assert!(response.starts_with("HTTP/1.1 421"), "{response}");
+                assert!(response.contains("\r\n\r\n"));
+            }
+
+            let (client, server) = connect(config(Some(0), b"h2", true, false), "shared.example").await;
+            let client = client.unwrap();
+            assert_eq!(client.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+            let (mut sender, connection) = h2::client::handshake(client).await.unwrap();
+            let driver = tokio::spawn(connection);
+            let request = http::Request::builder().uri("https://alias.example/route").body(()).unwrap();
+            let (response, _) = sender.send_request(request, true).unwrap();
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), 200);
+            let mut body = response.into_body();
+            assert_eq!(body.data().await.unwrap().unwrap().as_ref(), b"shared.example");
+            drop(body);
+
+            let request = http::Request::builder().uri("https://other.example/route").body(()).unwrap();
+            let (response, _) = sender.send_request(request, true).unwrap();
+            assert_eq!(response.await.unwrap().status(), 421);
+            driver.abort();
+            let _ = driver.await;
+            server.await.unwrap().unwrap();
+
+            let (client, server) = connect(config(Some(1), b"http/1.1", true, false), "other.example").await;
+            let mut client = client.unwrap();
+            assert_eq!(client.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_2));
+            client.write_all(b"GET /route HTTP/1.1\r\nHost: other.example\r\nConnection: close\r\n\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let response = read_closed_tls_response(&mut client).await;
+            server.await.unwrap().unwrap();
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(response.ends_with("other.example"), "{response}");
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+        }).await.unwrap();
+    }
+
+    #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
+    async fn read_closed_tls_response(
+        io: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> String {
+        let mut response = Vec::new();
+        if let Err(error) = io.read_to_end(&mut response).await {
+            // Pingora may drop a Connection: close stream without sending a
+            // TLS close_notify. The caller still verifies HTTP framing/body.
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+        String::from_utf8(response).unwrap()
     }
 
     async fn read_origin_headers(io: &mut TcpStream) -> Vec<u8> {

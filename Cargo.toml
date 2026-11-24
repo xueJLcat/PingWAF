@@ -186,6 +186,7 @@ pretty_assertions = { workspace = true }
 prost = { workspace = true }
 rcgen = { workspace = true }
 tokio-test = { workspace = true }
+tokio-rustls = { version = "0.26.6", default-features = false }
 tempfile = { workspace = true }
 
 
