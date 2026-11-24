@@ -577,6 +577,7 @@
       "directoryMismatch": "選択したノードでディレクトリを利用できないか内容が一致しません",
       "directoryMissing": "未登録または読み取り不可",
       "selectDirectory": "全対象ノードで内容が一致するディレクトリを選択",
+      "duplicatePort": "同じポートは一度だけ設定できます。重複する行を変更または削除してください。",
       "modeRedirect": "リダイレクト",
       "redirectTarget": "転送先 URL",
       "redirectStatus": "ステータスコード",

@@ -10,7 +10,7 @@ use super::{Candidate, Lease, Listener, Received, Version};
 
 /// A full, immutable proxy view is published as a unit. A caller must not use
 /// this store to publish a reference to providers that can be reloaded in place.
-pub struct AppliedState<T>(Mutex<State<T>>);
+pub struct AppliedState<T>(Arc<Mutex<State<T>>>);
 
 struct State<T> {
     session: Option<Uuid>,
@@ -50,23 +50,23 @@ impl Pending {
 
 /// Pin an applied view for one connection. The caller must run *all* I/O,
 /// including the handshake and keep-alive streams, inside `run`.
-pub struct Forwarding<T>(Arc<Applied<T>>, watch::Sender<Authorization>);
+pub struct Forwarding<T>(Arc<Applied<T>>, watch::Sender<Authorization>, std::sync::Weak<Mutex<State<T>>>);
 
 impl<T> Clone for Forwarding<T> {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), self.1.clone())
+        Self(self.0.clone(), self.1.clone(), self.2.clone())
     }
 }
 
 impl<T> Default for AppliedState<T> {
     fn default() -> Self {
-        Self(Mutex::new(State {
+        Self(Arc::new(Mutex::new(State {
             session: None,
             latest: None,
             receipt: None,
             active: None,
             listeners: HashMap::new(),
-        }))
+        })))
     }
 }
 
@@ -127,8 +127,8 @@ impl<T> AppliedState<T> {
             return Ok(None);
         }
         state.latest = Some(version);
-        // Keep only listeners whose entire routing table and decoded site
-        // envelopes are authorized by both snapshots, including TLS and rules.
+        // Revoke incompatible transports immediately. An equivalent policy
+        // can renew here; a changed request policy waits for publication.
         let mut failure = None;
         state.listeners.retain(|listener, scoped| {
             if scoped
@@ -141,6 +141,13 @@ impl<T> AppliedState<T> {
                     Err(error) => failure = Some(error),
                     Ok(false) => {},
                 }
+            }
+            // A changed request policy may finish preparing under the old
+            // transport lease. Only publication can extend that lease.
+            if scoped.is_live() && received.lease.permits(version)
+                && scoped.0.policy.same_transport(&received.candidate, *listener)
+            {
+                return true;
             }
             scoped.1.send_modify(|a| a.revoked = true);
             false
@@ -232,7 +239,8 @@ impl<T> AppliedState<T> {
             .filter(|l| **l != Listener::Default)
         {
             let auth = match state.listeners.get(listener) {
-                Some(scoped) if scoped.is_live() && scoped.0.policy.same_listener_policy(&active.policy, *listener) => scoped.1.clone(),
+                Some(scoped) if scoped.0.policy.same_transport(&active.policy, *listener)
+                    && renew_authorization(&scoped.1, &lease)? => scoped.1.clone(),
                 Some(scoped) => {
                     let replacement = new_authorization(&lease)?;
                     scoped.1.send_modify(|authorization| authorization.revoked = true);
@@ -240,7 +248,7 @@ impl<T> AppliedState<T> {
                 },
                 _ => new_authorization(&lease)?,
             };
-            listeners.insert(*listener, Forwarding(active.clone(), auth));
+            listeners.insert(*listener, Forwarding(active.clone(), auth, Arc::downgrade(&self.0)));
         }
         state.receipt = None;
         state.listeners = listeners;
@@ -338,7 +346,7 @@ impl<T> AppliedState<T> {
         let state = self.lock();
         let active = state.active.as_ref()?;
         let forwarding =
-            Forwarding(active.clone(), active.authorization.clone());
+            Forwarding(active.clone(), active.authorization.clone(), Arc::downgrade(&self.0));
         forwarding.is_live().then_some(forwarding)
     }
 
@@ -351,7 +359,7 @@ impl<T> AppliedState<T> {
         // Empty listeners still produce the published view's unknown-host
         // response. Revocation clears this fallback before replacement.
         let active = state.active.as_ref()?;
-        let handle = Forwarding(active.clone(), active.authorization.clone());
+        let handle = Forwarding(active.clone(), active.authorization.clone(), Arc::downgrade(&self.0));
         handle.is_live().then_some(handle)
     }
 }
@@ -416,6 +424,21 @@ impl<T> Drop for AppliedState<T> {
 }
 
 impl<T> Forwarding<T> {
+    /// Pick one immutable policy for the request while its transport still
+    /// belongs to the same listener. Never reattach an expired connection.
+    pub fn request_view(&self, listener: Listener) -> Option<T> where T: Clone {
+        let shared = self.2.upgrade()?;
+        let state = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.is_live() { return None; }
+        if let Some(current) = state.listeners.get(&listener)
+            .filter(|current| self.1.same_channel(&current.1))
+        {
+            return Some(current.0.view.clone());
+        }
+        let current = state.active.as_ref()?;
+        self.1.same_channel(&current.authorization).then(|| current.view.clone())
+    }
+
     pub fn version(&self) -> Version {
         self.1.borrow().lease.version()
     }
@@ -758,17 +781,27 @@ mod tests {
         assert!(state.publish(initial, 1).unwrap());
         let old_a = state.forwarding_for(listener(81)).unwrap();
         let old_b = state.forwarding_for(listener(82)).unwrap();
+        wire.sites[0].site.as_mut().unwrap().rules.as_mut().unwrap().observation_mode = true;
+        wire.sites[0].site_revision = "cd".repeat(32);
+        let update = receive_config(&mut receiver, session, epoch, 2, 10, wire.encode_to_vec());
+        let pending = state.prepare(update).unwrap().unwrap();
+        assert_eq!(old_a.request_view(listener(81)), Some(1));
+        assert!(state.publish(pending, 2).unwrap());
+        assert_eq!(old_a.request_view(listener(81)), Some(2));
+        assert!(old_b.is_live());
+
         wire.sites.remove(0);
         let second = receive_config(
             &mut receiver,
             session,
             epoch,
-            2,
+            3,
             10,
             wire.encode_to_vec(),
         );
         let pending = state.prepare(second).unwrap().unwrap();
         assert!(!old_a.is_live());
+        assert_eq!(old_a.request_view(listener(81)), None);
         assert!(state.forwarding_for(listener(81)).is_none());
         assert!(old_b.is_live());
         assert!(state.forwarding_for(listener(82)).is_some());

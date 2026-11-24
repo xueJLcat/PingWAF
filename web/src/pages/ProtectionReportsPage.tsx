@@ -43,6 +43,11 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
   const [to, setTo] = useState(() => localTime(new Date()))
   const sites = useQuery({queryKey:['report-site-options', user,page],queryFn:()=>sitesApi.list({page,page_size:40})})
   const ids = chosen ?? (sites.data?.items[0] ? [sites.data.items[0].id] : [])
+  const changePage = (next: number) => {
+    setChosen(ids)
+    setPage(next)
+  }
+  const invalidRange = !!from && !!to && Date.parse(from) >= Date.parse(to)
   const selection = {sites:ids, timezone}
   const [now,setNow]=useState(Date.now())
   useEffect(()=>{ if (!live) return; const timer=setInterval(()=>setNow(Date.now()),5000);return ()=>clearInterval(timer) },[live])
@@ -96,20 +101,25 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
       <details className="relative"><summary>站点范围（{ids.length}）</summary><fieldset className="space-y-2 border p-3">
         {sites.data?.items.map(s=><label className="block" key={s.id}><input type="checkbox" checked={ids.includes(s.id)}
           disabled={!ids.includes(s.id)&&ids.length>=16} onChange={e=>setChosen(e.target.checked?[...ids,s.id].sort():ids.filter(id=>id!==s.id))}/> {s.domain}</label>)}
-        {page>1 && <Button onClick={()=>setPage(page-1)}>上一页</Button>}
-        {sites.data && sites.data.total>page*40 && <Button onClick={()=>setPage(page+1)}>下一页</Button>}
+        {page>1 && <Button onClick={()=>changePage(page-1)}>上一页</Button>}
+        {sites.data && sites.data.total>page*40 && <Button onClick={()=>changePage(page+1)}>下一页</Button>}
       </fieldset></details>
       <label>统计时区<Input value={timezone} onChange={e=>setTimezone(e.target.value)} placeholder="Asia/Shanghai" /></label>
       {!live && <><label>开始（本机时间）<Input type="datetime-local" value={from} onChange={e=>setFrom(e.target.value)}/></label>
         <label>结束（本机时间）<Input type="datetime-local" value={to} onChange={e=>setTo(e.target.value)}/></label>
-        <Button disabled={create.isPending || !ids.length || !from || !to || !timezone} onClick={()=>create.mutate()}>生成报告</Button></>}
+        <Button loading={create.isPending} disabled={invalidRange || !ids.length || !from || !to || !timezone} onClick={()=>create.mutate()}>生成报告</Button></>}
     </div>
+    {!live && invalidRange && <p role="alert">结束时间须晚于开始时间。</p>}
+    {sites.data?.total === 0 && <p role="status">当前账号没有可选站点。</p>}
+    {sites.data && sites.data.total > 0 && !ids.length && <p role="status">请在站点范围中选择至少一个站点。</p>}
     {alerts.map((message,i)=><p key={i} role="alert">{message}</p>)}
-    {!live && <table className="w-full text-left"><thead><tr><th>提交时间</th><th>统计时段</th><th>状态</th><th>下载</th></tr></thead>
+    {!live && jobs.isPending && <p role="status">正在加载报告任务…</p>}
+    {!live && jobs.data?.length === 0 && <p role="status">暂无报告任务。选择站点和统计时段后可生成报告。</p>}
+    {!live && !!jobs.data?.length && <div className="overflow-x-auto rounded-lg border border-border"><table className="w-full min-w-[36rem] text-left [&_td]:px-3 [&_td]:py-2 [&_th]:p-3"><thead className="border-b border-border"><tr><th>提交时间</th><th>统计时段</th><th>状态</th><th>下载</th></tr></thead>
       <tbody>{jobs.data?.map(job=><tr key={job.id}><td>{new Date(job.created_at).toLocaleString()}</td>
         <td>{reportInterval(job)}</td>
         <td>{({queued:'排队中',running:'生成中',ready:'已生成',failed:'失败'} as Record<string,string>)[job.status]} {job.error}</td>
-        <td>{job.status==='ready' && ['pdf','csv'].map(format=><Button key={format} onClick={()=>void download(job.id,format)}>{format.toUpperCase()}</Button>)}</td></tr>)}</tbody></table>}
+        <td>{job.status==='ready' && ['pdf','csv'].map(format=><Button key={format} onClick={()=>void download(job.id,format)}>{format.toUpperCase()}</Button>)}</td></tr>)}</tbody></table></div>}
     {live && data && <><p>更新于 {new Date(data.generated_at).toLocaleString()} · 每 15 秒刷新
       {(offline || screen.isError || now-Date.parse(data.generated_at)>45000) && ' · 部分节点或数据已过期'}
       {data.metrics.some(r=>!r.covered) && ' · 部分时段缺少采集记录'}</p>

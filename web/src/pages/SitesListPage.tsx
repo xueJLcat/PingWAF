@@ -606,8 +606,11 @@ export function SitesListPage() {
       errors.top = t('pages.sites.ingressRequireAgent')
     }
 
-    if (![form.ingress.listener, ...(form.ingress.additional ?? [])].every(row => validIngressPort(row, ingressInventory.data?.admin_port))) {
+    const listenerRows = [form.ingress.listener, ...(form.ingress.additional ?? [])]
+    if (!listenerRows.every(row => validIngressPort(row, ingressInventory.data?.admin_port))) {
       errors.top = t('pages.sites.ingressPortInvalid')
+    } else if (new Set(listenerRows.map(row => Number(row.split(':')[1]))).size !== listenerRows.length) {
+      errors.top = t('pages.sites.duplicatePort')
     }
     setFormErrors(errors)
     if (Object.values(errors).some(Boolean)) return
@@ -1033,6 +1036,7 @@ export function SitesListPage() {
 
       {/* Create / edit dialog */}
       <Dialog
+        size="lg"
         open={dialogOpen || urlCreateOpen}
         onClose={pending ? () => undefined : closeDialog}
         title={editing ? t('pages.sites.editSite') : t('pages.sites.addSite')}
@@ -1058,16 +1062,6 @@ export function SitesListPage() {
             </p>
           )}
           <Input
-            label={t('common.name')}
-            value={form.name}
-            placeholder={t('pages.sites.namePlaceholder')}
-            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            onBlur={validateName}
-            error={formErrors.name}
-            autoFocus
-            required
-          />
-          <Input
             label={t('pages.sites.domain')}
             value={form.domain}
             placeholder="example.com"
@@ -1076,71 +1070,10 @@ export function SitesListPage() {
             prefixIcon={<Globe weight="duotone" />}
             onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
             onBlur={validateDomainField}
+            autoFocus
             required
           />
 
-          <fieldset disabled={!!editing} className="space-y-2">
-            <legend className="text-sm font-medium">{t('pages.sites.siteMode')}</legend>
-            <div className="grid gap-2 sm:grid-cols-3">
-              {(['proxy','static','redirect'] as const).map(kind => <label key={kind}
-                className="flex items-center gap-2 rounded-md border border-border p-3 has-[:checked]:border-brand">
-                <input type="radio" name="site-type" value={kind} checked={siteMode === kind}
-                  onChange={() => changeHandler(kind === 'static' ? 'zip' : kind)} />
-                {t('pages.sites.' + ({proxy:'modeProxy',static:'modeStatic',redirect:'modeRedirect'}[kind]))}
-              </label>)}
-            </div>
-            {siteMode === 'static' && <Select label={t('pages.sites.staticSource')} value={activeHandler?.kind}
-              onChange={e => changeHandler(e.target.value === 'zip' ? 'zip' : 'static')}>
-              <option value="zip">{t('pages.sites.modeZip')}</option>
-              <option value="static">{t('pages.sites.modeDirectory')}</option>
-            </Select>}
-          </fieldset>
-          <SiteIngressFields archive={!!form.zip} terminal={!!activeHandler} value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
-            inventory={ingressInventory.data}
-            loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
-          {form.zip && <SiteArchiveField site={editing?.id} digest={form.zip.digest}
-            onChange={(digest, draftId) => setForm(f => ({ ...f, zip: { kind: 'zip', digest }, draftId }))} />}
-          {form.directory && <Select label={t('pages.sites.selectDirectory')} value={form.directory.directory_id}
-            onChange={e => setForm(f => ({ ...f, directory: { kind: 'static', directory_id: e.target.value,
-              digest: directories.find(([id]) => id === e.target.value)?.[1] ?? '' } }))}>
-            <option value="">{t('pages.sites.selectDirectory')}</option>
-            {directories.map(([id]) => <option key={id} value={id}>{id}</option>)}
-          </Select>}
-          {form.directory && editing && <Select label={t('pages.sites.publishedVersions')}
-            value={form.directory.rollback ? form.directory.directory_id + ':' + form.directory.digest : ''}
-            onChange={event => {
-              const version = directoryHistory.data?.find(v => v.directory_id + ':' + v.digest === event.target.value)
-              if (version?.directory_id) setForm(f => ({ ...f, directory: { kind: 'static', rollback: true, directory_id: version.directory_id!, digest: version.digest } }))
-            }}>
-            <option value="">—</option>
-            {directoryHistory.data?.filter(v => v.directory_id).map(v => <option key={v.directory_id + ':' + v.digest} value={v.directory_id + ':' + v.digest}>
-              {v.directory_id} · {v.digest.slice(0, 16)} · {new Date(v.published_at).toLocaleString()}
-            </option>)}
-          </Select>}
-          {form.directory && mismatchedDirectories.map(id =>
-            <details key={id} className="text-xs text-fg-subtle">
-              <summary>{id} · {t('pages.sites.directoryMismatch')}</summary>
-              {directoryNodes.map(node => <p key={node.id} className="break-all">{node.name} · {node.static_directories?.[id] || t('pages.sites.directoryMissing')}</p>)}
-            </details>)}
-          {form.handler && <div className="flex flex-col gap-3">
-            <Input label={t('pages.sites.redirectTarget')} value={form.handler.target} error={formErrors.upstream}
-              placeholder="https://example.com/" onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, target: e.target.value } }))}/>
-            <Select label={t('pages.sites.redirectStatus')} value={form.handler.status}
-              onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, status: Number(e.target.value) as RedirectHandler['status'] } }))}>
-              {[301,302,307,308].map(code => <option key={code} value={code}>{code}</option>)}
-            </Select>
-            {(['preserve_path','preserve_query'] as const).map(key =>
-              <Switch key={key} label={t(key === 'preserve_path' ? 'pages.sites.keepPath' : 'pages.sites.keepQuery')}
-                checked={form.handler![key]} onCheckedChange={value => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, [key]: value } }))}/>
-            )}
-            {redirectPreview(form.handler) && <p className="break-all text-sm">{t('pages.sites.redirectExample')} <code>{redirectPreview(form.handler)}</code></p>}
-          </div>}
-          {showCertificate && <Select label={t('pages.sites.ingressCertificate')} value={form.certificateId}
-            onChange={event => setForm(f => ({ ...f, certificateId: event.target.value }))}>
-            <option value="">{t('pages.sites.ingressCertificateLater')}</option>
-            {(certificates.data?.items ?? []).filter(cert => cert.has_certificate && cert.has_private_key).map(cert =>
-              <option key={cert.id} value={cert.id}>{cert.domain}</option>)}
-          </Select>}
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <span className="text-[13px] font-medium text-fg-subtle">
@@ -1194,6 +1127,72 @@ export function SitesListPage() {
             <p className="text-xs text-fg-subtle">{t('pages.sites.alternateDomainsHint')}</p>
           </div>
 
+          <fieldset disabled={!!editing} className="space-y-2">
+            <legend className="text-sm font-medium">{t('pages.sites.siteMode')}</legend>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {(['proxy','static','redirect'] as const).map(kind => <label key={kind}
+                className="flex items-center gap-2 rounded-md border border-border p-3 has-[:checked]:border-brand">
+                <input type="radio" name="site-type" value={kind} checked={siteMode === kind}
+                  onChange={() => changeHandler(kind === 'static' ? 'zip' : kind)} />
+                {t('pages.sites.' + ({proxy:'modeProxy',static:'modeStatic',redirect:'modeRedirect'}[kind]))}
+              </label>)}
+            </div>
+            {siteMode === 'static' && <Select label={t('pages.sites.staticSource')} value={activeHandler?.kind}
+              onChange={e => changeHandler(e.target.value === 'zip' ? 'zip' : 'static')}>
+              <option value="zip">{t('pages.sites.modeZip')}</option>
+              <option value="static">{t('pages.sites.modeDirectory')}</option>
+            </Select>}
+          </fieldset>
+          <SiteIngressFields archive={!!form.zip} terminal={!!activeHandler} value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
+            inventory={ingressInventory.data}
+            loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
+          {showCertificate && <Select label={t('pages.sites.ingressCertificate')} value={form.certificateId}
+            onChange={event => setForm(f => ({ ...f, certificateId: event.target.value }))}>
+            <option value="">{t('pages.sites.ingressCertificateLater')}</option>
+            {(certificates.data?.items ?? []).filter(cert => cert.has_certificate && cert.has_private_key).map(cert =>
+              <option key={cert.id} value={cert.id}>{cert.domain}</option>)}
+          </Select>}
+          {form.zip && <SiteArchiveField site={editing?.id} digest={form.zip.digest}
+            onChange={(digest, draftId) => setForm(f => ({ ...f, zip: { kind: 'zip', digest }, draftId }))} />}
+          {form.directory && <Select label={t('pages.sites.selectDirectory')} value={form.directory.directory_id}
+            onChange={e => setForm(f => ({ ...f, directory: { kind: 'static', directory_id: e.target.value,
+              digest: directories.find(([id]) => id === e.target.value)?.[1] ?? '' } }))}>
+            <option value="">{t('pages.sites.selectDirectory')}</option>
+            {directories.map(([id]) => <option key={id} value={id}>{id}</option>)}
+          </Select>}
+          {form.directory && editing && <Select label={t('pages.sites.publishedVersions')}
+            value={form.directory.rollback ? form.directory.directory_id + ':' + form.directory.digest : ''}
+            onChange={event => {
+              if (!event.target.value) {
+                setForm(f => ({ ...f, directory: { kind: 'static', directory_id: '', digest: '' } }))
+                return
+              }
+              const version = directoryHistory.data?.find(v => v.directory_id + ':' + v.digest === event.target.value)
+              if (version?.directory_id) setForm(f => ({ ...f, directory: { kind: 'static', rollback: true, directory_id: version.directory_id!, digest: version.digest } }))
+            }}>
+            <option value="">—</option>
+            {directoryHistory.data?.filter(v => v.directory_id).map(v => <option key={v.directory_id + ':' + v.digest} value={v.directory_id + ':' + v.digest}>
+              {v.directory_id} · {v.digest.slice(0, 16)} · {new Date(v.published_at).toLocaleString()}
+            </option>)}
+          </Select>}
+          {form.directory && mismatchedDirectories.map(id =>
+            <details key={id} className="text-xs text-fg-subtle">
+              <summary>{id} · {t('pages.sites.directoryMismatch')}</summary>
+              {directoryNodes.map(node => <p key={node.id} className="break-all">{node.name} · {node.static_directories?.[id] || t('pages.sites.directoryMissing')}</p>)}
+            </details>)}
+          {form.handler && <div className="flex flex-col gap-3">
+            <Input label={t('pages.sites.redirectTarget')} value={form.handler.target} error={formErrors.upstream}
+              placeholder="https://example.com/" onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, target: e.target.value } }))}/>
+            <Select label={t('pages.sites.redirectStatus')} value={form.handler.status}
+              onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, status: Number(e.target.value) as RedirectHandler['status'] } }))}>
+              {[301,302,307,308].map(code => <option key={code} value={code}>{code}</option>)}
+            </Select>
+            {(['preserve_path','preserve_query'] as const).map(key =>
+              <Switch key={key} label={t(key === 'preserve_path' ? 'pages.sites.keepPath' : 'pages.sites.keepQuery')}
+                checked={form.handler![key]} onCheckedChange={value => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, [key]: value } }))}/>
+            )}
+            {redirectPreview(form.handler) && <p className="break-all text-sm">{t('pages.sites.redirectExample')} <code>{redirectPreview(form.handler)}</code></p>}
+          </div>}
           {!editing && !activeHandler && (
             <>
               <Input
@@ -1217,6 +1216,15 @@ export function SitesListPage() {
               </div>
             </>
           )}
+          <Input
+            label={t('common.name')}
+            value={form.name}
+            placeholder={t('pages.sites.namePlaceholder')}
+            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            onBlur={validateName}
+            error={formErrors.name}
+            required
+          />
         </div>
       </Dialog>
 

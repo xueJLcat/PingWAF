@@ -30,9 +30,9 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
   function changeRows(next: string[]) {
     const usual = !terminal && next.length === 2 && next.includes('http:80') && next.includes('https:443')
     const agents = candidates(next)
-    const kept = selected.filter(id => agents.some(agent => agent.id === id))
     onChange({ ...value, listener: usual ? '' : next[0], additional: usual ? [] : next.slice(1),
-      agents: !usual && agents.length === 1 ? [agents[0].id] : kept })
+      agents: !usual && value.agents === null && !selected.length && agents.length === 1
+        ? [agents[0].id] : selected })
   }
   const unavailable = selected.filter(id => !eligible.some(agent => agent.id === id))
   const toggle = (id: string) => onChange({
@@ -67,7 +67,7 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
         <input type="checkbox" checked={selected.includes(agent.id)} onChange={() => toggle(agent.id)} />{agent.name}
       </label>)}
       {unavailable.map(id => <label key={id} className="flex items-center gap-2">
-        <input type="checkbox" checked onChange={() => toggle(id)} />{id} · {t('pages.sites.ingressUnavailable')}
+        <input type="checkbox" checked onChange={() => toggle(id)} />{inventory?.agents.find(node => node.id === id)?.name ?? id} · {t('pages.sites.ingressUnavailable')}
       </label>)}
       {canPause && <label className="flex items-center gap-2">
         <input type="checkbox" checked={value.paused} onChange={event => onChange({ ...value, paused: event.target.checked })} />

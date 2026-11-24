@@ -594,6 +594,7 @@
       "ingressHsts": "浏览器已有的 HSTS 可能将此地址升级为 HTTPS。",
       "ingressAgents": "分派节点",
       "ingressUnavailable": "监听不可用",
+      "duplicatePort": "监听端口重复。每个端口只能配置一次，请修改或移除重复行。",
       "ingressStage": "保存为暂停状态",
       "ingressRequireAgent": "请选择已绑定该入口的节点，或将站点保存为暂停状态。",
       "cloneFrom": "克隆自：{{domain}}",

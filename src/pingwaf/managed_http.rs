@@ -477,7 +477,7 @@ fn build_site(
 }
 
 struct Selector {
-    view: Arc<View>,
+    forwarding: Arc<Forwarding<Arc<View>>>,
     listener: Listener,
     tls_site: Option<Uuid>,
 }
@@ -488,11 +488,12 @@ impl ManagedSiteSelector for Selector {
         _: &Session,
         hostname: &str,
     ) -> Option<ManagedRequestSite> {
-        let (id, _) = self.view.rules.select(self.listener, hostname)?;
+        let view = self.forwarding.request_view(self.listener)?;
+        let (id, _) = view.rules.select(self.listener, hostname)?;
         if self.tls_site.is_some_and(|selected| selected != id) {
             return None;
         }
-        self.view.sites.get(&id).cloned()
+        view.sites.get(&id).cloned()
     }
 }
 
@@ -571,7 +572,7 @@ async fn serve_http_stream(
                     _ => anyhow::bail!("unsupported managed ingress transport"),
                 };
             let selector = Arc::new(Selector {
-                view: view.clone(),
+                forwarding: forwarding.clone(),
                 listener,
                 tls_site,
             });
@@ -662,26 +663,99 @@ mod tests {
     fn receive(
         sites: Vec<ManagedSite>,
     ) -> (Uuid, pingwaf_agent::managed::Received) {
-        let config = ManagedSiteConfig { sites }.encode_to_vec();
         let session = Uuid::new_v4();
         let mut receiver = Receiver::default();
         receiver.set_session(Some(session));
-        let received = PullWindow::start(&receiver)
+        (session, receive_version(&mut receiver, session, Uuid::new_v4(), 1, sites))
+    }
+
+    fn receive_version(receiver: &mut Receiver, session: Uuid, authority: Uuid, generation: i64, sites: Vec<ManagedSite>) -> pingwaf_agent::managed::Received {
+        let config = ManagedSiteConfig { sites }.encode_to_vec();
+        PullWindow::start(receiver)
             .unwrap()
             .receive(
-                &mut receiver,
+                receiver,
                 ManagedSnapshot {
                     session_id: session.to_string(),
-                    authority_epoch: Uuid::new_v4().to_string(),
-                    generation: 1,
+                    authority_epoch: authority.to_string(),
+                    generation,
                     config_hash: hex::encode(Sha256::digest(&config)),
                     config,
                     lease_seconds: 30,
                 },
             )
             .unwrap()
-            .unwrap();
-        (session, received)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_h1_and_h2_requests_follow_the_published_site_on_the_same_connections() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = proxy.local_addr().unwrap();
+            let ingress = listener(addr.port());
+            let mut item = site(Some(addr.port()), addr);
+            let rules = item.site.as_mut().unwrap().rules.as_mut().unwrap();
+            rules.upstreams.clear();
+            rules.routes.clear();
+            let (session, authority) = (Uuid::new_v4(), Uuid::new_v4());
+            let mut receiver = Receiver::default();
+            receiver.set_session(Some(session));
+            let state = AppliedState::default();
+            state.start_session(session);
+            let directory = tempfile::tempdir().unwrap();
+            let mut prepare = |generation, status| {
+                item.handler = Some(pingwaf_proto::managed_site::Handler::Redirect(pingwaf_proto::SiteRedirect {
+                    target: "https://destination.example/".into(), status, ..Default::default()
+                }));
+                let incoming = receive_version(&mut receiver, session, authority, generation, vec![item.clone()]);
+                let pending = state.prepare(incoming).unwrap().unwrap();
+                let view = Arc::new(View::build(pending.candidate(), directory.path()).unwrap());
+                (pending, view)
+            };
+            let (first, view) = prepare(1, 302);
+            assert!(state.publish(first, view).unwrap());
+            let (_shutdown, watch) = tokio::sync::watch::channel(false);
+            let mut tasks = JoinSet::new();
+            let connect = |h2c| {
+                let watch = watch.clone();
+                let handle = state.forwarding_for(ingress).unwrap();
+                let proxy = &proxy;
+                async move {
+                    let (client, accepted) = tokio::join!(TcpStream::connect(addr), proxy.accept());
+                    let tcp = accepted.unwrap().0;
+                    let task = async move { serve_http(handle, tcp, ingress, watch, h2c).await };
+                    (client.unwrap(), task)
+                }
+            };
+            let (mut h1, server) = connect(false).await;
+            tasks.spawn(server);
+            let (tcp, server) = connect(true).await;
+            tasks.spawn(server);
+            let (mut h2, connection) = h2::client::handshake(tcp).await.unwrap();
+            let driver = tokio::spawn(connection);
+            let mut staged = None;
+            for (phase, expected) in [302, 302, 307].into_iter().enumerate() {
+                if phase == 1 { staged = Some(prepare(2, 307)); }
+                if phase == 2 {
+                    let (pending, view) = staged.take().unwrap();
+                    assert!(state.publish(pending, view).unwrap());
+                }
+                h1.write_all(b"HEAD /route HTTP/1.1\r\nHost: alias.example\r\n\r\n").await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(h1.read_u8().await.unwrap());
+                    assert!(headers.len() < 8192);
+                }
+                assert!(String::from_utf8(headers).unwrap().starts_with(&format!("HTTP/1.1 {expected}")));
+                let request = http::Request::builder().method("HEAD").uri("http://alias.example/route").body(()).unwrap();
+                let (response, _) = h2.send_request(request, true).unwrap();
+                assert_eq!(response.await.unwrap().status().as_u16(), expected);
+            }
+            state.end_session(session);
+            driver.abort();
+            while let Some(result) = tasks.join_next().await { result.unwrap(); }
+        }).await.unwrap();
     }
 
     fn apply(

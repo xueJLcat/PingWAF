@@ -5620,7 +5620,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-content"
-version = "0.32.48"
+version = "0.32.49"
 dependencies = [
  "brotli 8.0.4",
  "flate2",

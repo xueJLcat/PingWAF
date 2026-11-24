@@ -10,6 +10,12 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Keep compatible managed HTTP connections alive during a site policy update.
+  Each new request uses the published view, including streams on a reused
+  HTTP/2 connection. Changes to routing ownership or TLS still revoke it.
+- Keep selected nodes visible when editing listener ports and keep the report
+  scope stable while paging through available sites.
+
 - Expose protection reports and the live screen in navigation, group static sources in site setup, and show page policy stages and report periods in the console.
 
 - Add opt-in public HTML text transformation with preview, a test visitor

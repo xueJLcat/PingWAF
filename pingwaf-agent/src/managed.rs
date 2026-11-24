@@ -92,14 +92,19 @@ impl Candidate {
     }
 
     #[cfg(target_os = "linux")]
-    fn same_listener_policy(&self, other: &Self, listener: Listener) -> bool {
+    fn same_transport(&self, other: &Self, listener: Listener) -> bool {
         let Some(routes) = self.routes.get(&listener) else {
             return false;
         };
         other.routes.get(&listener) == Some(routes)
             && routes
                 .values()
-                .all(|id| self.sites.get(id) == other.sites.get(id))
+                .all(|id| {
+                    let (Some(before), Some(after)) = (self.sites.get(id), other.sites.get(id)) else { return false };
+                    let (Some(a), Some(b)) = (&before.site, &after.site) else { return false };
+                    a.status == b.status && before.failover_mode == after.failover_mode
+                        && a.rules.as_ref().and_then(|r| r.ssl.as_ref()) == b.rules.as_ref().and_then(|r| r.ssl.as_ref())
+                })
     }
 
     /// During static content preparation the previous content is still authorized

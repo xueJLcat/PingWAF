@@ -577,6 +577,7 @@
       "directoryMismatch": "Directory unavailable on the selected nodes",
       "directoryMissing": "Missing or unreadable",
       "selectDirectory": "Select a matching directory on all target nodes",
+      "duplicatePort": "Each listener port can appear only once. Change or remove the duplicate row.",
       "modeRedirect": "Redirect",
       "redirectTarget": "Destination URL",
       "redirectStatus": "Redirect status",
