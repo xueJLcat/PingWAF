@@ -468,11 +468,18 @@ pub trait ManagedSiteSelector: Send + Sync {
     ) -> Option<ManagedRequestSite>;
 }
 
+#[derive(Clone)]
 pub struct ManagedRequestSite {
     pub id: Arc<str>,
     pub route: Arc<pingap_location::ServerLocationRoute>,
     pub trust: ProxyTrust,
+    pub locations: Arc<dyn LocationProvider>,
+    pub plugins: Arc<dyn PluginProvider>,
+    pub upstreams: Arc<dyn UpstreamProvider>,
 }
+
+#[derive(Clone)]
+struct ManagedUpstreams(Arc<dyn UpstreamProvider>);
 
 /// Set only by the proxy before running any site plugins, never decoded from
 /// an HTTP header. Retained even if an upstream rewrite changes Host.
@@ -978,31 +985,43 @@ impl Server {
             return Err(new_internal_error(status, message));
         }
 
-        let (host, route) = if let Some(selector) = &self.managed_selector {
-            let host = managed_hostname(header).ok_or_else(|| {
-                new_internal_error(
-                    400,
-                    "invalid or ambiguous request authority",
+        let (host, route, managed) =
+            if let Some(selector) = &self.managed_selector {
+                let host = managed_hostname(header).ok_or_else(|| {
+                    new_internal_error(
+                        400,
+                        "invalid or ambiguous request authority",
+                    )
+                })?;
+                let site = Self::select_managed_site(
+                    selector.as_ref(),
+                    session,
+                    ctx,
+                    &host,
+                )?;
+                (host, Some(site.route.clone()), Some(site))
+            } else {
+                (
+                    legacy_host.flatten().unwrap_or_default(),
+                    self.server_locations_provider.get(&self.name),
+                    None,
                 )
-            })?;
-            let route = Self::select_managed_route(
-                selector.as_ref(),
-                session,
-                ctx,
-                &host,
-            )?;
-            (host, Some(route))
-        } else {
-            (
-                legacy_host.flatten().unwrap_or_default(),
-                self.server_locations_provider.get(&self.name),
-            )
-        };
+            };
         let Some(route) = route else {
             return Ok(());
         };
         let header = session.req_header();
         let path = header.uri.path();
+        let locations = managed
+            .as_ref()
+            .map_or(self.location_provider.as_ref(), |site| {
+                site.locations.as_ref()
+            });
+        let plugins = managed
+            .as_ref()
+            .map_or(self.plugin_provider.as_ref(), |site| {
+                site.plugins.as_ref()
+            });
 
         // Resolve the caller once: every candidate is gated on the same
         // address, and the parsed form is what `match_conditions` needs.
@@ -1026,7 +1045,7 @@ impl Server {
             .into_iter()
             .find_map(|idx| {
                 let name = route.ordered.get(idx)?;
-                let location = self.location_provider.get(name)?;
+                let location = locations.get(name)?;
                 let (matched, captures) = location.match_host_path(&host, path);
                 if matched && location.match_conditions(header, client_ip) {
                     Some((location, captures))
@@ -1106,7 +1125,7 @@ impl Server {
         // initialize plugins and execute. A plugin answering here is
         // honoured by `request_filter`, which is where pingora first lets
         // the request stop; the flag is the response itself.
-        ctx.plugins = location.plugins_for(self.plugin_provider.as_ref());
+        ctx.plugins = location.plugins_for(plugins);
         let _ = self
             .handle_request_plugin(PluginStep::EarlyRequest, session, ctx)
             .await?;
@@ -1114,12 +1133,12 @@ impl Server {
         Ok(())
     }
 
-    fn select_managed_route(
+    fn select_managed_site(
         selector: &dyn ManagedSiteSelector,
         session: &mut Session,
         ctx: &mut Ctx,
         host: &str,
-    ) -> pingora::Result<Arc<pingap_location::ServerLocationRoute>> {
+    ) -> pingora::Result<ManagedRequestSite> {
         let site = selector.select(session, host).ok_or_else(|| {
             new_internal_error(421, "no authorized site for this authority")
         })?;
@@ -1132,11 +1151,10 @@ impl Server {
                 })
                 .unwrap_or_default(),
         );
-        session
-            .req_header_mut()
-            .extensions_mut()
-            .insert(ManagedSiteId(site.id));
-        Ok(site.route)
+        let extensions = session.req_header_mut().extensions_mut();
+        extensions.insert(ManagedSiteId(site.id.clone()));
+        extensions.insert(ManagedUpstreams(site.upstreams.clone()));
+        Ok(site)
     }
 
     #[inline]
@@ -2097,19 +2115,21 @@ impl ProxyHttp for Server {
         if session.response_written().is_some() {
             return Ok(true);
         }
-        // try to handle special requests in order
-        // admin route
-        if let Some(result) = self.handle_admin_request(session, ctx).await {
-            return result;
-        }
-        // acme http challengt
-        if let Some(result) = self.handle_acme_challenge(session, ctx).await {
-            return result;
-        }
-        // prometheus metrics pull request
-        #[cfg(feature = "tracing")]
-        if let Some(result) = self.handle_metrics_request(session, ctx).await {
-            return result;
+        if self.managed_selector.is_none() {
+            if let Some(result) = self.handle_admin_request(session, ctx).await
+            {
+                return result;
+            }
+            if let Some(result) = self.handle_acme_challenge(session, ctx).await
+            {
+                return result;
+            }
+            #[cfg(feature = "tracing")]
+            if let Some(result) =
+                self.handle_metrics_request(session, ctx).await
+            {
+                return result;
+            }
         }
 
         self.handle_standard_request(session, ctx).await
@@ -2150,6 +2170,17 @@ impl ProxyHttp for Server {
                 format!("No available upstream for {}", ctx.upstream.location),
             )
         };
+        let upstreams = if self.managed_selector.is_some() {
+            session
+                .req_header()
+                .extensions
+                .get::<ManagedUpstreams>()
+                .ok_or_else(|| no_available_upstream(ctx))?
+                .0
+                .as_ref()
+        } else {
+            self.upstream_provider.as_ref()
+        };
         let location = ctx.upstream.location_instance.clone();
         let upstream = location.as_ref().and_then(|location| {
             let name = if ctx.upstream.name.is_empty() {
@@ -2158,11 +2189,7 @@ impl ProxyHttp for Server {
                 // override upstream by other plugin
                 &ctx.upstream.name
             };
-            get_upstream_with_variables(
-                name,
-                ctx,
-                self.upstream_provider.as_ref(),
-            )
+            get_upstream_with_variables(name, ctx, upstreams)
         });
         let Some(upstream) = upstream else {
             return Err(no_available_upstream(ctx));
@@ -3362,26 +3389,29 @@ value = 'proxy_set_headers = ["name:value"]'
     #[tokio::test]
     async fn managed_authority_does_not_change_the_listener_or_borrow_legacy_routes()
      {
-        struct Selector;
+        struct Selector(ManagedRequestSite);
         impl ManagedSiteSelector for Selector {
             fn select(
                 &self,
                 _session: &Session,
                 hostname: &str,
             ) -> Option<ManagedRequestSite> {
-                (hostname == "shared.example").then(|| ManagedRequestSite {
-                    id: Arc::from("site-on-this-listener"),
-                    route: Arc::new(
-                        pingap_location::ServerLocationRoute::build(
-                            Vec::new(),
-                            |_| None,
-                        ),
-                    ),
-                    trust: ProxyTrust::new(false, "", false, &[]),
-                })
+                (hostname == "shared.example").then(|| self.0.clone())
             }
         }
-        let server = new_server().with_managed_selector(Arc::new(Selector));
+        let server = new_server();
+        let selector = Selector(ManagedRequestSite {
+            id: Arc::from("site-on-this-listener"),
+            route: Arc::new(pingap_location::ServerLocationRoute::build(
+                Vec::new(),
+                |_| None,
+            )),
+            trust: ProxyTrust::new(false, "", false, &[]),
+            locations: server.location_provider.clone(),
+            plugins: server.plugin_provider.clone(),
+            upstreams: server.upstream_provider.clone(),
+        });
+        let server = server.with_managed_selector(Arc::new(selector));
         let (mut session, _) = new_duplex_session("GET / HTTP/1.1\r\nHost: Shared.Example.:83\r\nX-Forwarded-Host: other.test\r\nX-Forwarded-Port: 82\r\n\r\n").await;
         let mut ctx = Ctx::default();
         server
@@ -3403,6 +3433,131 @@ value = 'proxy_set_headers = ["name:value"]'
                 .early_request_filter(&mut session, &mut Ctx::default())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_proxy_uses_only_the_selected_sites_providers_on_real_sockets()
+     {
+        use pingora::protocols::l4::stream::Stream;
+        use pingora::proxy::HttpProxy;
+        use pingora::services::listening::Service;
+        use tokio::net::{TcpListener, TcpStream};
+
+        struct Selector(ManagedRequestSite);
+        impl ManagedSiteSelector for Selector {
+            fn select(
+                &self,
+                _: &Session,
+                host: &str,
+            ) -> Option<ManagedRequestSite> {
+                (host == "shared.example").then(|| self.0.clone())
+            }
+        }
+
+        // An identical location and upstream alias exists in the legacy
+        // provider: checking names alone would not prove UUID isolation.
+        let legacy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let legacy_toml = TEST_TOML.replace(
+            "127.0.0.1:5000",
+            &legacy.local_addr().unwrap().to_string(),
+        );
+        let mut ports = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut plugin_calls = Vec::new();
+        let legacy_plugin = CountingPlugin::default();
+        let legacy_calls = legacy_plugin.request_calls.clone();
+        let legacy_plugins = Arc::new(CountingPluginProvider {
+            plugin: Arc::new(legacy_plugin),
+        });
+        for body in ["site-a", "site-b"] {
+            let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let conf = TEST_TOML.replace(
+                "127.0.0.1:5000",
+                &origin.local_addr().unwrap().to_string(),
+            );
+            let selected_plugin = CountingPlugin::default();
+            plugin_calls.push(selected_plugin.request_calls.clone());
+            let selected = new_server_from(
+                &conf.replace("name:value", &format!("X-Test-Site:{body}")),
+                Some(Arc::new(CountingPluginProvider {
+                    plugin: Arc::new(selected_plugin),
+                })),
+            );
+            for (_, up) in selected.upstream_provider.list() {
+                up.run_health_check().await.unwrap();
+            }
+            let selector = Selector(ManagedRequestSite {
+                id: Arc::from(body),
+                route: selected
+                    .server_locations_provider
+                    .get(&selected.name)
+                    .unwrap(),
+                trust: ProxyTrust::new(false, "", false, &[]),
+                locations: selected.location_provider,
+                plugins: selected.plugin_provider,
+                upstreams: selected.upstream_provider,
+            });
+            let mut app = HttpProxy::new(
+                new_server_from(&legacy_toml, Some(legacy_plugins.clone()))
+                    .with_managed_selector(Arc::new(selector)),
+                Arc::new(configuration::ServerConf::default()),
+            );
+            app.handle_init_modules();
+            let app = Arc::new(app);
+            let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            ports.push(socket.local_addr().unwrap());
+            tasks.spawn(async move {
+                let (tcp, _) = socket.accept().await.unwrap();
+                let (_shutdown, watch) = tokio::sync::watch::channel(false);
+                Service::handle_event(Box::new(Stream::from(tcp)), app, watch)
+                    .await;
+            });
+            tasks.spawn(async move {
+                loop {
+                    let (mut conn, _) = origin.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let real_request = loop {
+                        assert!(request.len() < 8192);
+                        match conn.read_u8().await {
+                            Ok(byte) => request.push(byte),
+                            // The initial TCP health probe connects and
+                            // closes without writing an HTTP request.
+                            Err(error) if request.is_empty() && error.kind() == std::io::ErrorKind::UnexpectedEof => break false,
+                            Err(error) => panic!("origin request: {error}"),
+                        }
+                        if request.ends_with(b"\r\n\r\n") {
+                            break true;
+                        }
+                    };
+                    if real_request {
+                        assert!(String::from_utf8(request).unwrap().to_ascii_lowercase().lines().any(|line| line.strip_prefix("x-test-site:").is_some_and(|value| value.trim() == body)));
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        conn.write_all(response.as_bytes()).await.unwrap();
+                        return;
+                    }
+                }
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (i, expected) in ["site-a", "site-b"].into_iter().enumerate() {
+                let mut client = TcpStream::connect(ports[i]).await.unwrap();
+                let other_port = ports[1 - i].port();
+                client.write_all(format!("GET / HTTP/1.1\r\nHost: shared.example:{other_port}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                let mut response = String::new();
+                client.read_to_string(&mut response).await.unwrap();
+                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                assert!(response.ends_with(expected), "{response}");
+            }
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+        }).await.unwrap();
+        assert_eq!(legacy_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            plugin_calls
+                .iter()
+                .all(|calls| calls.load(Ordering::SeqCst) > 0)
         );
     }
 
