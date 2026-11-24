@@ -1391,6 +1391,7 @@ message VisitorLogoutRequest {
   string agent_id = 1;
   string agent_token = 2;
   string visitor_id = 3;
+  // Default-ingress hostname or managed:<UUID>.
   string site_id = 4;
 }
 
@@ -1404,8 +1405,7 @@ message VisitorChangePasswordRequest {
   string visitor_id = 3;
   string current_password = 4;
   string new_password = 5;
-  // The host the caller is acting for, so the request can be scoped to a site
-  // this agent serves and one the account is granted.
+  // Default-ingress hostname or managed:<UUID>. The visitor must have a grant.
   string site_id = 6;
 }
 
@@ -1423,8 +1423,8 @@ message VisitorGrantsRequest {
   string agent_id = 1;
   string agent_token = 2;
   string visitor_id = 3;
-  // The host the caller is acting for. Used to scope the answer to a site the
-  // agent serves, and to check the visitor's grant to it.
+  // Default-ingress hostname or managed:<UUID>. The managed portal lists
+  // grants only for the site that issued its session.
   string site_id = 4;
 }
 
@@ -1449,6 +1449,7 @@ message VisitorSetVisibleRequest {
   string agent_id = 1;
   string agent_token = 2;
   string visitor_id = 3;
+  // Legacy grant UUID or managed:<UUID> for the active managed portal.
   string site_id = 4;
   bool visible = 5;
 }
@@ -1466,6 +1467,7 @@ message VisitorPasskeyBeginRequest {
   // Set for a registration (the visitor is signed in); empty for a login
   // (they are not, and the credential identifies the account).
   string visitor_id = 3;
+  // Default-ingress hostname or managed:<UUID>.
   string site_id = 4;
 }
 
@@ -1482,6 +1484,7 @@ message VisitorPasskeyOptionsResponse {
 message VisitorPasskeyFinishRequest {
   string agent_id = 1;
   string agent_token = 2;
+  // Same site reference as the begin request.
   string site_id = 3;
   string ceremony_id = 4;
   // The credential the authenticator produced, as the browser serialised it.

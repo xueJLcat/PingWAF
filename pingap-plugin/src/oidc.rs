@@ -100,7 +100,7 @@ pub struct Oidc {
     /// The same as the provider is to see it, when that is not what the
     /// request says: behind another proxy, or a CDN.
     redirect_url: Option<String>,
-    managed: Option<ManagedOidc>,
+    managed: Option<ManagedAuthScope>,
     /// Ends the session, when set.
     logout_path: Option<String>,
     /// The scopes asked for, with spaces between.
@@ -131,15 +131,15 @@ pub struct Oidc {
 
 /// Kept separate from the legacy config so that neither mode can read the
 /// other's state even when an operator reuses the same provider and secret.
-struct ManagedOidc {
-    site_id: uuid::Uuid,
-    listener_port: u16,
-    hostname: String,
-    external_port: u16,
+pub(crate) struct ManagedAuthScope {
+    pub(crate) site_id: uuid::Uuid,
+    pub(crate) listener_port: u16,
+    pub(crate) hostname: String,
+    pub(crate) external_port: u16,
 }
 
-impl ManagedOidc {
-    fn new(
+impl ManagedAuthScope {
+    pub(crate) fn new(
         site: &str,
         port: Option<i64>,
         callback: Option<&str>,
@@ -172,7 +172,7 @@ impl ManagedOidc {
         })
     }
 
-    fn matches(&self, session: &Session, ctx: &Ctx) -> bool {
+    pub(crate) fn matches(&self, session: &Session, ctx: &Ctx) -> bool {
         let extensions = &session.req_header().extensions;
         ctx.conn.tls_version.is_some()
             && ctx.conn.server_port == Some(self.listener_port)
@@ -192,7 +192,7 @@ impl ManagedOidc {
                 })
     }
 
-    fn permits_logout(&self, session: &Session) -> bool {
+    pub(crate) fn permits_logout(&self, session: &Session) -> bool {
         let request = session.req_header();
         let mut origins = request.headers.get_all(http::header::ORIGIN).iter();
         let Some(origin) = origins.next().and_then(|v| v.to_str().ok()) else {
@@ -652,7 +652,7 @@ impl TryFrom<&PluginConf> for Oidc {
             || value.contains_key("managed_listener_port")
         {
             Some(
-                ManagedOidc::new(
+                ManagedAuthScope::new(
                     &get_str_conf(value, "managed_site_id"),
                     value
                         .get("managed_listener_port")

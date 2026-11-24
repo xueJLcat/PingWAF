@@ -341,15 +341,118 @@ pub(super) async fn check_managed_password_postgres(
         }))
     };
     assert!(validate(scope.clone()).await.unwrap().into_inner().valid);
+    let grants = |site_id: &str| {
+        service.visitor_grants(Request::new(VisitorGrantsRequest {
+            agent_token: token.into(),
+            site_id: site_id.into(),
+            visitor_id: visitor.to_string(),
+            ..Default::default()
+        }))
+    };
+    let visible = |site_id: &str, visible| {
+        service.visitor_set_site_visible(Request::new(
+            VisitorSetVisibleRequest {
+                agent_token: token.into(),
+                site_id: site_id.into(),
+                visitor_id: visitor.to_string(),
+                visible,
+                ..Default::default()
+            },
+        ))
+    };
+    let assigned = grants(&scope).await.unwrap().into_inner().grants;
+    assert_eq!(assigned.len(), 1);
+    assert_eq!(assigned[0].site_id, custom.id.to_string());
+    use passkey_server::PasskeyStore;
+    for (id, port) in [(custom.id, 18443), (peer, 18444)] {
+        exec(
+            "UPDATE site_oidc SET redirect_url = $2 WHERE site_id = $1",
+            vec![
+                id.into(),
+                format!("https://{}:{port}/oauth2/callback", custom.domain)
+                    .into(),
+            ],
+        )
+        .await;
+    }
+    let (_, rp, store) = passkey_context(service, token, &scope).await.unwrap();
+    let (_, other_rp, other_store) =
+        passkey_context(service, token, &peer_scope).await.unwrap();
+    assert_eq!(rp.rp_id, other_rp.rp_id);
+    assert_eq!(rp.origin, format!("https://{}:18443", custom.domain));
+    assert_ne!(rp.origin, other_rp.origin);
+    store
+        .save_state(
+            "reg:test",
+            "{}",
+            chrono::Utc::now().timestamp_millis() + 60000,
+        )
+        .await
+        .unwrap();
+    assert!(other_store.get_state("reg:test").await.unwrap().is_none());
+    let (left, right) =
+        tokio::join!(store.get_state("reg:test"), store.get_state("reg:test"));
+    assert_ne!(left.unwrap().is_some(), right.unwrap().is_some());
+    assert!(grants(&peer_scope)
+        .await
+        .unwrap()
+        .into_inner()
+        .grants
+        .is_empty());
+    assert!(!visible(&peer_scope, false).await.unwrap().into_inner().ok);
+    assert!(visible(&scope, false).await.unwrap().into_inner().ok);
+    assert!(!grants(&scope).await.unwrap().into_inner().grants[0].visible);
     assert_eq!(
-        validate(peer_scope).await.unwrap().into_inner().reason,
+        validate(peer_scope.clone())
+            .await
+            .unwrap()
+            .into_inner()
+            .reason,
         "not_granted"
     );
+    let list = |site_id: &str| {
+        service.visitor_passkey_list(Request::new(VisitorGrantsRequest {
+            agent_token: token.into(),
+            site_id: site_id.into(),
+            visitor_id: visitor.to_string(),
+            ..Default::default()
+        }))
+    };
+    assert!(list(&scope).await.is_ok());
+    assert_eq!(
+        list(&peer_scope).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let change = |site_id: &str| {
+        service.visitor_change_password(Request::new(
+            VisitorChangePasswordRequest {
+                agent_token: token.into(),
+                site_id: site_id.into(),
+                visitor_id: visitor.to_string(),
+                current_password: password.into(),
+                new_password: "changed-local-test-password".into(),
+                ..Default::default()
+            },
+        ))
+    };
+    assert!(!change(&peer_scope).await.unwrap().into_inner().ok);
+    assert!(change(&scope).await.unwrap().into_inner().ok);
+    assert!(!validate(scope.clone()).await.unwrap().into_inner().valid);
+    let logout = || {
+        service.visitor_logout(Request::new(VisitorLogoutRequest {
+            agent_token: token.into(),
+            site_id: scope.clone(),
+            visitor_id: visitor.to_string(),
+            ..Default::default()
+        }))
+    };
+    assert!(logout().await.unwrap().into_inner().ok);
     exec(
         "UPDATE site_oidc SET enabled = false WHERE site_id = $1",
         vec![custom.id.into()],
     )
     .await;
+    assert_eq!(logout().await.unwrap_err().code(), Code::PermissionDenied);
     assert_eq!(
         validate(scope).await.unwrap_err().code(),
         Code::PermissionDenied
@@ -384,7 +487,7 @@ pub(super) async fn check_managed_password_postgres(
 
 /// The site and the exact namespace to use when issuing/consuming challenges.
 /// Managed UUIDs never enter the hostname lookup, even on an older token.
-async fn resolve_password_site(
+async fn resolve_visitor_site(
     service: &ControlPlaneService,
     token: &str,
     site_ref: &str,
@@ -499,7 +602,7 @@ pub(crate) async fn visitor_login_challenge(
     // Resolving the site here means a challenge can only be issued for a
     // site this agent actually serves.
     let (_, scope) =
-        resolve_password_site(service, &payload.agent_token, &payload.site_id)
+        resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
             .await?;
     let issued = issue_challenge(service, &scope).await?;
     Ok(Response::new(VisitorChallengeResponse {
@@ -519,7 +622,7 @@ pub(crate) async fn visitor_login(
 ) -> Result<Response<VisitorLoginResponse>, Status> {
     let payload = request.into_inner();
     let (site_row, scope) =
-        resolve_password_site(service, &payload.agent_token, &payload.site_id)
+        resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
             .await?;
 
     // The challenge is spent before the credentials are looked at, so a
@@ -634,10 +737,10 @@ pub(crate) async fn visitor_logout(
     request: Request<VisitorLogoutRequest>,
 ) -> Result<Response<VisitorLogoutResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
     // Resolving the site keeps an agent from reporting logouts for sites
     // it does not serve, and validates the host it named.
-    let _site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
+    resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
+        .await?;
     tracing::debug!(
         visitor_id = %payload.visitor_id,
         site_id = %payload.site_id,
@@ -652,13 +755,14 @@ pub(crate) async fn visitor_change_password(
     request: Request<VisitorChangePasswordRequest>,
 ) -> Result<Response<VisitorChangePasswordResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
     // Scoped like every other visitor call: the site has to be one this agent
     // serves, and the account has to be granted it. The account is
     // deployment-wide, but that is not a reason for one site's agent to reach
     // another site's visitors — a compromised edge node would otherwise be
     // able to drive password guesses against every account in the deployment.
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
+    let (site_row, _) =
+        resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
+            .await?;
 
     let visitor_id = Uuid::parse_str(payload.visitor_id.trim())
         .map_err(|_| Status::invalid_argument("visitor_id is not a UUID"))?;
@@ -738,11 +842,21 @@ pub(crate) async fn visitor_grants(
     request: Request<VisitorGrantsRequest>,
 ) -> Result<Response<VisitorGrantsResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
     // Only the sites this agent serves are ever listed: the portal runs at
     // one site, and showing a link to a site served by a different agent
     // would send the visitor somewhere this login does not reach.
-    let allowed = agent_site_ids(service, &agent_row).await?;
+    let allowed = if payload.site_id.starts_with(MANAGED_SITE_PREFIX) {
+        let (site, _) = resolve_visitor_site(
+            service,
+            &payload.agent_token,
+            &payload.site_id,
+        )
+        .await?;
+        vec![site.id]
+    } else {
+        let agent = service.authorize(&payload.agent_token).await?;
+        agent_site_ids(service, &agent).await?
+    };
     let visitor_id = Uuid::parse_str(payload.visitor_id.trim())
         .map_err(|_| Status::invalid_argument("visitor_id is not a UUID"))?;
 
@@ -812,19 +926,23 @@ pub(crate) async fn visitor_set_site_visible(
     request: Request<VisitorSetVisibleRequest>,
 ) -> Result<Response<VisitorSetVisibleResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
-    // `site_id` here is the site's **id**, not its host: the portal renders the
-    // switch from the grant list, and a grant carries an id. It is resolved
-    // against the sites this agent serves rather than by hostname, so an agent
-    // cannot toggle a row for a site it does not serve.
-    let allowed = agent_site_ids(service, &agent_row).await?;
-    let site_id = Uuid::parse_str(payload.site_id.trim())
-        .map_err(|_| Status::invalid_argument("site_id is not a UUID"))?;
-    if !allowed.contains(&site_id) {
-        return Err(Status::permission_denied(
-            "agent is not allowed to serve this site",
-        ));
-    }
+    let site_id = if payload.site_id.starts_with(MANAGED_SITE_PREFIX) {
+        resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
+            .await?
+            .0
+            .id
+    } else {
+        let agent = service.authorize(&payload.agent_token).await?;
+        let allowed = agent_site_ids(service, &agent).await?;
+        let id = Uuid::parse_str(payload.site_id.trim())
+            .map_err(|_| Status::invalid_argument("site_id is not a UUID"))?;
+        if !allowed.contains(&id) {
+            return Err(Status::permission_denied(
+                "agent is not allowed to serve this site",
+            ));
+        }
+        id
+    };
     let visitor_id = Uuid::parse_str(payload.visitor_id.trim())
         .map_err(|_| Status::invalid_argument("visitor_id is not a UUID"))?;
 
@@ -873,6 +991,83 @@ fn relying_party_for(site: &site::Model) -> passkey_server::PasskeyConfig {
     }
 }
 
+async fn passkey_context<'a>(
+    service: &'a ControlPlaneService,
+    token: &str,
+    site_ref: &str,
+) -> Result<
+    (
+        site::Model,
+        passkey_server::PasskeyConfig,
+        VisitorPasskeyStore<'a>,
+    ),
+    Status,
+> {
+    let (site, _) = resolve_visitor_site(service, token, site_ref).await?;
+    let mut config = relying_party_for(&site);
+    let mut namespace = String::new();
+    if site.ingress_port.is_some() {
+        use crate::models::site_oidc;
+        use sha2::{Digest, Sha256};
+        let settings = site_oidc::Entity::find()
+            .filter(site_oidc::Column::SiteId.eq(site.id))
+            .one(&service.db)
+            .await
+            .map_err(db_status)?
+            .ok_or_else(|| {
+                Status::permission_denied("missing visitor configuration")
+            })?;
+        let invalid = || {
+            Status::failed_precondition("invalid managed visitor callback URL")
+        };
+        let callback = reqwest::Url::parse(&settings.redirect_url)
+            .map_err(|_| invalid())?;
+        let host = callback.host_str().ok_or_else(invalid)?;
+        let matches = std::iter::once(&site.domain)
+            .chain(&site.alternate_domains)
+            .any(|domain| {
+                if let Some(suffix) = domain.strip_prefix("*.") {
+                    host.strip_suffix(suffix).is_some_and(|prefix| {
+                        prefix.len() > 1 && prefix.ends_with('.')
+                    })
+                } else {
+                    host.eq_ignore_ascii_case(domain)
+                }
+            });
+        let path = if settings.redirect_path.is_empty() {
+            "/oauth2/callback"
+        } else {
+            &settings.redirect_path
+        };
+        if callback.scheme() != "https"
+            || !matches
+            || host.ends_with('.')
+            || !callback.username().is_empty()
+            || callback.password().is_some()
+            || callback.query().is_some()
+            || callback.fragment().is_some()
+            || callback.path() != path
+        {
+            return Err(invalid());
+        }
+        config.rp_id = host.to_owned();
+        config.origin = callback.origin().ascii_serialization();
+        namespace = format!(
+            "managed:{}:{}:",
+            site.id,
+            hex::encode(Sha256::digest(config.origin.as_bytes()))
+        );
+    }
+    Ok((
+        site,
+        config,
+        VisitorPasskeyStore {
+            db: &service.db,
+            namespace,
+        },
+    ))
+}
+
 /// Starts a passkey ceremony and returns the options the browser needs.
 pub(crate) async fn visitor_passkey_begin(
     service: &ControlPlaneService,
@@ -880,10 +1075,9 @@ pub(crate) async fn visitor_passkey_begin(
     login: bool,
 ) -> Result<Response<VisitorPasskeyOptionsResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
-    let config = relying_party_for(&site_row);
-    let store = VisitorPasskeyStore { db: &service.db };
+    let (site_row, config, store) =
+        passkey_context(service, &payload.agent_token, &payload.site_id)
+            .await?;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     if login {
@@ -984,10 +1178,9 @@ pub(crate) async fn visitor_passkey_register_finish(
     request: Request<VisitorPasskeyFinishRequest>,
 ) -> Result<Response<VisitorPasskeyFinishResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
-    let config = relying_party_for(&site_row);
-    let store = VisitorPasskeyStore { db: &service.db };
+    let (site_row, config, store) =
+        passkey_context(service, &payload.agent_token, &payload.site_id)
+            .await?;
     let credential: passkey_server::types::RegistrationResponse =
         serde_json::from_str(&payload.credential_json).map_err(|err| {
             debug!(error = %err, "visitor passkey registration body is malformed");
@@ -1074,10 +1267,9 @@ pub(crate) async fn visitor_passkey_login_finish(
     request: Request<VisitorPasskeyFinishRequest>,
 ) -> Result<Response<VisitorLoginResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
-    let config = relying_party_for(&site_row);
-    let store = VisitorPasskeyStore { db: &service.db };
+    let (site_row, config, store) =
+        passkey_context(service, &payload.agent_token, &payload.site_id)
+            .await?;
     let assertion: passkey_server::types::LoginResponse =
         serde_json::from_str(&payload.credential_json).map_err(|err| {
             debug!(error = %err, "visitor passkey assertion body is malformed");
@@ -1172,7 +1364,7 @@ pub(crate) async fn visitor_validate_session(
 ) -> Result<Response<VisitorValidateResponse>, Status> {
     let payload = request.into_inner();
     let (site_row, _) =
-        resolve_password_site(service, &payload.agent_token, &payload.site_id)
+        resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
             .await?;
     let Ok(visitor_id) = Uuid::parse_str(payload.visitor_id.trim()) else {
         return Ok(Response::new(VisitorValidateResponse {
@@ -1232,12 +1424,13 @@ pub(crate) async fn visitor_passkey_list(
     request: Request<VisitorGrantsRequest>,
 ) -> Result<Response<VisitorPasskeyListResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
     // Scoped to a site this agent serves *and* that this visitor is granted.
     // Without the grant check an agent holding a valid token could enumerate
     // every passkey on the deployment by visitor id, which is exactly what the
     // per-site scoping exists to prevent.
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
+    let (site_row, _) =
+        resolve_visitor_site(service, &payload.agent_token, &payload.site_id)
+            .await?;
     let visitor_id = Uuid::parse_str(payload.visitor_id.trim())
         .map_err(|_| Status::invalid_argument("visitor_id is not a UUID"))?;
     let granted = visitor_site_grant::Entity::find()
@@ -1287,6 +1480,7 @@ fn passkey_status(error: passkey_server::PasskeyError) -> Status {
 /// parses its user id.
 struct VisitorPasskeyStore<'a> {
     db: &'a DatabaseConnection,
+    namespace: String,
 }
 
 #[async_trait::async_trait]
@@ -1409,7 +1603,7 @@ impl passkey_server::PasskeyStore for VisitorPasskeyStore<'_> {
         // Upsert: a ceremony id is unique per attempt, so a conflict means a
         // retry of the same begin, which should replace rather than fail.
         let row = visitor_passkey_state::ActiveModel {
-            id: Set(state_id.to_string()),
+            id: Set(format!("{}{state_id}", self.namespace)),
             state_json: Set(state_json.to_string()),
             expires_at: Set(millis_to_datetime(expires_at)),
         };
@@ -1435,23 +1629,30 @@ impl passkey_server::PasskeyStore for VisitorPasskeyStore<'_> {
         state_id: &str,
     ) -> passkey_server::Result<Option<passkey_server::types::PasskeyState>>
     {
-        let found =
-            visitor_passkey_state::Entity::find_by_id(state_id.to_string())
-                .one(self.db)
-                .await
-                .map_err(passkey_db_error)?;
-        Ok(found.map(|row| passkey_server::types::PasskeyState {
-            id: row.id,
-            state_json: row.state_json,
-            expires_at: row.expires_at.timestamp_millis(),
+        // Consume on lookup so concurrent finishes cannot verify the same
+        // challenge, even on separate control-plane instances.
+        let found = visitor_passkey_state::Entity::delete_by_id(format!(
+            "{}{state_id}",
+            self.namespace
+        ))
+        .exec_with_returning(self.db)
+        .await
+        .map_err(passkey_db_error)?;
+        Ok(found.into_iter().next().map(|row| {
+            passkey_server::types::PasskeyState {
+                id: row.id,
+                state_json: row.state_json,
+                expires_at: row.expires_at.timestamp_millis(),
+            }
         }))
     }
 
-    async fn delete_state(&self, state_id: &str) -> passkey_server::Result<()> {
-        visitor_passkey_state::Entity::delete_by_id(state_id.to_string())
-            .exec(self.db)
-            .await
-            .map_err(passkey_db_error)?;
+    async fn delete_state(
+        &self,
+        _state_id: &str,
+    ) -> passkey_server::Result<()> {
+        // get_state consumed this attempt. A later begin may already have
+        // installed a new registration challenge for the same account.
         Ok(())
     }
 }

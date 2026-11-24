@@ -187,6 +187,8 @@ struct LoginForm {
 
 /// The plugin, as configured for one site.
 pub struct VisitorAuth {
+    managed: Option<crate::oidc::ManagedAuthScope>,
+    session_cookie_name: String,
     hash_value: String,
     plugin_step: PluginStep,
     /// Key the session cookie is signed with, derived from the site's
@@ -246,7 +248,8 @@ impl VisitorAuth {
         site_host: &str,
         now: i64,
     ) -> Option<VisitorSession> {
-        let cookie = get_cookie_value(session.req_header(), SESSION_COOKIE)?;
+        let cookie =
+            get_cookie_value(session.req_header(), &self.session_cookie_name)?;
         let parsed = self.unseal::<VisitorSession>(cookie)?;
         if parsed.exp <= now {
             return None;
@@ -323,13 +326,15 @@ impl VisitorAuth {
             session_data.visitor_id,
             session_data.token_version
         );
-        if let Some(verdict) = live_cache_get(&key) {
+        if self.managed.is_none()
+            && let Some(verdict) = live_cache_get(&key)
+        {
             return verdict;
         }
         let Some(agent) = Self::agent() else {
             // Standalone mode has no control plane to ask; the signature is
             // all there is, and refusing here would break every session.
-            return true;
+            return self.managed.is_none();
         };
         let verdict = match agent
             .visitor_auth()
@@ -357,12 +362,14 @@ impl VisitorAuth {
                 warn!(
                     category = CATEGORY,
                     error = %error,
-                    "visitor: could not check a session; keeping it"
+                    "visitor: could not check a session"
                 );
-                true
+                self.managed.is_none()
             },
         };
-        live_cache_put(key, verdict);
+        if self.managed.is_none() {
+            live_cache_put(key, verdict);
+        }
         verdict
     }
 
@@ -398,7 +405,12 @@ impl VisitorAuth {
                 "Please try again.",
             );
         };
-        let cookie = session_cookie(&value, SESSION_TTL_SECONDS, secure);
+        let cookie = session_cookie(
+            &self.session_cookie_name,
+            &value,
+            SESSION_TTL_SECONDS,
+            secure,
+        );
         let mut response = match see_other(PORTAL_PATH) {
             Ok(response) => response,
             Err(error) => {
@@ -416,7 +428,7 @@ impl VisitorAuth {
 
     /// Clears the session cookie.
     fn signed_out_response(&self, secure: bool) -> HttpResponse {
-        let cookie = session_cookie("", 0, secure);
+        let cookie = session_cookie(&self.session_cookie_name, "", 0, secure);
         let mut response = match see_other(LOGIN_PATH) {
             Ok(response) => response,
             Err(_) => {
@@ -744,7 +756,11 @@ var wait = setInterval(function () {{
         let passkey_rows = self.passkey_rows(session_data).await;
         let mut rows = String::new();
         for grant in &grants {
-            let entry = format!("https://{}", grant.domain);
+            let entry = if session_data.site_id.starts_with("managed:") {
+                "/".to_string()
+            } else {
+                format!("https://{}", grant.domain)
+            };
             // The switch posts the opposite of what is currently stored, so a
             // click always flips it.
             rows.push_str(&format!(
@@ -868,12 +884,16 @@ var wait = setInterval(function () {{
   <div class="alert" id="passkey-alert" role="alert" style="display:none"></div>
 </div>"#,
         );
-        let allows_oidc = PingWafAgent::instance()
-            .and_then(|agent| agent.get_rules_for_domain(site_host))
-            .and_then(|rules| {
-                rules.oidc.as_ref().map(|oidc| oidc.auth_mode.clone())
-            })
-            .is_some_and(|mode| mode == "both");
+        let allows_oidc = if self.managed.is_some() {
+            self.oidc_cookie_name.is_some()
+        } else {
+            PingWafAgent::instance()
+                .and_then(|agent| agent.get_rules_for_domain(site_host))
+                .and_then(|rules| {
+                    rules.oidc.as_ref().map(|oidc| oidc.auth_mode.clone())
+                })
+                .is_some_and(|mode| mode == "both")
+        };
         if allows_oidc {
             out.push_str(
                 r#"<div class="section">
@@ -963,7 +983,25 @@ var wait = setInterval(function () {{
         let visible = form.next == "true";
         // The site id comes from the form, but the control plane re-checks the
         // grant, so a forged id cannot change another visitor's row.
-        let site_id = form.site_id;
+        let site_id =
+            if let Some(id) = session_data.site_id.strip_prefix("managed:") {
+                if id != form.site_id {
+                    return Ok(RequestPluginResult::Respond(error_page(
+                        StatusCode::FORBIDDEN,
+                        "Site mismatch",
+                        "This session belongs to a different site.",
+                    )));
+                }
+                session_data.site_id.clone()
+            } else if form.site_id.starts_with("managed:") {
+                return Ok(RequestPluginResult::Respond(error_page(
+                    StatusCode::FORBIDDEN,
+                    "Site mismatch",
+                    "This session belongs to a different site.",
+                )));
+            } else {
+                form.site_id
+            };
         if site_id.is_empty() {
             return Ok(RequestPluginResult::Respond(
                 see_other(PORTAL_PATH).unwrap_or_else(|_| {
@@ -1299,8 +1337,12 @@ var wait = setInterval(function () {{
                 // The cookie is re-issued with the same `Secure` policy the
                 // request arrived under, so a TLS site keeps it.
                 let secure = Self::is_secure(session, ctx);
-                let cookie =
-                    session_cookie(&value, SESSION_TTL_SECONDS, secure);
+                let cookie = session_cookie(
+                    &self.session_cookie_name,
+                    &value,
+                    SESSION_TTL_SECONDS,
+                    secure,
+                );
                 let mut response = match see_other(PORTAL_PATH) {
                     Ok(response) => response,
                     Err(_) => {
@@ -1405,7 +1447,54 @@ impl TryFrom<&PluginConf> for VisitorAuth {
             .chain_update(b"visitor-auth")
             .finalize()
             .into();
+        let managed = if value.contains_key("managed_site_id")
+            || value.contains_key("managed_listener_port")
+        {
+            Some(
+                crate::oidc::ManagedAuthScope::new(
+                    &get_str_conf(value, "managed_site_id"),
+                    value
+                        .get("managed_listener_port")
+                        .and_then(toml::Value::as_integer),
+                    Some(&get_str_conf(value, "redirect_url")),
+                )
+                .ok_or_else(|| {
+                    invalid("invalid managed visitor origin".into())
+                })?,
+            )
+        } else {
+            None
+        };
+        let (key, session_cookie_name, oidc_cookie_name) =
+            if let Some(scope) = &managed {
+                let context = Sha256::new()
+                    .chain_update(b"pingwaf-managed-visitor-v1")
+                    .chain_update(scope.site_id.as_bytes())
+                    .chain_update(scope.listener_port.to_be_bytes())
+                    .chain_update(scope.external_port.to_be_bytes())
+                    .chain_update(scope.hostname.as_bytes())
+                    .finalize();
+                (
+                    hmac_sha256::HMAC::mac(context, key),
+                    format!(
+                        "{}visitor_{}",
+                        pingap_core::MANAGED_COOKIE_PREFIX,
+                        scope.site_id
+                    ),
+                    oidc_cookie_name.map(|_| {
+                        format!(
+                            "{}oidc_{}",
+                            pingap_core::MANAGED_COOKIE_PREFIX,
+                            scope.site_id
+                        )
+                    }),
+                )
+            } else {
+                (key, SESSION_COOKIE.to_owned(), oidc_cookie_name)
+            };
         Ok(Self {
+            managed,
+            session_cookie_name,
             hash_value,
             plugin_step,
             key,
@@ -1439,7 +1528,31 @@ impl Plugin for VisitorAuth {
             .map(|uri| uri.path())
             .unwrap_or_else(|| session.req_header().uri.path())
             .to_string();
-        let Some(site_host) = Self::site_host(session) else {
+        let site_host = match &self.managed {
+            Some(scope) if scope.matches(session, ctx) => {
+                if owns_path(&path)
+                    && (session.req_header().method == http::Method::POST
+                        || path == LOGOUT_PATH)
+                    && !scope.permits_logout(session)
+                {
+                    return Ok(RequestPluginResult::Respond(error_page(
+                        StatusCode::FORBIDDEN,
+                        "Origin mismatch",
+                        "Use the portal at the configured site.",
+                    )));
+                }
+                Some(format!("managed:{}", scope.site_id))
+            },
+            Some(_) => {
+                return Ok(RequestPluginResult::Respond(error_page(
+                    StatusCode::FORBIDDEN,
+                    "Origin mismatch",
+                    "Use the portal at the configured site.",
+                )));
+            },
+            None => Self::site_host(session),
+        };
+        let Some(site_host) = site_host else {
             return Ok(RequestPluginResult::Respond(error_page(
                 StatusCode::BAD_REQUEST,
                 "No site",
@@ -1598,13 +1711,14 @@ impl Plugin for VisitorAuth {
 
 /// The session cookie header.
 fn session_cookie(
+    name: &str,
     value: &str,
     max_age: i64,
     secure: bool,
 ) -> (HeaderName, HeaderValue) {
     let secure = if secure { "; Secure" } else { "" };
     let header = format!(
-        "{SESSION_COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
+        "{name}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
     );
     (
         SET_COOKIE,
@@ -2149,6 +2263,29 @@ mod tests {
         VisitorAuth::new(&conf).expect("the plugin builds")
     }
 
+    #[test]
+    fn managed_cookie_keys_bind_external_origin_listener_and_site() {
+        let make = |id: &str, port: u16, external: u16| {
+            let conf = toml::from_str(&format!("cookie_secret='0123456789abcdef'\nmanaged_site_id='{id}'\nmanaged_listener_port={port}\nredirect_url='https://app.test:{external}/oauth2/callback'")).unwrap();
+            VisitorAuth::new(&conf).unwrap()
+        };
+        let id = "cabd1201-0488-493b-8707-381cd57e85ee";
+        let other = "f64549f2-d751-4885-ae5a-afa2bd5bd9c4";
+        let a = make(id, 81, 8443);
+        assert_ne!(
+            a.session_cookie_name,
+            make(other, 81, 8443).session_cookie_name
+        );
+        for b in [
+            make(other, 81, 8443),
+            make(id, 82, 8443),
+            make(id, 81, 9443),
+            plugin(),
+        ] {
+            assert_ne!(a.key, b.key);
+        }
+    }
+
     /// Only the paths this plugin owns are answered; everything else must be
     /// left to the site, or a login page would shadow the whole origin.
     #[test]
@@ -2361,7 +2498,7 @@ mod tests {
     /// `HttpOnly` is readable by any script on the origin.
     #[test]
     fn the_session_cookie_is_hardened() {
-        let (name, value) = session_cookie("abc", 60, true);
+        let (name, value) = session_cookie(SESSION_COOKIE, "abc", 60, true);
         assert_eq!(SET_COOKIE, name);
         let value = value.to_str().expect("ascii");
         assert!(value.contains("HttpOnly"));
@@ -2370,10 +2507,10 @@ mod tests {
         assert!(value.contains("Path=/"));
         // Without TLS the flag is absent rather than wrong: a `Secure` cookie
         // over plain http would simply be dropped by the browser.
-        let (_, plain) = session_cookie("abc", 60, false);
+        let (_, plain) = session_cookie(SESSION_COOKIE, "abc", 60, false);
         assert!(!plain.to_str().expect("ascii").contains("Secure"));
         // Clearing sets Max-Age=0 so the browser drops it immediately.
-        let (_, cleared) = session_cookie("", 0, false);
+        let (_, cleared) = session_cookie(SESSION_COOKIE, "", 0, false);
         assert!(cleared.to_str().expect("ascii").contains("Max-Age=0"));
     }
 

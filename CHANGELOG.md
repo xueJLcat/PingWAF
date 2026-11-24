@@ -12,6 +12,11 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Managed visitor account and passkey RPCs now authorize the assigned HTTPS
+  site. Managed WebAuthn ceremonies bind their state to its UUID and external
+  origin. Visitor portal sessions support listener-bound keys and per-site
+  cookies. Production custom ingress integration is still pending.
+
 - **Reserved managed browser cookie namespace.** The proxy and external
   `forward_auth` subrequests do not forward cookies named `__pingwaf_managed_*`
   to services or let those services set them. Other cookie names are unaffected.
