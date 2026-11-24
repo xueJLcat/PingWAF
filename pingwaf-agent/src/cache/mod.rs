@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use chrono::{DateTime, TimeZone, Utc};
 use dashmap::DashMap;
 use pingap_cache::quota;
@@ -1518,6 +1518,8 @@ pub struct RuleCache {
     /// `None` when it did. Written by the hot-reload watcher, read by the
     /// heartbeat: `config_hash` alone only says what was received.
     config_apply_error: Mutex<Option<String>>,
+    /// Runtime observation, never serialized with the site configuration.
+    ingress_listeners: ArcSwapOption<proto::IngressListeners>,
 }
 
 impl RuleCache {
@@ -1538,6 +1540,7 @@ impl RuleCache {
             persist_lock: Mutex::new(()),
             health: CacheHealth::new(),
             config_apply_error: Mutex::new(None),
+            ingress_listeners: ArcSwapOption::empty(),
             blocked_dirty: AtomicBool::new(false),
             rules_dirty: AtomicBool::new(false),
             last_rules_persist_ms: AtomicU64::new(0),
@@ -2634,6 +2637,14 @@ impl RuleCache {
             .config_apply_error
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
+    }
+
+    pub fn set_ingress_listeners(&self, report: proto::IngressListeners) {
+        self.ingress_listeners.store(Some(Arc::new(report)));
+    }
+
+    pub fn ingress_listeners(&self) -> Option<proto::IngressListeners> {
+        self.ingress_listeners.load().as_deref().cloned()
     }
 
     /// Why the data plane is not running this cache's configuration; empty

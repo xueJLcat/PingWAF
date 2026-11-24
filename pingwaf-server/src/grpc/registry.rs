@@ -25,7 +25,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use pingwaf_proto::control_plane::{server_command::Payload, ServerCommand};
+use pingwaf_proto::control_plane::{
+    server_command::Payload, IngressBindState, IngressListeners,
+    IngressProtocol, ServerCommand,
+};
+use pingwaf_proto::MAX_INGRESS_LISTENERS;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
@@ -52,6 +56,9 @@ struct Connection {
     /// agent reconnected cannot delete the live connection (2026-10-18
     /// audit: the old stream used to mark the new one offline).
     generation: u64,
+    /// Only observations from this stream are retained. Not an authorization
+    /// or an acknowledgement of applied site configuration.
+    ingress: Option<(Instant, IngressListeners)>,
 }
 
 #[derive(Default)]
@@ -115,6 +122,28 @@ fn repush_cooldown(repushes: u32) -> Duration {
     CONFIG_REPUSH_COOLDOWN
         .saturating_mul(1 << doublings)
         .min(CONFIG_REPUSH_COOLDOWN_MAX)
+}
+
+fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
+    if report.listeners.len() > MAX_INGRESS_LISTENERS {
+        return None;
+    }
+    let mut report = report.clone();
+    report
+        .listeners
+        .sort_unstable_by_key(|listener| listener.port);
+    let valid = report.listeners.iter().all(|listener| {
+        (1..=u32::from(u16::MAX)).contains(&listener.port)
+            && matches!(
+                listener.protocol(),
+                IngressProtocol::Http | IngressProtocol::Https
+            )
+            && listener.state() != IngressBindState::Unspecified
+    }) && report
+        .listeners
+        .windows(2)
+        .all(|pair| pair[0].port != pair[1].port);
+    valid.then_some(report)
 }
 
 /// Cheap-to-clone handle to the live agent connections.
@@ -184,6 +213,7 @@ impl AgentRegistry {
                 sender,
                 connected_at: Utc::now(),
                 generation,
+                ingress: None,
             },
         );
         // Counters belong to the stream that reported them: a reconnect starts
@@ -284,6 +314,41 @@ impl AgentRegistry {
     /// small and the map is flat.
     pub async fn metrics(&self) -> HashMap<Uuid, HeartbeatMetrics> {
         self.inner.read().await.metrics.clone()
+    }
+
+    pub(crate) async fn record_ingress(
+        &self,
+        agent_id: Uuid,
+        generation: u64,
+        report: Option<&IngressListeners>,
+    ) {
+        let report = report.and_then(validated_ingress);
+        let mut inner = self.inner.write().await;
+        let Some(connection) = inner.connected.get_mut(&agent_id) else {
+            return;
+        };
+        if connection.generation != generation {
+            return;
+        }
+        if connection.ingress.as_ref().map(|(_, report)| report)
+            != report.as_ref()
+        {
+            tracing::info!(%agent_id, ?report, "agent TCP ingress inventory changed");
+        }
+        connection.ingress = report.map(|report| (Instant::now(), report));
+    }
+
+    /// Latest validated TCP inventory on this stream. Callers must supply a
+    /// freshness limit; an open gRPC stream alone is not a recent report.
+    pub async fn ingress_listeners(
+        &self,
+        agent_id: Uuid,
+        max_age: Duration,
+    ) -> Option<IngressListeners> {
+        let inner = self.inner.read().await;
+        let (recorded_at, report) =
+            inner.connected.get(&agent_id)?.ingress.as_ref()?;
+        (recorded_at.elapsed() < max_age).then(|| report.clone())
     }
 
     /// Retains why the agent's data plane is not running the configuration it
@@ -942,6 +1007,55 @@ mod tests {
 
         registry.disconnect(&agent, generation).await;
         assert!(!registry.metrics().await.contains_key(&agent));
+    }
+
+    #[tokio::test]
+    async fn ingress_inventory_belongs_only_to_the_current_stream() {
+        use pingwaf_proto::IngressListenerStatus;
+
+        let registry = AgentRegistry::new();
+        let agent = Uuid::new_v4();
+        let fresh = Duration::from_secs(60);
+        let (sender, _receiver) = mpsc::channel(1);
+        let (first, _) = registry.connect(agent, sender).await;
+        let mut report = IngressListeners {
+            listeners: vec![IngressListenerStatus {
+                port: 81,
+                protocol: IngressProtocol::Http as i32,
+                state: IngressBindState::Bound as i32,
+            }],
+        };
+        registry.record_ingress(agent, first, Some(&report)).await;
+        assert_eq!(
+            registry.ingress_listeners(agent, fresh).await,
+            Some(report.clone())
+        );
+        assert_eq!(
+            registry.ingress_listeners(agent, Duration::ZERO).await,
+            None
+        );
+
+        let (sender, _receiver) = mpsc::channel(1);
+        let (current, _) = registry.connect(agent, sender).await;
+        registry.record_ingress(agent, first, Some(&report)).await;
+        assert_eq!(registry.ingress_listeners(agent, fresh).await, None);
+        registry.record_ingress(agent, current, Some(&report)).await;
+        registry.disconnect(&agent, first).await;
+        assert_eq!(
+            registry.ingress_listeners(agent, fresh).await,
+            Some(report.clone())
+        );
+
+        report.listeners.push(report.listeners[0]);
+        registry.record_ingress(agent, current, Some(&report)).await;
+        assert_eq!(registry.ingress_listeners(agent, fresh).await, None);
+        report.listeners.pop();
+        registry.record_ingress(agent, current, Some(&report)).await;
+        registry.record_ingress(agent, current, None).await;
+        assert_eq!(registry.ingress_listeners(agent, fresh).await, None);
+        registry.record_ingress(agent, current, Some(&report)).await;
+        registry.disconnect(&agent, current).await;
+        assert_eq!(registry.ingress_listeners(agent, fresh).await, None);
     }
 
     /// A reconnect starts with no counters (the opening heartbeat refills

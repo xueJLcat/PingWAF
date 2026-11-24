@@ -181,6 +181,33 @@ message AgentHeartbeat {
   // Absent on agents that predate the field: the control plane must render
   // unknown, never 0.
   optional uint64 process_rss_bytes = 24;
+
+  // TCP listener inventory only. This does not authorize any site or
+  // acknowledge that a site or its TLS configuration is applied.
+  IngressListeners ingress_listeners = 25;
+}
+
+enum IngressProtocol {
+  INGRESS_PROTOCOL_UNSPECIFIED = 0;
+  INGRESS_PROTOCOL_HTTP = 1;
+  INGRESS_PROTOCOL_HTTPS = 2;
+}
+
+enum IngressBindState {
+  INGRESS_BIND_STATE_UNSPECIFIED = 0;
+  INGRESS_BIND_STATE_BOUND = 1;
+  INGRESS_BIND_STATE_BIND_FAILED = 2;
+  INGRESS_BIND_STATE_RESERVED = 3;
+}
+
+message IngressListenerStatus {
+  uint32 port = 1;
+  IngressProtocol protocol = 2;
+  IngressBindState state = 3;
+}
+
+message IngressListeners {
+  repeated IngressListenerStatus listeners = 1;
 }
 
 // Backend health of one upstream, reported per heartbeat.

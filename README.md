@@ -274,6 +274,8 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | `9090` | gRPC control plane (agents connect here) |
 | `80` / `443` | Proxied traffic (bound once the first site exists; `443` opens only after a certificate is issued or uploaded — until then only port `80` serves HTTP) |
 
+`PINGWAF_INGRESS_LISTENERS` is for isolated TCP bind diagnostics only. Leave it unset in production; it does not configure site traffic.
+
 👉 Full configuration reference: **[docs/deployment.md](./docs/deployment.md)** and **[docs/api.md](./docs/api.md)**.
 
 ---

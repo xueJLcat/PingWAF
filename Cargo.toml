@@ -88,6 +88,7 @@ pingap-upstream = { workspace = true }
 pingap-util = { workspace = true }
 pingap-webhook = { workspace = true }
 pingwaf-server = { path = "pingwaf-server" }
+pingwaf-proto = { path = "pingwaf-proto" }
 # TLS backend is selected by this crate's own feature chain (`openssl` /
 # `tls-rustls`), mirroring the `pingap-*` workspace convention: the
 # dependency must not drag `pingwaf-agent`'s default (openssl) into a
@@ -107,8 +108,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 snafu = { workspace = true }
+socket2 = "0.6.5"
 substring = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

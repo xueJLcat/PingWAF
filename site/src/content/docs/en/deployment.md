@@ -21,6 +21,8 @@ minutes: 10
 
 `GET /healthz` answers on both HTTP and HTTPS, which is what the compose health check and most load balancers should probe. Everything else redirects to HTTPS.
 
+`PINGWAF_INGRESS_LISTENERS` is an experimental TCP bind diagnostic for isolated development, not a custom site deployment setting. It is unset by default. An agent or all-in-one process can pre-bind entries such as `http@127.0.0.1:81,https@[::1]:8443`; bind status is reported separately from site status. HTTP entries do not forward traffic and HTTPS entries do not negotiate TLS.
+
 ## Docker Compose
 
 ```bash

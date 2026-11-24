@@ -21,6 +21,11 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Added
 
+- **Experimental ingress listener inventory.** `PINGWAF_INGRESS_LISTENERS`
+  lets a data plane pre-bind TCP sockets and report their bind state on the
+  current heartbeat stream, even with no configured sites. It defaults to
+  unset. Custom HTTP sockets do not forward, custom HTTPS sockets do not
+  negotiate TLS, and custom site assignment remains disabled.
 - **Adaptive proof-of-work difficulty.** A challenge's difficulty now starts at
   the site's `base_difficulty` (20 by default — the value every deployment
   already used) and rises per host+IP with failed verifications and with

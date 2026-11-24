@@ -480,6 +480,7 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
 | `PINGWAF_LISTEN_HTTP_ADDR` | — (data-plane `:80` listener; default `[::]:80`, automatic `0.0.0.0:80` fallback) |
 | `PINGWAF_LISTEN_HTTPS_ADDR` | — (data-plane `:443` listener; default `[::]:443`, automatic `0.0.0.0:443` fallback) |
+| `PINGWAF_INGRESS_LISTENERS` | — (experimental TCP bind diagnostics; unset by default; no custom site traffic) |
 | `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
 | `PINGWAF_ES_ENABLED` | — Elasticsearch shipper toggle |
 | `PINGWAF_ES_URLS` | — Elasticsearch URLs (comma-separated) |
@@ -490,6 +491,19 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_ES_MAX_BODY_SIZE` | — ES body truncation limit |
 | `PINGWAF_ES_BUFFER_DIR` | — ES on-disk buffer directory |
 | `RUST_LOG` | Tracing log filter (default `info,sqlx=warn`) |
+
+### Experimental TCP Listener Diagnostics
+
+For isolated development only, set `PINGWAF_INGRESS_LISTENERS` on the agent or
+all-in-one process to a comma-separated list such as
+`http@127.0.0.1:81,http@[::1]:83,https@127.0.0.1:8443`. Use an IP literal and a
+nonzero port, one declaration per port, at most 32 entries. `[::]` is
+dual-stack; other IPv6 literals are IPv6-only. Port `80`, port `443`, overrides
+for the default data-plane listeners, and the all-in-one management and gRPC
+ports are reserved. An unavailable port does not stop the other entries; a
+change or retry requires a process restart. A `Bound` heartbeat entry means
+TCP bind only: valid unmatched HTTP requests return `404`, HTTPS connections
+are closed without a handshake, and neither entry can be assigned to a site.
 
 ## Deployment Modes
 

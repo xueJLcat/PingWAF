@@ -7,3 +7,6 @@ pub mod control_plane {
 
 // Re-export commonly used types at crate root for convenience
 pub use control_plane::*;
+
+/// Per-process socket budget and upper bound for a heartbeat's inventory.
+pub const MAX_INGRESS_LISTENERS: usize = 32;

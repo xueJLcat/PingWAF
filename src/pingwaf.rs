@@ -61,6 +61,8 @@ use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
 use tracing::{error, info, warn};
 
+mod ingress;
+
 /// Stable tracing target for the shared startup and data-plane logs.
 ///
 /// Without an explicit target, tracing uses the module path: the full binary
@@ -1764,7 +1766,7 @@ fn merge_config_state(new_toml: &str, prev_toml: &str) -> String {
 /// Waits for the agent to receive its initial configuration from the
 /// control plane, then builds a PingapConfig and starts the reverse proxy
 /// on ports 80 and 443.
-pub async fn start_data_plane(
+async fn start_legacy_data_plane(
     rule_cache: Arc<RuleCache>,
 ) -> anyhow::Result<()> {
     // Wait for the agent to receive initial config from the control plane
@@ -2145,6 +2147,16 @@ pub async fn start_data_plane(
     Ok(())
 }
 
+async fn run_data_plane(rule_cache: Arc<RuleCache>, control_ports: Vec<u16>) {
+    // Preconfigured ingress is independent of the legacy proxy, which may
+    // be waiting for a site (or fail configuration validation).
+    tokio::join!(ingress::run(rule_cache.clone(), control_ports), async {
+        if let Err(error) = start_legacy_data_plane(rule_cache).await {
+            error!(target: LOG_TARGET, %error, "data plane proxy exited with error");
+        }
+    });
+}
+
 /// How often the hot-reload watcher looks at the rule cache.
 const RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Longest wait between two attempts at a reload that keeps failing. A
@@ -2372,11 +2384,15 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
             // Start the data plane proxy if the agent is running
             let proxy_handle = if let Some(ref agent) = agent {
                 let rule_cache = Arc::clone(&agent.rule_cache);
-                Some(tokio::spawn(async move {
-                    if let Err(e) = start_data_plane(rule_cache).await {
-                        error!(target: LOG_TARGET, error = %e, "data plane proxy exited with error");
-                    }
-                }))
+                let control_ports =
+                    [&server_config.http_addr, &server_config.grpc_addr]
+                        .into_iter()
+                        .filter_map(|addr| {
+                            addr.parse::<std::net::SocketAddr>().ok()
+                        })
+                        .map(|addr| addr.port())
+                        .collect();
+                Some(tokio::spawn(run_data_plane(rule_cache, control_ports)))
             } else {
                 None
             };
@@ -2416,11 +2432,7 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
 
     // Start the data plane proxy in the background
     let rule_cache = Arc::clone(&agent.rule_cache);
-    let proxy_handle = tokio::spawn(async move {
-        if let Err(e) = start_data_plane(rule_cache).await {
-            error!(target: LOG_TARGET, error = %e, "data plane proxy exited with error");
-        }
-    });
+    let proxy_handle = tokio::spawn(run_data_plane(rule_cache, Vec::new()));
 
     // Wait for shutdown signal
     shutdown_signal().await;

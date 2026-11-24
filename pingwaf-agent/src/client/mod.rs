@@ -819,6 +819,7 @@ impl ControlPlaneClient {
                     upstream_health: crate::upstream_health::heartbeat_statuses(
                     ),
                     process_rss_bytes: system_metrics.process_rss_bytes,
+                    ingress_listeners: rule_cache.ingress_listeners(),
                 };
 
                 if hb_tx.send(hb).await.is_err() {

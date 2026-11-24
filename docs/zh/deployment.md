@@ -98,6 +98,7 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9080/healthz   # 期
 | `PINGWAF_SECRET_KEY` | 未设置（密封功能必需） | 静态加密主密钥：加密通知渠道口令、AI Provider Key、备份目标凭据。**必须设为 32 字节随机值**；不设置则这些字段明文入库。安装器会生成（compose → `.env`；二进制 → `/etc/pingwaf/pingwaf.env` 0600）。无在线轮换，备份与轮换步骤见 [SECURITY.md](../../SECURITY.md#credentials-and-secrets) |
 | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥，至少 16 字符（建议 `openssl rand -hex 32`）；占位符会在首启时替换为随机持久化值 |
 | `PINGWAF_ALLOW_REGISTRATION` | 代码默认 `true`（Compose 设为 `false`） | 是否允许自助注册；生产务必设为 `false` |
+| `PINGWAF_INGRESS_LISTENERS` | 未设置 | 仅在隔离开发环境诊断 TCP 绑定；不转发站点流量、不进行 TLS 握手。详见[英文部署指南](../deployment.md#experimental-tcp-listener-diagnostics) |
 | `PINGWAF_CORS_ORIGINS` | 空（仅同源） | 允许的跨域来源；为空时**不下发 CORS 头**，只有同源调用可用 |
 | `PINGWAF_TLS_ENABLED` | `true` | 控制台/API 使用 HTTPS（自签证书，可上传正式证书）；反代终止 TLS 时可设 `false` |
 | `PINGWAF_PASSKEY_ENABLED` | `true` | 启用 Passkey 登录。Passkey 需要安全上下文：HTTPS 主机名或 `localhost`；反代后需设 `PINGWAF_PASSKEY_ORIGIN` |

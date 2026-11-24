@@ -655,6 +655,13 @@ impl ControlPlaneTrait for ControlPlaneService {
         registry
             .record_heartbeat(agent_id, heartbeat_metrics(&first))
             .await;
+        registry
+            .record_ingress(
+                agent_id,
+                generation,
+                first.ingress_listeners.as_ref(),
+            )
+            .await;
         tokio::spawn(async move {
             if let Some(peer) = peer_ip {
                 persist_peer_ip(&db, agent_id, &peer).await;
@@ -687,6 +694,13 @@ impl ControlPlaneTrait for ControlPlaneService {
                 // slow or fails.
                 registry
                     .record_heartbeat(agent_id, heartbeat_metrics(&message))
+                    .await;
+                registry
+                    .record_ingress(
+                        agent_id,
+                        generation,
+                        message.ingress_listeners.as_ref(),
+                    )
                     .await;
                 persist_heartbeat(&db, agent_id, &message, &registry).await;
                 reconcile_agent_config(&db, &registry, agent_id, &message)
