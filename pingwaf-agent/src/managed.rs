@@ -12,7 +12,10 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::cache::lookup_with_wildcard;
+use crate::cache::{
+    self, lookup_with_wildcard, CachedRules, RuleCache, SiteRules,
+};
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 mod lease;
@@ -53,13 +56,112 @@ impl Candidate {
     /// Takes the hostname only, not an HTTP authority or a forwarding header.
     /// A non-default listener cannot fall back to the default namespace.
     pub fn site_id(&self, listener: Listener, hostname: &str) -> Option<Uuid> {
-        let names = self.routes.get(&listener)?;
-        let hostname = hostname.strip_suffix('.').unwrap_or(hostname);
-        let hostname = hostname.to_ascii_lowercase();
-        (valid_hostname(&hostname) && !hostname.starts_with("*."))
-            .then(|| lookup_with_wildcard(names, &hostname).copied())
-            .flatten()
+        select(&self.routes, listener, hostname)
     }
+
+    /// Compile the verified envelopes into immutable, UUID-keyed rules.
+    /// Never populate or write the legacy domain-indexed cache.
+    pub fn compile(&self) -> anyhow::Result<Compiled> {
+        let mut compiled = HashMap::with_capacity(self.sites.len());
+        for (id, envelope) in &self.sites {
+            let site =
+                envelope.site.as_ref().context("managed site is missing")?;
+            let bundle = site
+                .rules
+                .as_ref()
+                .context("managed rule bundle is missing")?;
+            let rules = RuleCache::convert_site(site, bundle);
+            compiled.insert(
+                *id,
+                CompiledSite {
+                    rules: Arc::new(rules),
+                    failover: cache::FailoverMode::from(envelope.failover_mode),
+                    bundle_settings: CachedRules {
+                        global_fail_open: bundle.default_fail_open,
+                        global_cache: bundle.global_cache.as_ref().map(
+                            |config| {
+                                Arc::new(RuleCache::convert_global_cache(
+                                    config,
+                                ))
+                            },
+                        ),
+                        origin_verify_cert: bundle.origin_verify_cert,
+                        log_settings: bundle.log_settings.as_ref().map(
+                            |config| {
+                                Arc::new(RuleCache::convert_log_settings(
+                                    config,
+                                ))
+                            },
+                        ),
+                        ..CachedRules::default()
+                    },
+                },
+            );
+        }
+        Ok(Compiled {
+            version: self.version,
+            routes: self.routes.clone(),
+            sites: compiled,
+        })
+    }
+}
+
+pub struct Compiled {
+    version: Version,
+    routes: HashMap<Listener, HashMap<String, Uuid>>,
+    sites: HashMap<Uuid, CompiledSite>,
+}
+
+pub struct CompiledSite {
+    pub rules: Arc<SiteRules>,
+    pub failover: cache::FailoverMode,
+    bundle_settings: CachedRules,
+}
+
+impl Compiled {
+    pub fn version(&self) -> Version {
+        self.version
+    }
+
+    pub fn site(&self, id: Uuid) -> Option<&CompiledSite> {
+        self.sites.get(&id)
+    }
+
+    pub fn select(
+        &self,
+        listener: Listener,
+        hostname: &str,
+    ) -> Option<(Uuid, &CompiledSite)> {
+        let id = select(&self.routes, listener, hostname)?;
+        Some((id, self.site(id)?))
+    }
+}
+
+impl CompiledSite {
+    /// The proxy config converter may read only this site's rules and global
+    /// settings. No legacy domain index or domain-only failover policies.
+    pub fn translation_input(&self) -> CachedRules {
+        CachedRules {
+            sites: HashMap::from([(
+                self.rules.site_id.clone(),
+                self.rules.clone(),
+            )]),
+            ..self.bundle_settings.clone()
+        }
+    }
+}
+
+fn select(
+    routes: &HashMap<Listener, HashMap<String, Uuid>>,
+    listener: Listener,
+    hostname: &str,
+) -> Option<Uuid> {
+    let names = routes.get(&listener)?;
+    let hostname = hostname.strip_suffix('.').unwrap_or(hostname);
+    let hostname = hostname.to_ascii_lowercase();
+    (valid_hostname(&hostname) && !hostname.starts_with("*."))
+        .then(|| lookup_with_wildcard(names, &hostname).copied())
+        .flatten()
 }
 
 /// In-memory high-water mark. Carry it across registrations; an unexpected
@@ -373,6 +475,52 @@ mod tests {
             candidate.site_id(Listener::Default, "paused.example"),
             None
         );
+    }
+
+    #[test]
+    fn same_domain_compiles_to_independent_rules_and_policy_by_port() {
+        let http = IngressProtocol::Http;
+        let (id81, mut site81) = managed("shared.example", Some((81, http)));
+        let (id82, mut site82) = managed("shared.example", Some((82, http)));
+        site81.failover_mode = 1;
+        site82.failover_mode = 2;
+        site81.site.as_mut().unwrap().trust_proxy_headers = true;
+        site82.site.as_mut().unwrap().downstream_timeout_secs = 17;
+        let session = Uuid::new_v4();
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        let candidate = receiver
+            .receive(snapshot(session, Uuid::new_v4(), 1, vec![site81, site82]))
+            .unwrap()
+            .unwrap();
+        let compiled = candidate.compile().unwrap();
+        assert_eq!(compiled.version(), candidate.version());
+        let lookup = |port| {
+            compiled.select(
+                Listener::Custom {
+                    port,
+                    protocol: http,
+                },
+                "Shared.Example.",
+            )
+        };
+        let (matched81, a) = lookup(81).unwrap();
+        let (matched82, b) = lookup(82).unwrap();
+        assert_eq!((matched81, matched82), (id81, id82));
+        assert!(a.rules.proxy_trust.enabled);
+        assert!(!b.rules.proxy_trust.enabled);
+        assert_eq!(b.rules.downstream_timeout_secs, 17);
+        assert_eq!(a.failover, cache::FailoverMode::Open);
+        assert_eq!(b.failover, cache::FailoverMode::Closed);
+        assert!(lookup(83).is_none());
+        assert!(compiled
+            .select(Listener::Default, "shared.example")
+            .is_none());
+        let config = b.translation_input();
+        assert_eq!(config.sites.len(), 1);
+        assert!(config.sites.contains_key(id82.to_string().as_str()));
+        assert!(config.domain_index.is_empty());
+        assert!(config.failover_registry.is_empty());
     }
 
     #[test]

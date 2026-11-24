@@ -1977,30 +1977,7 @@ impl RuleCache {
                     .map(|ls| Arc::new(Self::convert_log_settings(ls)));
             }
 
-            let mut site_rules = Self::convert_bundle(bundle);
-            // Override domain from site-level field
-            if !site.domain.is_empty() {
-                site_rules.domain = Arc::from(site.domain.as_str());
-            }
-            site_rules.site_id = Arc::from(site.id.as_str());
-            site_rules.alternate_domains = site
-                .alternate_domains
-                .iter()
-                .map(|domain| Arc::from(domain.as_str()))
-                .collect();
-            site_rules.status = SiteStatus::from_proto(site.status);
-            site_rules.downstream_timeout_secs =
-                if site.downstream_timeout_secs == 0 {
-                    default_downstream_timeout_secs()
-                } else {
-                    site.downstream_timeout_secs
-                };
-            site_rules.proxy_trust = ProxyTrustConfig {
-                enabled: site.trust_proxy_headers,
-                header: site.trusted_header.clone(),
-                last_hop_only: site.trust_last_hop,
-                trusted_ranges: site.trusted_proxy_ranges.clone(),
-            };
+            let site_rules = Self::convert_site(site, bundle);
 
             // The domain index shares the site id Arc across all of the
             // site's domains instead of duplicating it per entry.
@@ -3105,6 +3082,33 @@ impl RuleCache {
 
     // ─── Proto Conversion ───────────────────────────────────
 
+    pub(crate) fn convert_site(
+        site: &proto::Site,
+        bundle: &proto::RuleBundle,
+    ) -> SiteRules {
+        let mut rules = Self::convert_bundle(bundle);
+        rules.domain = Arc::from(site.domain.as_str());
+        rules.site_id = Arc::from(site.id.as_str());
+        rules.alternate_domains = site
+            .alternate_domains
+            .iter()
+            .map(|domain| Arc::from(domain.as_str()))
+            .collect();
+        rules.status = SiteStatus::from_proto(site.status);
+        rules.downstream_timeout_secs = if site.downstream_timeout_secs == 0 {
+            default_downstream_timeout_secs()
+        } else {
+            site.downstream_timeout_secs
+        };
+        rules.proxy_trust = ProxyTrustConfig {
+            enabled: site.trust_proxy_headers,
+            header: site.trusted_header.clone(),
+            last_hop_only: site.trust_last_hop,
+            trusted_ranges: site.trusted_proxy_ranges.clone(),
+        };
+        rules
+    }
+
     /// Convert a proto RuleBundle into local SiteRules.
     fn convert_bundle(bundle: &proto::RuleBundle) -> SiteRules {
         SiteRules {
@@ -3210,7 +3214,7 @@ impl RuleCache {
         }
     }
 
-    fn convert_global_cache(
+    pub(crate) fn convert_global_cache(
         g: &proto::GlobalCacheSettings,
     ) -> GlobalCacheSettings {
         GlobalCacheSettings {
@@ -3221,7 +3225,7 @@ impl RuleCache {
         }
     }
 
-    fn convert_log_settings(ls: &proto::LogSettings) -> LogSettings {
+    pub(crate) fn convert_log_settings(ls: &proto::LogSettings) -> LogSettings {
         LogSettings {
             skip_static_access_logs: ls.skip_static_access_logs,
             static_suffixes: ls.static_suffixes.clone(),
