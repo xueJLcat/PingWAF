@@ -477,6 +477,8 @@ The create, edit and clone handlers accept the fields as a pair. Omit both to us
 
 When custom writes are enabled in an isolated validation database, an active create requires `ingress_agent_ids` listing selected-scope agents owned by the caller. Each must have a current authenticated managed session and a recent bound listener matching the requested port and protocol. A paused site can be staged without assignments. Activation checks the assigned agents again. Cloning to or from a custom listener leaves private TLS material and certificate grants behind; provision the clone before activation.
 
+Backup upload, restore preview, restore execution and history rollback validate the final site addresses together. A site-scoped restore includes claims made by other live sites. A full restore releases claims belonging to sites selected for pruning. Older site snapshots without ingress fields restore the default listener. Conflicting names, aliases, wildcard coverage or protocols reject the restore before any changes commit. Active custom sites require a current assigned listener; paused custom sites can be staged unassigned. An offline CLI rollback has no live agent inventory and rejects a restore that requires it.
+
 A site is one protected domain plus its origin pools, rules and TLS posture. A
 site may serve several hostnames: `domain` is the primary one and
 `alternate_domains` lists the rest, all sharing the same routing, WAF and cache

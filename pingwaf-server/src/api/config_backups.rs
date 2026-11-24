@@ -262,6 +262,31 @@ fn restore_options(current: &AuthUser, scope: VersionScope) -> RestoreOptions {
     }
 }
 
+async fn prepare_preview(
+    state: &AppState,
+    current: &AuthUser,
+    scope: VersionScope,
+    snapshot: &Value,
+) -> Result<config_restore::RestorePlan, ApiError> {
+    let preview_tx = state
+        .db
+        .begin_with_config(
+            Some(sea_orm::IsolationLevel::RepeatableRead),
+            Some(sea_orm::AccessMode::ReadOnly),
+        )
+        .await?;
+    let plan = config_restore::prepare_restore_with_agents(
+        &preview_tx,
+        &state.agents,
+        scope,
+        snapshot,
+        restore_options(current, scope),
+    )
+    .await?;
+    preview_tx.commit().await?;
+    Ok(plan)
+}
+
 async fn upload_backup_file(
     State(state): State<AppState>,
     current: AuthUser,
@@ -327,13 +352,7 @@ async fn upload_backup_file(
         .map_err(backup_error)?;
     // Validate before recording anything: a rejected upload must not leave a
     // usable-looking `created` backup behind.
-    let plan = config_restore::prepare_restore(
-        &state.db,
-        scope,
-        &snapshot,
-        restore_options(&current, scope),
-    )
-    .await?;
+    let plan = prepare_preview(&state, &current, scope, &snapshot).await?;
     let backup = config_backup::create_uploaded_backup_record(
         &state.db,
         &file_name,
@@ -369,13 +388,7 @@ async fn preview_restore(
         decrypt_backup(&backup.payload, &payload.password, scope)
             .await
             .map_err(backup_error)?;
-    let plan = config_restore::prepare_restore(
-        &state.db,
-        scope,
-        &snapshot,
-        restore_options(&current, scope),
-    )
-    .await?;
+    let plan = prepare_preview(&state, &current, scope, &snapshot).await?;
     Ok(Json(config_restore::preview(&plan)))
 }
 
@@ -410,8 +423,9 @@ async fn restore_backup(
     )
     .await
     .map_err(backup_error)?;
-    let plan = config_restore::prepare_restore(
+    let plan = config_restore::prepare_restore_with_agents(
         &txn,
+        &state.agents,
         scope,
         &snapshot,
         restore_options(&current, scope),

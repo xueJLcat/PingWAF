@@ -367,7 +367,7 @@ pub struct IngressFields {
 }
 
 impl IngressFields {
-    fn resolve(
+    pub(crate) fn resolve(
         &self,
         current: Option<&site::Model>,
         is_admin: bool,

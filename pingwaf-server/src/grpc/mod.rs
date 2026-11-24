@@ -12,7 +12,9 @@ pub mod cache_status;
 pub mod config;
 pub mod control_plane;
 mod managed;
-pub(crate) use managed::{check_agent_ingress, check_site_ingress};
+pub(crate) use managed::{
+    check_agent_ingress, check_assigned_ingress, check_site_ingress,
+};
 pub mod registry;
 pub mod visitor_auth;
 

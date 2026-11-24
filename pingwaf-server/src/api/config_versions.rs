@@ -191,10 +191,14 @@ async fn rollback_version(
     // A missing snapshot surfaces through `From<DbErr>`, which answers a 404
     // with the generic "not found" text: `RecordNotFound` carries the lookup
     // string, and echoing it named the table to the caller.
-    let outcome =
-        config_history::rollback(&state.db, version_id, Some(&current.email))
-            .await
-            .map_err(crate::api::sites::map_site_domain_conflict)?;
+    let outcome = config_history::rollback_with_agents(
+        &state.db,
+        &state.agents,
+        version_id,
+        Some(&current.email),
+    )
+    .await
+    .map_err(ApiError::from)?;
 
     match outcome.scope {
         VersionScope::Site(site_id) => {

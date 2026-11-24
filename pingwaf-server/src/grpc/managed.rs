@@ -253,7 +253,7 @@ async fn require_session(
 }
 
 async fn authorize(
-    tx: &DatabaseTransaction,
+    tx: &impl ConnectionTrait,
     agent_id: Uuid,
 ) -> Result<(agent::Model, Uuid), BuildError> {
     let row = agent::Entity::find_by_id(agent_id)
@@ -288,7 +288,7 @@ fn unavailable(reason: &str) -> crate::api::error::ApiError {
 
 /// Check both the durable identity and the inventory of that exact authenticated stream.
 pub(crate) async fn check_agent_ingress(
-    tx: &DatabaseTransaction,
+    tx: &impl ConnectionTrait,
     agents: &super::AgentRegistry,
     agent_id: Uuid,
     owner: Uuid,
@@ -327,25 +327,39 @@ pub(crate) async fn check_site_ingress(
     else {
         return Ok(());
     };
+    check_assigned_ingress(
+        tx,
+        agents,
+        site.id,
+        site.user_id,
+        port,
+        protocol,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn check_assigned_ingress(
+    tx: &impl ConnectionTrait,
+    agents: &super::AgentRegistry,
+    site_id: Uuid,
+    owner: Uuid,
+    port: i32,
+    protocol: &str,
+    active: bool,
+) -> Result<(), crate::api::error::ApiError> {
     let assignments = agent_sites::Entity::find()
-        .filter(agent_sites::Column::SiteId.eq(site.id))
+        .filter(agent_sites::Column::SiteId.eq(site_id))
         .all(tx)
         .await?;
-    if assignments.is_empty() {
+    if active && assignments.is_empty() {
         return Err(unavailable(
             "active custom ingress requires an explicitly assigned agent",
         ));
     }
     for row in assignments {
-        check_agent_ingress(
-            tx,
-            agents,
-            row.agent_id,
-            site.user_id,
-            port,
-            protocol,
-        )
-        .await?;
+        check_agent_ingress(tx, agents, row.agent_id, owner, port, protocol)
+            .await?;
     }
     Ok(())
 }

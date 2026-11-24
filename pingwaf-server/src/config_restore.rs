@@ -40,6 +40,7 @@ pub enum RestoreError {
     /// The message names the site, the agent, its version and the missing
     /// capability; no row has been written when this is returned.
     AgentTooOld(String),
+    Ingress(ApiError),
 }
 
 impl From<DbErr> for RestoreError {
@@ -51,6 +52,7 @@ impl From<DbErr> for RestoreError {
 impl From<RestoreError> for DbErr {
     fn from(err: RestoreError) -> Self {
         match err {
+            RestoreError::Ingress(err) => DbErr::Custom(err.to_string()),
             RestoreError::Db(db_err) => db_err,
             RestoreError::AgentTooOld(message) => DbErr::Custom(message),
         }
@@ -60,7 +62,10 @@ impl From<RestoreError> for DbErr {
 impl From<RestoreError> for ApiError {
     fn from(err: RestoreError) -> Self {
         match err {
-            RestoreError::Db(db_err) => db_err.into(),
+            RestoreError::Ingress(err) => err,
+            RestoreError::Db(db_err) => {
+                crate::api::sites::map_site_domain_conflict(db_err)
+            },
             RestoreError::AgentTooOld(message) => Self::BadRequest(message),
         }
     }
@@ -831,6 +836,120 @@ async fn ensure_plan_scopes_supported<C: ConnectionTrait>(
     Ok(())
 }
 
+async fn check_restore_ingress<C: ConnectionTrait>(
+    db: &C,
+    plan: &RestorePlan,
+    agents: &crate::grpc::AgentRegistry,
+) -> Result<(), RestoreError> {
+    let Some(sites) =
+        plan.tables.iter().find(|table| table.spec.name == "sites")
+    else {
+        return Ok(());
+    };
+    let mut claims = Vec::with_capacity(sites.rows.len());
+    let mut assignments = Vec::new();
+    for row in &sites.rows {
+        let fields: crate::api::sites::IngressFields =
+            serde::Deserialize::deserialize(row)
+                .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let (port, protocol) =
+            fields.resolve(None, true).map_err(RestoreError::Ingress)?;
+        if let (Some(port), Some(protocol)) = (port, protocol.as_deref()) {
+            let id = uuid_field(row, "id").ok_or_else(|| {
+                DbErr::Custom("invalid restored site id".into())
+            })?;
+            let owner = uuid_field(row, "user_id").ok_or_else(|| {
+                DbErr::Custom("invalid restored site owner".into())
+            })?;
+            assignments.push((
+                id,
+                owner,
+                port,
+                protocol.to_owned(),
+                row["status"] == crate::models::site_status::ACTIVE,
+            ));
+        }
+        claims.push(json!({"id":row["id"], "domain":row["domain"], "aliases":row["alternate_domains"],
+            "port":port, "protocol":protocol}));
+    }
+    if claims.is_empty() {
+        return Ok(());
+    }
+    // Compare the post-restore namespace in one read, including live sites outside the snapshot.
+    // Generate suffixes so the hostname join need not compare every pair of sites.
+    let sql = r#"
+        WITH proposed AS (
+            SELECT * FROM jsonb_to_recordset($1) AS x(id uuid, domain text, aliases text[], port int, protocol text)
+        ), final_sites AS (
+            SELECT * FROM proposed
+            UNION ALL
+            SELECT id, domain, alternate_domains, ingress_port, ingress_protocol FROM sites s
+            WHERE NOT EXISTS (SELECT FROM proposed p WHERE p.id = s.id)
+              AND NOT EXISTS (SELECT FROM jsonb_array_elements_text($2) removed WHERE removed.value::uuid = s.id)
+        ), hosts AS (
+            SELECT id, coalesce(port,0) AS port, unnest(array_prepend(domain, aliases)) COLLATE "C" AS host FROM final_sites
+        ), labels AS (
+            SELECT id, port, host, string_to_array(host,'.') AS parts FROM hosts
+        )
+        SELECT CASE
+            WHEN EXISTS (SELECT FROM hosts WHERE site_ingress_hostname_valid(host) IS NOT TRUE) THEN 'hostname'
+            WHEN EXISTS (SELECT FROM final_sites WHERE port IS NOT NULL GROUP BY port HAVING count(DISTINCT protocol) > 1) THEN 'protocol'
+            WHEN EXISTS (SELECT FROM hosts GROUP BY port,host HAVING count(*) > 1) THEN 'domain'
+            WHEN EXISTS (SELECT FROM labels l CROSS JOIN LATERAL generate_series(2,cardinality(parts)) pos
+                         JOIN hosts w ON true WHERE w.port = l.port AND w.id <> l.id
+                           AND w.host = ('*.' || array_to_string(l.parts[pos:cardinality(l.parts)],'.')) COLLATE "C") THEN 'domain'
+        END AS conflict"#;
+    let result = db
+        .query_one(statement(
+            db,
+            sql,
+            vec![
+                Value::Array(claims).into(),
+                json!(plan.prune_site_ids).into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| {
+            DbErr::Custom("missing restore ingress validation result".into())
+        })?;
+    let conflict: Option<String> = result.try_get_by_index(0)?;
+    if let Some(kind) = conflict {
+        let (message, code) = match kind.as_str() {
+            "domain" => (
+                "restored hostname or alias is already served on this ingress",
+                "site.domain_conflict",
+            ),
+            "protocol" => (
+                "restored sites use different protocols on one port",
+                "site.ingress_invalid",
+            ),
+            _ => ("invalid restored hostname or alias", "site.ingress_invalid"),
+        };
+        return Err(RestoreError::Ingress(
+            ApiError::BadRequest(message.into()).with_code(code),
+        ));
+    }
+    if !assignments.is_empty() {
+        let gated = db.query_one(statement(db,
+            "SELECT EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'sites'::regclass AND conname = 'sites_custom_ingress_disabled')",
+            Vec::new(),
+        )).await?.ok_or_else(|| DbErr::Custom("missing ingress migration state".into()))?;
+        if gated.try_get_by_index::<bool>(0)? {
+            return Err(RestoreError::Ingress(ApiError::BadRequest(
+                "custom ingress writes are disabled by the installed database migration".into()
+            ).with_code("site.ingress_unavailable")));
+        }
+    }
+    for (id, owner, port, protocol, active) in assignments {
+        crate::grpc::check_assigned_ingress(
+            db, agents, id, owner, port, &protocol, active,
+        )
+        .await
+        .map_err(RestoreError::Ingress)?;
+    }
+    Ok(())
+}
+
 /// Plans a restore and gates it on agent capabilities before anything is
 /// written. See [`ensure_plan_scopes_supported`] for the DR-03 rejection.
 pub async fn prepare_restore<C: ConnectionTrait>(
@@ -839,7 +958,26 @@ pub async fn prepare_restore<C: ConnectionTrait>(
     snapshot: &Value,
     options: RestoreOptions,
 ) -> Result<RestorePlan, RestoreError> {
+    prepare_restore_with_agents(
+        db,
+        &crate::grpc::AgentRegistry::new(),
+        scope,
+        snapshot,
+        options,
+    )
+    .await
+}
+
+/// Online callers supply the registry that owns their authenticated streams.
+pub async fn prepare_restore_with_agents<C: ConnectionTrait>(
+    db: &C,
+    agents: &crate::grpc::AgentRegistry,
+    scope: VersionScope,
+    snapshot: &Value,
+    options: RestoreOptions,
+) -> Result<RestorePlan, RestoreError> {
     let plan = prepare_restore_inner(db, scope, snapshot, options).await?;
+    check_restore_ingress(db, &plan, agents).await?;
     ensure_plan_scopes_supported(db, &plan.tables).await?;
     Ok(plan)
 }

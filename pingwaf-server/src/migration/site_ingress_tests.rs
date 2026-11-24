@@ -173,6 +173,22 @@ async fn site_ingress_migration_postgres() {
     assert!(legacy_site.is_object());
     assert!(legacy_site.get("ingress_port").is_none());
     assert!(legacy_site.get("ingress_protocol").is_none());
+    let mut gated = legacy_snapshot.clone();
+    gated["tables"]["sites"][0]["ingress_port"] = 81.into();
+    gated["tables"]["sites"][0]["ingress_protocol"] = "http".into();
+    let denied = config_restore::prepare_restore_with_agents(
+        &db,
+        &crate::grpc::AgentRegistry::new(),
+        scope,
+        &gated,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        crate::api::error::ApiError::from(denied).code(),
+        "site.ingress_unavailable"
+    );
     assert_db_error(
         &db.execute_unprepared(&insert("app.test", "{}", 81, "http"))
             .await
@@ -280,6 +296,163 @@ async fn site_ingress_migration_postgres() {
         .await,
         82
     );
+    db.execute_unprepared(
+        "UPDATE sites SET status='paused' WHERE ingress_port IS NOT NULL",
+    )
+    .await
+    .unwrap();
+    // Earlier gRPC checks left an explicit assignment whose stream has ended.
+    // Restoring its paused site must reject that assignment. Unassign it in
+    // this disposable database to exercise a valid offline staging restore.
+    let deployment = config_catalog::capture(&db, scope, true).await.unwrap();
+    let stale = config_restore::prepare_restore_with_agents(
+        &db,
+        &state.agents,
+        scope,
+        &deployment,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        crate::api::error::ApiError::from(stale).code(),
+        "site.ingress_unavailable"
+    );
+    db.execute_unprepared("DELETE FROM agent_sites")
+        .await
+        .unwrap();
+    let site_scope = config_catalog::VersionScope::Site(a.parse().unwrap());
+    let one = config_catalog::capture(&db, site_scope, true)
+        .await
+        .unwrap();
+    let mut legacy = one.clone();
+    let fields = legacy["tables"]["sites"][0].as_object_mut().unwrap();
+    fields.remove("ingress_port");
+    fields.remove("ingress_protocol");
+    let rejected = config_restore::prepare_restore_with_agents(
+        &db,
+        &state.agents,
+        site_scope,
+        &legacy,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        crate::api::error::ApiError::from(rejected).code(),
+        "site.domain_conflict"
+    );
+    for (field, value, code) in [
+        (
+            "domain",
+            serde_json::json!("child.app.test"),
+            "site.domain_conflict",
+        ),
+        (
+            "ingress_protocol",
+            serde_json::json!("https"),
+            "site.ingress_invalid",
+        ),
+        (
+            "status",
+            serde_json::json!("active"),
+            "site.ingress_unavailable",
+        ),
+    ] {
+        let mut bad = one.clone();
+        bad["tables"]["sites"][0][field] = value;
+        if field == "domain" || field == "ingress_protocol" {
+            bad["tables"]["sites"][0]["ingress_port"] = 81.into();
+        }
+        let err = config_restore::prepare_restore_with_agents(
+            &db,
+            &state.agents,
+            site_scope,
+            &bad,
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(crate::api::error::ApiError::from(err).code(), code);
+    }
+    legacy["tables"]["sites"][0]["domain"] = "legacy-restore.test".into();
+    let trial = db.begin().await.unwrap();
+    let plan = config_restore::prepare_restore_with_agents(
+        &trial,
+        &state.agents,
+        site_scope,
+        &legacy,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    config_restore::apply_restore(&trial, plan).await.unwrap();
+    assert!(scalar::<bool>(&trial,&format!("SELECT ingress_port IS NULL AND ingress_protocol IS NULL FROM sites WHERE id='{a}'")).await);
+    trial.rollback().await.unwrap();
+    // A different transaction claims the default address after a successful
+    // preview. Execution builds its own plan and rejects the stale proposal.
+    db.execute_unprepared(&legacy_insert("legacy-restore.test"))
+        .await
+        .unwrap();
+    let execution = db.begin().await.unwrap();
+    let conflict = config_restore::prepare_restore_with_agents(
+        &execution,
+        &state.agents,
+        site_scope,
+        &legacy,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        crate::api::error::ApiError::from(conflict).code(),
+        "site.domain_conflict"
+    );
+    execution.rollback().await.unwrap();
+    // Deployment pruning releases that claim. Retaining the omitted site
+    // must still conflict with a proposed change to the default site's name.
+    let mut prune_case =
+        config_catalog::capture(&db, scope, true).await.unwrap();
+    let rows = prune_case["tables"]["sites"].as_array_mut().unwrap();
+    rows.retain(|row| row["domain"] != "legacy-restore.test");
+    let default_site = rows
+        .iter_mut()
+        .find(|row| {
+            row["domain"] == "app.test" && row.get("ingress_port").is_none()
+        })
+        .unwrap();
+    default_site["domain"] = "legacy-restore.test".into();
+    let kept = config_restore::prepare_restore_with_agents(
+        &db,
+        &state.agents,
+        scope,
+        &prune_case,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        crate::api::error::ApiError::from(kept).code(),
+        "site.domain_conflict"
+    );
+    let prune = config_restore::prepare_restore_with_agents(
+        &db,
+        &state.agents,
+        scope,
+        &prune_case,
+        config_restore::RestoreOptions {
+            prune_sites: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(prune.prune_site_ids.len(), 1);
+    db.execute_unprepared(
+        "DELETE FROM sites WHERE domain='legacy-restore.test'",
+    )
+    .await
+    .unwrap();
     let mut snapshot = config_catalog::capture(&db, scope, true).await.unwrap();
     for row in snapshot["tables"]["sites"].as_array_mut().unwrap() {
         if row["id"] == a {
@@ -289,8 +462,9 @@ async fn site_ingress_migration_postgres() {
         }
     }
     let tx = db.begin().await.unwrap();
-    let plan = config_restore::prepare_restore(
+    let plan = config_restore::prepare_restore_with_agents(
         &tx,
+        &state.agents,
         scope,
         &snapshot,
         config_restore::RestoreOptions::default(),

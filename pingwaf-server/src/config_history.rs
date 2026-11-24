@@ -229,6 +229,22 @@ pub async fn rollback(
     version_id: i64,
     actor: Option<&str>,
 ) -> Result<RollbackOutcome, DbErr> {
+    rollback_with_agents(
+        db,
+        &crate::grpc::AgentRegistry::new(),
+        version_id,
+        actor,
+    )
+    .await
+    .map_err(DbErr::from)
+}
+
+pub async fn rollback_with_agents(
+    db: &DatabaseConnection,
+    agents: &crate::grpc::AgentRegistry,
+    version_id: i64,
+    actor: Option<&str>,
+) -> Result<RollbackOutcome, config_restore::RestoreError> {
     let version = config_version::Entity::find_by_id(version_id)
         .one(db)
         .await?
@@ -243,7 +259,9 @@ pub async fn rollback(
         None => VersionScope::Global,
     };
 
-    let txn = db.begin().await?;
+    let txn = db
+        .begin_with_config(Some(sea_orm::IsolationLevel::Serializable), None)
+        .await?;
     // Serialise rollbacks per scope: a second rollback waits here instead of
     // recording and applying against a state the first one is about to
     // replace. The lock is released when the transaction ends.
@@ -262,8 +280,9 @@ pub async fn rollback(
     let pre_rollback_version =
         record_version_in(&txn, scope, "pre-rollback", actor, &before_hash)
             .await?;
-    let plan = config_restore::prepare_restore(
+    let plan = config_restore::prepare_restore_with_agents(
         &txn,
+        agents,
         scope,
         &version.snapshot,
         RestoreOptions::default(),
