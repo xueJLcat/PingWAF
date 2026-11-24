@@ -283,6 +283,29 @@ pub(crate) mod waf;
 mod plugin;
 
 pub use plugin::get_plugin_factory;
+
+/// A managed request must never fall back to the domain-indexed agent cache.
+/// Distinguish a legacy request from a malformed managed context.
+pub(crate) fn managed_rules(
+    session: &pingora::proxy::Session,
+) -> pingora::Result<Option<std::sync::Arc<pingwaf_agent::cache::SiteRules>>> {
+    let Some(site) = session
+        .req_header()
+        .extensions
+        .get::<pingap_core::ManagedSiteContext>()
+    else {
+        return Ok(None);
+    };
+    site.rules
+        .clone()
+        .downcast::<pingwaf_agent::cache::SiteRules>()
+        .ok()
+        .filter(|rules| rules.site_id == site.id)
+        .map(Some)
+        .ok_or_else(|| {
+            pingap_core::new_internal_error(503, "invalid managed site rules")
+        })
+}
 // The data plane drives the WAF plugin's access-log sweep timer from its
 // own runtime, so these two items are re-exported.
 pub use waf::{PENDING_ACCESS_SWEEP_TTL, sweep_stale_access};

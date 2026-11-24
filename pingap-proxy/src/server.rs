@@ -470,7 +470,7 @@ pub trait ManagedSiteSelector: Send + Sync {
 
 #[derive(Clone)]
 pub struct ManagedRequestSite {
-    pub id: Arc<str>,
+    pub context: pingap_core::ManagedSiteContext,
     pub route: Arc<pingap_location::ServerLocationRoute>,
     pub trust: ProxyTrust,
     pub locations: Arc<dyn LocationProvider>,
@@ -480,11 +480,6 @@ pub struct ManagedRequestSite {
 
 #[derive(Clone)]
 struct ManagedUpstreams(Arc<dyn UpstreamProvider>);
-
-/// Set only by the proxy before running any site plugins, never decoded from
-/// an HTTP header. Retained even if an upstream rewrite changes Host.
-#[derive(Clone)]
-pub struct ManagedSiteId(pub Arc<str>);
 
 fn parse_managed_authority(value: &str) -> Option<(String, Option<u16>)> {
     let authority: http::uri::Authority = value.parse().ok()?;
@@ -1152,7 +1147,7 @@ impl Server {
                 .unwrap_or_default(),
         );
         let extensions = session.req_header_mut().extensions_mut();
-        extensions.insert(ManagedSiteId(site.id.clone()));
+        extensions.insert(site.context.clone());
         extensions.insert(ManagedUpstreams(site.upstreams.clone()));
         Ok(site)
     }
@@ -3401,7 +3396,10 @@ value = 'proxy_set_headers = ["name:value"]'
         }
         let server = new_server();
         let selector = Selector(ManagedRequestSite {
-            id: Arc::from("site-on-this-listener"),
+            context: pingap_core::ManagedSiteContext {
+                id: Arc::from("site-on-this-listener"),
+                rules: Arc::new(()),
+            },
             route: Arc::new(pingap_location::ServerLocationRoute::build(
                 Vec::new(),
                 |_| None,
@@ -3421,9 +3419,9 @@ value = 'proxy_set_headers = ["name:value"]'
         let site = session
             .req_header()
             .extensions
-            .get::<ManagedSiteId>()
+            .get::<pingap_core::ManagedSiteContext>()
             .unwrap();
-        assert_eq!(site.0.as_ref(), "site-on-this-listener");
+        assert_eq!(site.id.as_ref(), "site-on-this-listener");
         assert!(ctx.upstream.location.is_empty());
         let (mut session, _) =
             new_duplex_session("GET / HTTP/1.1\r\nHost: github.com\r\n\r\n")
@@ -3488,7 +3486,10 @@ value = 'proxy_set_headers = ["name:value"]'
                 up.run_health_check().await.unwrap();
             }
             let selector = Selector(ManagedRequestSite {
-                id: Arc::from(body),
+                context: pingap_core::ManagedSiteContext {
+                    id: Arc::from(body),
+                    rules: Arc::new(()),
+                },
                 route: selected
                     .server_locations_provider
                     .get(&selected.name)

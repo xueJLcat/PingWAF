@@ -285,6 +285,11 @@ impl BasicAuthGate {
 /// nothing serves would leave a way around the WAF, which is why the check is
 /// here rather than in the path test alone.
 fn site_serves_a_login_page(session: &Session) -> bool {
+    match crate::managed_rules(session) {
+        Ok(Some(rules)) => return has_local_login(&rules),
+        Err(_) => return false,
+        Ok(None) => {},
+    }
     let Some(agent) = PingWafAgent::instance() else {
         // Standalone mode has no rule cache to consult. The plugin is
         // configured by hand there, so a login page means the operator also
@@ -299,6 +304,10 @@ fn site_serves_a_login_page(session: &Session) -> bool {
         // be refused downstream. Evaluating rules is the safe default.
         return false;
     };
+    has_local_login(&rules)
+}
+
+fn has_local_login(rules: &CacheSiteRules) -> bool {
     rules.oidc.as_ref().is_some_and(|oidc| {
         oidc.auth_mode == "local" || oidc.auth_mode == "both"
     })
@@ -3886,6 +3895,30 @@ impl WafPlugin {
         }
     }
 
+    fn resolve_request_site(
+        &self,
+        session: &Session,
+        host: &str,
+    ) -> pingora::Result<ResolvedSite> {
+        let Some(rules) = crate::managed_rules(session)? else {
+            return Ok(self.resolve_site(host));
+        };
+        let now = crate::host_cache::unix_now();
+        self.site_context_sweep.prune(
+            &self.site_contexts_by_id,
+            now,
+            |cached| {
+                cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+            },
+        );
+        let context = self.context_for_site(&rules);
+        Ok(ResolvedSite {
+            choice: context.choice(&rules),
+            site_id: rules.site_id.to_string(),
+            context: Some(context),
+        })
+    }
+
     /// Resolve the site data for `host`, consulting the agent rule cache when
     /// available and caching compiled contexts per domain.
     fn resolve_site(&self, host: &str) -> ResolvedSite {
@@ -4835,7 +4868,13 @@ impl Plugin for WafPlugin {
         // validation request must never see a 403. Restrict the exemption to
         // a real token shape: a bare prefix would also release
         // `/.well-known/acme-challenge/../../admin` from every rule.
-        if is_acme_challenge_path(session.req_header().uri.path()) {
+        if session
+            .req_header()
+            .extensions
+            .get::<pingap_core::ManagedSiteContext>()
+            .is_none()
+            && is_acme_challenge_path(session.req_header().uri.path())
+        {
             return Ok(RequestPluginResult::Skipped);
         }
         // The clearance endpoint is served by the challenge plugin. A rule
@@ -4920,7 +4959,7 @@ impl Plugin for WafPlugin {
         // Before the client IP: sites behind a CDN/proxy derive it from a
         // trusted forwarded header instead of the TCP peer, so IP access
         // rules, rate limiting and logs all key on the real visitor address.
-        let resolved = self.resolve_site(&host);
+        let resolved = self.resolve_request_site(session, &host)?;
         let site_id = resolved.site_id.clone();
         let context = resolved.context.clone();
         let choice = resolved.choice;
@@ -6667,6 +6706,48 @@ ml_threshold = 0.75
             oidc: None,
             path_exceptions: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn managed_waf_uses_the_pinned_rules_for_same_host_and_rejects_mismatched_identity()
+     {
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r#"mode = "block""#).unwrap(),
+        )
+        .unwrap();
+        let mut session =
+            crate::test_support::h1_session("GET", "/", "example.com").await;
+        let mut active = site_rules(None);
+        active.site_id = "site-a".into();
+        let mut paused = active.clone();
+        paused.site_id = "site-b".into();
+        paused.status = pingwaf_agent::cache::SiteStatus::Paused;
+        for (id, rules) in [("site-a", active), ("site-b", paused)] {
+            session.req_header_mut().extensions_mut().insert(
+                pingap_core::ManagedSiteContext {
+                    id: id.into(),
+                    rules: Arc::new(rules),
+                },
+            );
+            let resolved = plugin
+                .resolve_request_site(&session, "example.com")
+                .unwrap();
+            assert_eq!(resolved.site_id, id);
+            assert_eq!(resolved.context.unwrap().paused, id == "site-b");
+        }
+        assert_eq!(plugin.site_contexts_by_id.len(), 2);
+        assert!(plugin.site_contexts.is_empty());
+        session.req_header_mut().extensions_mut().insert(
+            pingap_core::ManagedSiteContext {
+                id: "site-a".into(),
+                rules: Arc::new(site_rules(None)),
+            },
+        );
+        assert!(
+            plugin
+                .resolve_request_site(&session, "example.com")
+                .is_err()
+        );
     }
 
     /// Guards a standalone WAF plugin would use for a mint, with the

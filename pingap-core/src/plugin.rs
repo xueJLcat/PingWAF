@@ -290,6 +290,16 @@ pub trait PluginProvider: Send + Sync {
 
 pub type Plugins = AHashMap<String, Arc<dyn Plugin>>;
 
+/// Set by a managed proxy after choosing a site on its listener. Rules stay
+/// pinned for the request even if a plugin rewrites the HTTP authority.
+/// The engine is independent of the control-plane rule model, so the
+/// consuming plugin checks the type before using the snapshot.
+#[derive(Clone)]
+pub struct ManagedSiteContext {
+    pub id: Arc<str>,
+    pub rules: Arc<dyn std::any::Any + Send + Sync>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
