@@ -1738,7 +1738,12 @@ impl RuleCache {
                     .filter(|domain| !domain.is_empty())
                     .map(str::to_string)
                     .collect(),
-                None => Vec::new(),
+                // Managed sites are absent from the legacy domain index.
+                // Their cache plugin uses the canonical UUID as its scope.
+                None => vec![format!(
+                    "managed:{}",
+                    uuid::Uuid::parse_str(site_id)?
+                )],
             }
         };
         if domains.is_empty() {
