@@ -3367,6 +3367,14 @@ Time-series request data.
 
 **Query Parameters:** `site_id`, `from`, `to`, `interval` (`minute`, `hour` (default), `day` or `week`), `limit`
 
+**Response (200):** one object per bucket with `bucket`, `requests`,
+`cache_hits`, `cache_saved_bytes`, `client_errors`, `server_errors`,
+`avg_latency_ms`, `blocked`, and the total-latency percentiles
+`p50_latency_ms` / `p90_latency_ms` / `p99_latency_ms`
+(`PERCENTILE_CONT` over the rows in the bucket). The latency chart plots the
+three percentiles because a mean hides the tail users actually feel; a bucket
+with no rows reports `0` for each.
+
 ### GET /analytics/traffic
 
 Egress bandwidth per fixed-width bucket — response bytes streamed to clients only; origin-pull traffic is never counted. Without `site_id` the call covers every site the caller may see.
@@ -3429,6 +3437,15 @@ rather than silently falling back to `false`, so a typo cannot quietly change
 the ranking. A present-but-empty value (`?blocked_only=`) is rejected too; omit
 the parameter for the default. `blocked_only=false` is byte-for-byte the statement the endpoint
 served before the parameter existed.
+
+**Response:** one row per client IP — `client_ip`, `country_code` (nullable),
+`requests`, `blocked`, `top_site_id` (nullable; the site the address last hit,
+which the console uses as the target of its one-click block/challenge) and the
+network the address belongs to: `asn` (nullable AS number) plus `asn_name`, the
+organization the control plane's ASN table maps it to (`Unknown (AS<n>)` when it
+has no entry). `asn` is `NULL` for private addresses, for deployments whose
+agents carry no GeoIP ASN data and for rows written before the column existed —
+the dashboard then shows `—` instead of guessing a network.
 
 ### GET /analytics/top-asns
 
@@ -4208,8 +4225,8 @@ Requests per country over the last 24 hours (up to 20 countries), for the bar ch
 **Response (200):**
 ```json
 [
-  {"country_code": "CN", "requests": 5210},
-  {"country_code": "US", "requests": 1240}
+  {"country_code": "CN", "requests": 5210, "blocked": 610},
+  {"country_code": "US", "requests": 1240, "blocked": 12}
 ]
 ```
 
@@ -4227,11 +4244,13 @@ not be resolved is skipped.
 | `limit` | int | Maximum countries returned (default: 100, clamped to 1-250) |
 
 **Response (200):** the same shape as the per-site stats, sorted by requests
-descending:
+descending (`blocked` is the number of requests the WAF refused in the same
+window — HTTP 403/429, the same definition `/analytics/top-ips` uses — which is
+what the globe's red threat bubbles are sized and shaded by). Rows:
 ```json
 [
-  {"country_code": "CN", "requests": 5210},
-  {"country_code": "US", "requests": 1240}
+  {"country_code": "CN", "requests": 5210, "blocked": 610},
+  {"country_code": "US", "requests": 1240, "blocked": 12}
 ]
 ```
 

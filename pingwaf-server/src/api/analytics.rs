@@ -8,11 +8,11 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Json;
-use axum::Router;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TryGetable,
@@ -197,11 +197,7 @@ impl Resolved {
 
     /// Index of the next free `$n` placeholder.
     fn next_placeholder(&self) -> usize {
-        if self.site_id.is_some() {
-            4
-        } else {
-            3
-        }
+        if self.site_id.is_some() { 4 } else { 3 }
     }
 
     /// The row cap, re-clamped and widened to `u64` here rather than at the
@@ -245,6 +241,11 @@ pub struct TimeBucket {
     pub client_errors: i64,
     pub server_errors: i64,
     pub avg_latency_ms: i64,
+    /// Median total latency in the bucket. A mean hides the tail that users
+    /// actually feel, so the chart plots p50/p90/p99 together.
+    pub p50_latency_ms: i64,
+    pub p90_latency_ms: i64,
+    pub p99_latency_ms: i64,
     pub blocked: i64,
 }
 
@@ -267,6 +268,14 @@ pub struct TopIp {
     /// one-click block/challenge from the dashboard's cross-site view);
     /// `None` when the log rows carry no resolvable site.
     pub top_site_id: Option<Uuid>,
+    /// Autonomous system the address belongs to, when the edge resolved one.
+    /// `None` for private addresses, an agent without GeoIP ASN data, and rows
+    /// written before the column existed.
+    pub asn: Option<u32>,
+    /// Organization behind `asn`, resolved from the control plane's ASN table
+    /// (`Unknown (AS<number>)` when it has no entry). The console shows it as
+    /// the hover text of the AS number; `None` when `asn` is `None`.
+    pub asn_name: Option<String>,
 }
 
 /// One network in the ASN traffic ranking.
@@ -923,7 +932,10 @@ async fn requests_over_time(
                 COALESCE(SUM(response_size) FILTER (WHERE cache_status = 'hit'), 0)::BIGINT AS cache_saved_bytes, \
                 COUNT(*) FILTER (WHERE status_code >= 400 AND status_code < 500) AS client_errors, \
                 COUNT(*) FILTER (WHERE status_code >= 500) AS server_errors, \
-                COALESCE(AVG(total_latency_ms), 0)::BIGINT AS avg_latency_ms \
+                COALESCE(AVG(total_latency_ms), 0)::BIGINT AS avg_latency_ms, \
+                COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total_latency_ms), 0)::BIGINT AS p50_latency_ms, \
+                COALESCE(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY total_latency_ms), 0)::BIGINT AS p90_latency_ms, \
+                COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY total_latency_ms), 0)::BIGINT AS p99_latency_ms \
          FROM access_logs WHERE {where_sql} \
          GROUP BY bucket ORDER BY bucket ASC"
     );
@@ -940,6 +952,9 @@ async fn requests_over_time(
             client_errors: get_value::<i64>(row, "client_errors"),
             server_errors: get_value::<i64>(row, "server_errors"),
             avg_latency_ms: get_value::<i64>(row, "avg_latency_ms"),
+            p50_latency_ms: get_value::<i64>(row, "p50_latency_ms"),
+            p90_latency_ms: get_value::<i64>(row, "p90_latency_ms"),
+            p99_latency_ms: get_value::<i64>(row, "p99_latency_ms"),
             blocked: 0,
         });
     }
@@ -1238,12 +1253,17 @@ fn top_ips_sql(
         (String::new(), "ORDER BY requests DESC")
     };
 
+    // The ASN projection follows `top_asns_sql`'s validity range: an address
+    // the edge never resolved (`0`), a legacy out-of-range value, or a mix
+    // inside one IP's rows all collapse to NULL rather than to a plausible
+    // wrong network. The CASE is evaluated per row before the aggregate.
     let sql = format!(
         "SELECT client_ip, \
                 MAX(country_code) AS country_code, \
                 COUNT(*) AS requests, \
                 {BLOCKED_REQUESTS_FILTER} AS blocked, \
-                (ARRAY_AGG(site_id ORDER BY timestamp DESC))[1] AS top_site_id \
+                (ARRAY_AGG(site_id ORDER BY timestamp DESC))[1] AS top_site_id, \
+                MAX(CASE WHEN asn > 0 AND asn <= {MAX_ASN} THEN asn END) AS asn \
          FROM access_logs WHERE {where_sql} \
          GROUP BY client_ip {having}{order} LIMIT ${placeholder}"
     );
@@ -1266,12 +1286,22 @@ async fn top_ips(
     let rows = query_all(&state.db, &sql, values).await?;
     Ok(Json(
         rows.iter()
-            .map(|row| TopIp {
-                client_ip: get_value::<String>(row, "client_ip"),
-                country_code: try_get::<String>(row, "country_code"),
-                requests: get_value::<i64>(row, "requests"),
-                blocked: get_value::<i64>(row, "blocked"),
-                top_site_id: try_get::<Uuid>(row, "top_site_id"),
+            .map(|row| {
+                // BIGINT → u32 like `top_asn`: a value outside the unsigned
+                // 32-bit range or 0 is not a network and must not be shown as
+                // a different, plausible-looking one.
+                let asn = try_get::<i64>(row, "asn")
+                    .and_then(|asn| u32::try_from(asn).ok())
+                    .filter(|asn| *asn != 0);
+                TopIp {
+                    client_ip: get_value::<String>(row, "client_ip"),
+                    country_code: try_get::<String>(row, "country_code"),
+                    requests: get_value::<i64>(row, "requests"),
+                    blocked: get_value::<i64>(row, "blocked"),
+                    top_site_id: try_get::<Uuid>(row, "top_site_id"),
+                    asn,
+                    asn_name: asn.map(crate::asn::display_name),
+                }
             })
             .collect::<Vec<_>>(),
     )
@@ -1643,6 +1673,23 @@ mod tests {
         // same aggregate expression; two occurrences prove they are.
         assert_eq!(sql.matches(BLOCKED_REQUESTS_FILTER).count(), 2, "{sql}");
         assert_eq!(values.len(), scoped.next_placeholder());
+    }
+
+    /// The threat table labels each address with the network it belongs to.
+    /// The projection must collapse "unresolved" (`0`), a legacy out-of-range
+    /// value and a NULL to the same NULL, so the console renders the number it
+    /// was given rather than a plausible-looking wrong network.
+    #[test]
+    fn top_ips_projects_only_a_valid_asn() {
+        for blocked_only in [false, true] {
+            let (sql, _) = top_ips_sql(&resolved(None), blocked_only);
+            assert!(
+                sql.contains(&format!(
+                    "MAX(CASE WHEN asn > 0 AND asn <= {MAX_ASN} THEN asn END) AS asn"
+                )),
+                "{sql}"
+            );
+        }
     }
 
     /// `GET /analytics/top-asns`: the statement groups by ASN over the same

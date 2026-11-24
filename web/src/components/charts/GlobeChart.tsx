@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { geoDistance, geoGraticule10, geoOrthographic, geoPath } from 'd3-geo'
 import { useTranslation } from 'react-i18next'
-import { Pause, Play } from '@phosphor-icons/react'
+import { ArrowsIn, ArrowsOut, Pause, Play } from '@phosphor-icons/react'
 import { countryFlag } from '@/api/geo'
 import type { GeoCountryStat } from '@/api/types'
 import { countryName } from '@/lib/countryNames'
@@ -32,6 +32,17 @@ interface GlobeMarker extends CountryTrafficRow {
   x: number
   y: number
   r: number
+}
+
+/** One red bubble of the threat layer: where the WAF refused requests. */
+interface ThreatMarker {
+  code: string
+  blocked: number
+  x: number
+  y: number
+  r: number
+  fill: string
+  fillOpacity: number
 }
 
 interface LandShape {
@@ -105,11 +116,41 @@ export function GlobeChart({
   const rows = useMemo(() => countryTrafficRows(data), [data])
   const max = rows.length > 0 ? rows[0].requests : 0
 
+  /**
+   * Threat layer: countries the WAF refused requests from in the same window.
+   * Capped at 40 so the sphere stays readable — the ranking list beside the
+   * globe carries the full detail.
+   */
+  const threats = useMemo(
+    () =>
+      data
+        .filter((entry) => (entry.blocked ?? 0) > 0 && entry.country_code)
+        .map((entry) => ({
+          code: entry.country_code,
+          blocked: entry.blocked ?? 0,
+        }))
+        .sort((a, b) => b.blocked - a.blocked)
+        .slice(0, 40),
+    [data],
+  )
+  const maxBlocked = threats.length > 0 ? threats[0].blocked : 0
+
   const reducedMotion = usePrefersReducedMotion()
   // `prefers-reduced-motion` wins over the toggle, so no state has to be
   // rewritten when the OS setting flips mid-session.
   const [paused, setPaused] = useState(false)
   const rotating = !paused && !reducedMotion
+
+  // Fullscreen: the native API when it exists, otherwise a fixed overlay. The
+  // globe is the one visual an operator wants to look at closely, and at
+  // 360 px a busy sphere is unreadable.
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const onChange = () => setIsFullscreen(document.fullscreenElement !== null)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
 
   const [rotation, setRotation] = useState<[number, number]>([-12, -18])
   const [hover, setHover] = useState<GlobeMarker | null>(null)
@@ -123,6 +164,37 @@ export function GlobeChart({
   const hoveringRef = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const visibleRef = useRef(true)
+
+  /** Native fullscreen when available, the fixed overlay otherwise. */
+  const toggleFullscreen = () => {
+    const element = containerRef.current
+    if (!element || typeof document === 'undefined') return
+    if (document.fullscreenElement) {
+      void document.exitFullscreen?.()
+      return
+    }
+    if (typeof element.requestFullscreen === 'function') {
+      void element.requestFullscreen().catch(() => {
+        // Present but refused (permissions, iframe policy): the overlay keeps
+        // the button working instead of failing silently.
+        setIsFullscreen(true)
+      })
+      return
+    }
+    setIsFullscreen(true)
+  }
+
+  // Escape leaves the overlay; the native API handles its own.
+  useEffect(() => {
+    if (!isFullscreen || typeof document === 'undefined') return
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !document.fullscreenElement) {
+        setIsFullscreen(false)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [isFullscreen])
 
   // Stop burning frames once the card is scrolled out of view.
   useEffect(() => {
@@ -203,13 +275,36 @@ export function GlobeChart({
     }
     markers.sort((a, b) => b.r - a.r)
 
+    const threatMarkers: ThreatMarker[] = []
+    for (const threat of threats) {
+      const centroid = COUNTRY_CENTROIDS.get(threat.code)
+      if (!centroid) continue
+      if (geoDistance(centroid, viewCentre) > Math.PI / 2) continue
+      const point = projection(centroid)
+      if (!point) continue
+      const ratio = maxBlocked > 0 ? Math.sqrt(threat.blocked / maxBlocked) : 0
+      threatMarkers.push({
+        ...threat,
+        x: point[0],
+        y: point[1],
+        // Radius and colour both climb with the attack count, inside a band
+        // that keeps a single huge source from swallowing the map.
+        r: 2.5 + 8 * ratio,
+        fill: `hsl(0 72% ${52 - 14 * ratio}%)`,
+        fillOpacity: 0.45 + 0.45 * ratio,
+      })
+    }
+    // Smallest first: the biggest threat ends up on top instead of buried.
+    threatMarkers.sort((a, b) => a.blocked - b.blocked)
+
     return {
       sphere: path({ type: 'Sphere' }) ?? '',
       graticule: path(geoGraticule10()) ?? '',
       land,
       markers,
+      threatMarkers,
     }
-  }, [rotation, rows, max])
+  }, [rotation, rows, max, threats, maxBlocked])
 
   const handlePointerDown = (event: PointerEvent<SVGSVGElement>) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return
@@ -277,9 +372,20 @@ export function GlobeChart({
   const hasGeometry = worldFeatures.features.length > 0
 
   return (
-    <div ref={containerRef} className={cn('relative', className)}>
+    <div
+      ref={containerRef}
+      className={cn(
+        'relative',
+        isFullscreen &&
+          'fixed inset-0 z-50 flex flex-col justify-center overflow-auto bg-bg p-6',
+        className,
+      )}
+    >
       {hasGeometry ? (
-        <div className="relative mx-auto w-full" style={{ maxWidth: SIZE }}>
+        <div
+          className="relative mx-auto w-full"
+          style={{ maxWidth: isFullscreen ? 'min(92vh, 100%)' : SIZE }}
+        >
           <svg
             viewBox={`0 0 ${SIZE} ${SIZE}`}
             className="block h-auto w-full touch-none select-none"
@@ -326,6 +432,26 @@ export function GlobeChart({
                 />
               ))}
             </g>
+            {geometry.threatMarkers.map((marker) => (
+              <circle
+                key={`threat-${marker.code}`}
+                cx={marker.x}
+                cy={marker.y}
+                r={marker.r}
+                fill={marker.fill}
+                fillOpacity={marker.fillOpacity}
+                stroke={marker.fill}
+                strokeWidth={1}
+                strokeOpacity={0.85}
+                className="cursor-help"
+              >
+                <title>
+                  {`${countryName(marker.code, language)} · ${formatNumber(marker.blocked)} ${t(
+                    'pages.traffic.blocked',
+                  )}`}
+                </title>
+              </circle>
+            ))}
             {geometry.markers.map((marker) => (
               <circle
                 key={marker.code}
@@ -398,24 +524,45 @@ export function GlobeChart({
         <p className="text-[11px] leading-snug text-fg-subtle">
           {t('pages.traffic.geoMap.globeHint')}
         </p>
-        {hasGeometry && !reducedMotion && (
-          <button
-            type="button"
-            onClick={() => setPaused((value) => !value)}
-            aria-pressed={rotating}
-            aria-label={t(
-              rotating
-                ? 'pages.traffic.geoMap.pauseRotation'
-                : 'pages.traffic.geoMap.resumeRotation',
+        {hasGeometry && (
+          <div className="flex shrink-0 items-center gap-1.5">
+            {!reducedMotion && (
+              <button
+                type="button"
+                onClick={() => setPaused((value) => !value)}
+                aria-pressed={rotating}
+                aria-label={t(
+                  rotating
+                    ? 'pages.traffic.geoMap.pauseRotation'
+                    : 'pages.traffic.geoMap.resumeRotation',
+                )}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-line text-fg-subtle transition-colors hover:bg-recessed hover:text-fg"
+              >
+                {rotating ? (
+                  <Pause weight="fill" className="h-3.5 w-3.5" />
+                ) : (
+                  <Play weight="fill" className="h-3.5 w-3.5" />
+                )}
+              </button>
             )}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-line text-fg-subtle transition-colors hover:bg-recessed hover:text-fg"
-          >
-            {rotating ? (
-              <Pause weight="fill" className="h-3.5 w-3.5" />
-            ) : (
-              <Play weight="fill" className="h-3.5 w-3.5" />
-            )}
-          </button>
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              aria-pressed={isFullscreen}
+              aria-label={t(
+                isFullscreen
+                  ? 'pages.traffic.geoMap.exitFullscreen'
+                  : 'pages.traffic.geoMap.fullscreen',
+              )}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-line text-fg-subtle transition-colors hover:bg-recessed hover:text-fg"
+            >
+              {isFullscreen ? (
+                <ArrowsIn weight="bold" className="h-3.5 w-3.5" />
+              ) : (
+                <ArrowsOut weight="bold" className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </div>
         )}
       </div>
 

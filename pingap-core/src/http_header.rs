@@ -1896,7 +1896,10 @@ mod tests {
             get_cookie_value(&req, "__pingwaf_clearance").as_deref(),
             Some("signed-token")
         );
-        assert_eq!(get_cookie_value(&req, "session_id").as_deref(), Some("98765"));
+        assert_eq!(
+            get_cookie_value(&req, "session_id").as_deref(),
+            Some("98765")
+        );
         // A cookie name spanning a field boundary must not be stitched
         // together: the join separator is `; `, not nothing.
         assert_eq!(get_cookie_value(&req, "preferencesA"), None);

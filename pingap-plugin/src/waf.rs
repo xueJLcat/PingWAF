@@ -10993,17 +10993,9 @@ inspect_body = true"###,
             .collect();
         assert_eq!(
             names,
-            [
-                "app_id",
-                "preferences",
-                "session_id",
-                "__pingwaf_clearance"
-            ]
+            ["app_id", "preferences", "session_id", "__pingwaf_clearance"]
         );
-        assert_eq!(
-            clearance_cookie(&split, CLEARANCE_COOKIE_NAME).as_deref(),
-            Some("signed-token")
-        );
+        assert_eq!(clearance_cookie(&split, CLEARANCE_COOKIE_NAME).as_deref(), Some("signed-token"));
 
         // The layout must not matter: one joined field and a clearance in the
         // first field both resolve to the same value.

@@ -180,7 +180,11 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
         requests: b.requests,
         passed: Math.max(0, b.requests - b.blocked),
         blocked: b.blocked,
-        latency: b.avg_latency_ms,
+        // The latency chart plots the three percentiles side by side: a mean
+        // hides the tail users actually feel, and p50 alone hides the spikes.
+        p50: b.p50_latency_ms,
+        p90: b.p90_latency_ms,
+        p99: b.p99_latency_ms,
       })),
     [data, spanMs],
   )
@@ -541,68 +545,73 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
             </CardBody>
           </Card>
 
-          {/* Geographic distribution — globe + a readable country ranking */}
-          <Card>
-            <CardHeader
-              title={t('pages.traffic.geoMap.title')}
-              description={
-                scoped
-                  ? t('pages.traffic.geoMap.hintSite')
-                  : t('pages.traffic.geoMap.hint')
-              }
-              action={<Globe weight="duotone" className="h-4 w-4 text-fg-subtle" />}
-            />
-            <CardBody>
-              {geoStatsQuery.isPending && !geoStatsQuery.data ? (
-                <div className="h-64 animate-pulse rounded-lg bg-recessed" />
-              ) : geoStatsQuery.isError ? (
-                <ErrorState
-                  error={geoStatsQuery.error}
-                  onRetry={() => geoStatsQuery.refetch()}
-                  retrying={geoStatsQuery.isFetching}
-                />
-              ) : countryRows.length === 0 ? (
-                <EmptyState
-                  className="border-0 py-10"
-                  icon={<Globe weight="duotone" className="h-8 w-8" />}
-                  title={t('common.noData')}
-                />
-              ) : (
-                <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
-                  <GlobeChart data={geoStats} />
-                  <CountryTrafficList
-                    rows={countryRows}
-                    onSelect={(code) =>
-                      drillDown('access', `country:${code}`, geoHours)
-                    }
-                  />
-                </div>
-              )}
-            </CardBody>
-          </Card>
-
-          {/* ASN ranking — which networks the traffic comes from */}
-          <Card>
-            <CardHeader
-              title={t('pages.traffic.topAsns')}
-              description={t('pages.traffic.topAsnsHint')}
-              action={<Buildings weight="duotone" className="h-4 w-4 text-fg-subtle" />}
-            />
-            <CardBody className="p-0">
-              <TopAsnsTable
-                rows={data?.topAsns}
-                totalRequests={summary?.requests}
-                // `!data` rather than `isPending`: the card renders before the
-                // first response arrives, so it shows the skeleton then and
-                // keeps the rows on every later background refetch.
-                loading={!data}
-                error={overviewQuery.error}
-                onRetry={() => void overviewQuery.refetch()}
-                emptyTitle={t('common.noData')}
-                emptyDescription={t('pages.traffic.topAsnsEmpty')}
+          {/* Geographic distribution (2/3) beside the ASN ranking (1/3): the
+              globe is the widest single visual on the page, and the network
+              table is the natural companion — which continent/network the
+              requests come from, side by side. */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader
+                title={t('pages.traffic.geoMap.title')}
+                description={
+                  scoped
+                    ? t('pages.traffic.geoMap.hintSite')
+                    : t('pages.traffic.geoMap.hint')
+                }
+                action={<Globe weight="duotone" className="h-4 w-4 text-fg-subtle" />}
               />
-            </CardBody>
-          </Card>
+              <CardBody>
+                {geoStatsQuery.isPending && !geoStatsQuery.data ? (
+                  <div className="h-64 animate-pulse rounded-lg bg-recessed" />
+                ) : geoStatsQuery.isError ? (
+                  <ErrorState
+                    error={geoStatsQuery.error}
+                    onRetry={() => geoStatsQuery.refetch()}
+                    retrying={geoStatsQuery.isFetching}
+                  />
+                ) : countryRows.length === 0 ? (
+                  <EmptyState
+                    className="border-0 py-10"
+                    icon={<Globe weight="duotone" className="h-8 w-8" />}
+                    title={t('common.noData')}
+                  />
+                ) : (
+                  <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+                    <GlobeChart data={geoStats} />
+                    <CountryTrafficList
+                      rows={countryRows}
+                      onSelect={(code) =>
+                        drillDown('access', `country:${code}`, geoHours)
+                      }
+                    />
+                  </div>
+                )}
+              </CardBody>
+            </Card>
+
+            {/* ASN ranking — which networks the traffic comes from */}
+            <Card>
+              <CardHeader
+                title={t('pages.traffic.topAsns')}
+                description={t('pages.traffic.topAsnsHint')}
+                action={<Buildings weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+              />
+              <CardBody className="p-0">
+                <TopAsnsTable
+                  rows={data?.topAsns}
+                  totalRequests={summary?.requests}
+                  // `!data` rather than `isPending`: the card renders before the
+                  // first response arrives, so it shows the skeleton then and
+                  // keeps the rows on every later background refetch.
+                  loading={!data}
+                  error={overviewQuery.error}
+                  onRetry={() => void overviewQuery.refetch()}
+                  emptyTitle={t('common.noData')}
+                  emptyDescription={t('pages.traffic.topAsnsEmpty')}
+                />
+              </CardBody>
+            </Card>
+          </div>
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             {/* Top paths */}
@@ -675,7 +684,10 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }} tickLine={false} axisLine={{ stroke: 'var(--color-border-line)' }} minTickGap={24} />
                       <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }} tickLine={false} axisLine={false} tickFormatter={(v) => formatLatency(Number(v))} />
                       <Tooltip contentStyle={tooltipStyle} formatter={(v) => formatLatency(Number(v ?? 0))} />
-                      <Line type="monotone" dataKey="latency" name={t('pages.traffic.avgLatency')} stroke="#0051c3" strokeWidth={2} dot={false} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
+                      <Line type="monotone" dataKey="p50" name="p50" stroke="#18794e" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="p90" name="p90" stroke="#f6821f" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="p99" name="p99" stroke="#e54d2a" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>

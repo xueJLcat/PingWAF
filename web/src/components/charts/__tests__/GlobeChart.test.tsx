@@ -52,6 +52,29 @@ describe('GlobeChart', () => {
     expect(html).toContain('aria-label="pages.traffic.geoMap.pauseRotation"')
   })
 
+  it('offers a fullscreen control next to the pause button', () => {
+    const html = render(VISIBLE)
+    expect(html).toContain('aria-label="pages.traffic.geoMap.fullscreen"')
+  })
+
+  it('draws a red threat bubble for a country the WAF refused requests from', () => {
+    const html = render([
+      { country_code: 'FR', requests: 900, blocked: 40 },
+      { country_code: 'DZ', requests: 400 },
+    ])
+
+    // Two request bubbles plus one threat bubble on the visible hemisphere.
+    expect(html.match(/<circle/g) ?? []).toHaveLength(3)
+    // Deeper red as the count climbs — the hue stays 0 and only lightness moves.
+    expect(html).toMatch(/fill="hsl\(0 72% [\d.]+%\)"/)
+    expect(html).toContain('pages.traffic.blocked')
+  })
+
+  it('draws no threat bubble when nothing was blocked', () => {
+    const html = render(VISIBLE)
+    expect(html).not.toMatch(/hsl\(0 72%/)
+  })
+
   it('renders an empty globe without crashing', () => {
     const html = render([])
     expect(html).toContain('role="img"')

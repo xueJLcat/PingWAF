@@ -90,6 +90,48 @@ verbatim for reference and attribution, and is not maintained here.
   stored hostnames are not canonical or have ambiguous ownership. Custom
   ingress ports are not enabled by this migration.
 
+## [PingWAF 0.32.50] — 2026-11-25
+
+### Changed
+
+- **Traffic page: a threat layer on the globe, a fullscreen view, and real
+  latency percentiles.** The globe now draws a red bubble per country the WAF
+  refused requests from (HTTP 403/429), sized and shaded by the block count — so
+  the map answers "where are the attacks coming from" beside the existing
+  request bubbles — with a fullscreen toggle next to the pause button. The card
+  takes two thirds of its row with the ASN ranking beside it, and the ASN empty
+  state now names the real cause: the number is resolved on the control plane
+  from a MaxMind ASN database (GeoLite2-ASN), so an installation without one
+  ranks nothing, and logs written before it was installed stay unranked.
+  `GET /analytics/requests-over-time` returns `p50`/`p90`/`p99_latency_ms` per
+  bucket and the latency chart plots all three instead of the mean alone; both
+  geo-statistics endpoints return `blocked` next to `requests`.
+- **Dashboard: response mix, inventory and attacker networks at a glance.** The
+  status-code widget is now a donut whose slices are the response families,
+  drawn with the traffic page's palette and tooltip (a 4xx is the same colour on
+  both pages) while the per-code counts stay listed underneath. Live visitors
+  moved out of its own wide card into the KPI row — same icon tile, figure,
+  label and help tooltip as Requests and the rest — beside a new **total
+  sites** card that also reports how many of them are active. The threat-IP
+  table gained an **ASN** column: the organization name, the `AS<number>`, and
+  both in the hover title, backed by a new `asn` / `asn_name` pair on
+  `GET /analytics/top-ips`. Addresses the edge never resolved (private ranges,
+  agents without GeoIP ASN data, logs written before the column existed) stay
+  `NULL` and render `—` rather than a guessed network.
+- **The console listens on `0.0.0.0` by default.** The installer and the compose
+  file bound the dashboard to `127.0.0.1`, so a fresh install answered nothing on
+  the host's own address: opening `https://<host>:9080` from any other machine
+  failed and the installation looked broken before the first login was even
+  possible. `admin_addr` is now written as `0.0.0.0:9080` (the built-in default
+  all along), compose publishes `PINGWAF_ADMIN_BIND=0.0.0.0` and the shipped
+  `pingwaf.toml` matches. The exposure stays bounded by what the installer
+  already does — the administrator password is generated per install and a fresh
+  database answers every write with `403 password_change_required` until it is
+  changed. gRPC (9090) is unchanged (`127.0.0.1` until `--listen-public`, which
+  now governs only gRPC). Restrict 9080 with a firewall,
+  `PINGWAF_ADMIN_BIND=<admin-ip>` or a reverse proxy; deployments that already
+  front it with a proxy keep working untouched.
+
 ## [PingWAF 0.32.49] — 2026-11-25
 
 ### Added
@@ -211,19 +253,6 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
-- **The console listens on `0.0.0.0` by default.** The installer and the compose
-  file bound the dashboard to `127.0.0.1`, so a fresh install answered nothing on
-  the host's own address: opening `https://<host>:9080` from any other machine
-  failed and the installation looked broken before the first login was even
-  possible. `admin_addr` is now written as `0.0.0.0:9080` (the built-in default
-  all along), compose publishes `PINGWAF_ADMIN_BIND=0.0.0.0` and the shipped
-  `pingwaf.toml` matches. The exposure stays bounded by what the installer
-  already does — the administrator password is generated per install and a fresh
-  database answers every write with `403 password_change_required` until it is
-  changed. gRPC (9090) is unchanged (`127.0.0.1` until `--listen-public`, which
-  now governs only gRPC). Restrict 9080 with a firewall,
-  `PINGWAF_ADMIN_BIND=<admin-ip>` or a reverse proxy; deployments that already
-  front it with a proxy keep working untouched.
 - **Reworked traffic dashboard (traffic + site-detail traffic pages).** The
   oversized world map is replaced by an interactive 3D globe (d3-geo
   orthographic projection over the bundled world-atlas topology, rendered as

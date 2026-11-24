@@ -15,6 +15,9 @@ function requestBucket(bucket: string, requests: number, blocked = 0): TimeBucke
     client_errors: 0,
     server_errors: 0,
     avg_latency_ms: 0,
+    p50_latency_ms: 0,
+    p90_latency_ms: 0,
+    p99_latency_ms: 0,
     blocked,
   }
 }

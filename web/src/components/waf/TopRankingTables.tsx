@@ -79,6 +79,12 @@ export interface TopIpsTableProps extends RankingState {
   /** 空态文案按页给（Dashboard 讲威胁，流量页只是没数据）。 */
   emptyTitle?: string
   emptyDescription?: string
+  /**
+   * 是否展示「网络归属」列（AS 号 + 组织名）。Dashboard 的威胁表要用它判断
+   * 攻击来源是不是同一个自治系统；站点流量页的「热门 IP」不要求，因此由调用方
+   * 开关，列定义仍然只有这一份（两张表不允许各自重写）。
+   */
+  showAsn?: boolean
 }
 
 /** 威胁/热门客户端 IP：国旗 + IP、请求数、拦截徽章、快捷操作。 */
@@ -91,6 +97,7 @@ export function TopIpsTable({
   onRowClick,
   emptyTitle,
   emptyDescription,
+  showAsn = false,
 }: TopIpsTableProps) {
   const { t } = useTranslation()
 
@@ -107,6 +114,20 @@ export function TopIpsTable({
           </div>
         ),
       },
+      ...(showAsn
+        ? [
+            {
+              key: 'asn',
+              header: t('pages.dashboard.asn'),
+              accessor: (r: TopIp) => r.asn ?? 0,
+              width: '1%',
+              nowrap: true,
+              cell: (r: TopIp) => (
+                <IpAsnCell asn={r.asn} name={r.asn_name} />
+              ),
+            } satisfies Column<TopIp>,
+          ]
+        : []),
       {
         key: 'requests',
         header: t('pages.traffic.requests'),
@@ -391,5 +412,41 @@ export function TopAsnsTable({
         scrollLabel={t('pages.traffic.topAsns')}
       />
     </RankingBody>
+  )
+}
+
+/**
+ * 「网络归属」单元格：组织名 + `AS<号>`。
+ *
+ * 地址没有解析结果时给 `—`（不是空单元格），它同时说明「这条日志没有 ASN」；
+ * 完整 `组织 · AS<号>` 放进 `title`，窄屏截断后悬停仍能看到全名。
+ */
+function IpAsnCell({
+  asn,
+  name,
+}: {
+  asn?: number | null
+  name?: string | null
+}) {
+  const { t } = useTranslation()
+  const value = Math.trunc(Number(asn))
+  if (!Number.isFinite(value) || value <= 0) {
+    return (
+      <span
+        className="text-[13px] text-fg-subtle"
+        title={t('pages.dashboard.asnUnresolved')}
+      >
+        —
+      </span>
+    )
+  }
+  const label = isUnknownAsnName(name)
+    ? t('pages.traffic.asnUnknown', { asn: value })
+    : (name ?? '').trim()
+  return (
+    <div className="max-w-40" title={`${label} · ${formatAsn(value)}`}>
+      <p className="truncate text-[13px] text-fg">{label}</p>
+      <p className="pw-mono text-[11px] text-fg-subtle">{formatAsn(value)}</p>
+    </div>
   )
 }

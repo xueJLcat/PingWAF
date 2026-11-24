@@ -551,9 +551,10 @@ impl Plugin for JwtAuth {
         // accessor may have to join several `Cookie` fields (HTTP/2 splits
         // them), which allocates, and the joined value has to outlive the
         // borrow of it.
-        let cookie_value = self.cookie.as_ref().and_then(|key| {
-            pingap_core::get_cookie_value(req_header, key)
-        });
+        let cookie_value = self
+            .cookie
+            .as_ref()
+            .and_then(|key| pingap_core::get_cookie_value(req_header, key));
         let value: &str = if let Some(key) = &self.header {
             let value = pingap_core::get_req_header_value(req_header, key)
                 .unwrap_or_default();
