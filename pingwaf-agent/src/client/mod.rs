@@ -22,6 +22,11 @@ use crate::config::AgentConfig;
 use crate::heartbeat::{MetricsCollector, SystemMetrics};
 use crate::probe::{self, HostSample, ProbeBuffer};
 
+#[cfg(target_os = "linux")]
+mod managed;
+#[cfg(target_os = "linux")]
+pub use managed::ManagedHost;
+
 /// Log entry that can be queued for shipping to the control plane.
 /// This is a simplified local type that gets converted to proto at send time.
 #[derive(Debug, Clone)]
@@ -135,6 +140,59 @@ pub struct CommandHandlers {
     pub on_restart: Option<Box<dyn Fn(bool) + Send + Sync>>,
 }
 
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn validate_registration(
+    response: &proto::RegisterAgentResponse,
+    managed: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !response.agent_token.is_empty(),
+        "registration returned no token"
+    );
+    if managed {
+        anyhow::ensure!(
+            response.managed_protocol_version
+                == pingwaf_proto::MANAGED_PROTOCOL_VERSION
+                && response.initial_config.is_none(),
+            "server did not negotiate managed configuration"
+        );
+        crate::managed::parse_uuid(&response.managed_session_id)?;
+    } else {
+        anyhow::ensure!(
+            response.managed_protocol_version == 0
+                && response.managed_session_id.is_empty(),
+            "unexpected managed registration"
+        );
+    }
+    Ok(())
+}
+
+fn is_managed_hint(command: &proto::ServerCommand) -> bool {
+    matches!(
+        command.payload,
+        Some(proto::server_command::Payload::ManagedConfigChanged(_))
+    )
+}
+
+fn is_legacy_config_command(command: &proto::ServerCommand) -> bool {
+    use proto::server_command::Payload;
+    matches!(
+        command.payload,
+        Some(
+            Payload::RuleUpdate(_)
+                | Payload::ConfigReload(_)
+                | Payload::UpdateSite(_)
+        )
+    )
+}
+
 /// The main gRPC client that manages the connection to the control plane server.
 ///
 /// Responsibilities:
@@ -177,6 +235,8 @@ pub struct ControlPlaneClient {
     /// connection loop and the registration path so a successful register
     /// can retire stale backoff immediately.
     retry_delay_ms: AtomicU64,
+    #[cfg(target_os = "linux")]
+    managed: Option<managed::Transport>,
 }
 
 impl ControlPlaneClient {
@@ -250,7 +310,24 @@ impl ControlPlaneClient {
             probe: Arc::new(ProbeBuffer::new()),
             flush_notify: Arc::new(tokio::sync::Notify::new()),
             retry_delay_ms,
+            #[cfg(target_os = "linux")]
+            managed: None,
         }
+    }
+
+    /// Opt in only when the host owns an isolated managed data plane. The
+    /// registration will fail closed against servers without this protocol.
+    #[cfg(target_os = "linux")]
+    pub fn with_managed_host(mut self, host: Arc<dyn ManagedHost>) -> Self {
+        self.managed = Some(managed::Transport::new(host));
+        self
+    }
+
+    fn wants_managed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.managed.is_some();
+        #[cfg(not(target_os = "linux"))]
+        false
     }
 
     /// Check if the client is currently connected.
@@ -365,11 +442,15 @@ impl ControlPlaneClient {
             memory_bytes,
             public_ip: addresses.public_ip,
             private_ip: addresses.private_ip,
-            // Negotiate only once this binary can apply ordered snapshots.
-            managed_protocol_version: 0,
+            managed_protocol_version: if self.wants_managed() {
+                pingwaf_proto::MANAGED_PROTOCOL_VERSION
+            } else {
+                0
+            },
         };
 
         let response = client.register_agent(request).await?.into_inner();
+        validate_registration(&response, self.wants_managed())?;
 
         // Store the agent token
         self.agent_token
@@ -513,6 +594,7 @@ impl ControlPlaneClient {
             }
 
             self.connected.store(false, Ordering::Relaxed);
+            self.agent_token.store(None);
 
             // Wait before reconnecting with exponential backoff. The wait
             // must be interruptible: a shutdown should not sit through the
@@ -547,16 +629,43 @@ impl ControlPlaneClient {
         // row ID as subject, and every stream is authenticated against that.
         // Outbound messages must present exactly this ID, not a local one.
         let agent_id = reg_response.agent_id.clone();
+        let managed_hint = self.wants_managed().then(tokio::sync::Notify::new);
+        // Hold the session guard outside select so *every* exit, including
+        // external cancellation and a sibling task failing, revokes it.
+        #[cfg(target_os = "linux")]
+        let mut managed_session = match &self.managed {
+            Some(transport) => {
+                Some(transport.open(&reg_response.managed_session_id).await?)
+            },
+            None => None,
+        };
+        let managed_fut = async {
+            #[cfg(target_os = "linux")]
+            if let (Some(session), Some(hint)) =
+                (&mut managed_session, &managed_hint)
+            {
+                return session
+                    .pull(channel.clone(), &reg_response.agent_token, hint)
+                    .await;
+            }
+            std::future::pending::<anyhow::Result<()>>().await
+        };
 
         // Run heartbeat and log shipping concurrently
-        let heartbeat_fut = self.run_heartbeat(channel.clone(), &reg_response);
+        let heartbeat_fut = self.run_heartbeat(
+            channel.clone(),
+            &reg_response,
+            managed_hint.as_ref(),
+        );
         let log_shipper_fut = self.run_log_shipper(channel.clone(), &agent_id);
         let cert_shipper_fut =
             self.run_cert_event_shipper(channel.clone(), &agent_id);
-        let metric_shipper_fut = self.run_metric_shipper(channel, &agent_id);
+        let metric_shipper_fut =
+            self.run_metric_shipper(channel.clone(), &agent_id);
 
         // Wait for either to complete (usually means disconnection)
         tokio::select! {
+            result = managed_fut => return result,
             result = heartbeat_fut => {
                 if let Err(e) = result {
                     error!(error = %e, "Heartbeat stream ended");
@@ -701,6 +810,7 @@ impl ControlPlaneClient {
         &self,
         channel: Channel,
         reg_response: &proto::RegisterAgentResponse,
+        managed_hint: Option<&tokio::sync::Notify>,
     ) -> anyhow::Result<()> {
         let mut client = ProtoClient::new(channel);
 
@@ -723,16 +833,13 @@ impl ControlPlaneClient {
         // both sides. The first interval tick fires immediately, sending the
         // opening message and unblocking the server.
         let agent_id = reg_response.agent_id.clone();
-        let agent_token = self
-            .agent_token
-            .load_full()
-            .map(|t| (*t).clone())
-            .unwrap_or_default();
+        let agent_token = reg_response.agent_token.clone();
         let metrics = Arc::clone(&self.metrics);
         let rule_cache = Arc::clone(&self.rule_cache);
         let shutdown = Arc::clone(&self.shutdown_signal);
         let probe = Arc::clone(&self.probe);
 
+        let managed = managed_hint.is_some();
         let sender_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_interval);
             interval.set_missed_tick_behavior(
@@ -762,7 +869,7 @@ impl ControlPlaneClient {
                     .map(to_proto_blocked_ip)
                     .collect();
                 let config_apply_error = rule_cache.config_apply_error();
-                let hb = proto::AgentHeartbeat {
+                let mut hb = proto::AgentHeartbeat {
                     agent_id: agent_id.clone(),
                     agent_token: agent_token.clone(),
                     timestamp: Some(prost_types::Timestamp {
@@ -823,6 +930,17 @@ impl ControlPlaneClient {
                     process_rss_bytes: system_metrics.process_rss_bytes,
                     ingress_listeners: rule_cache.ingress_listeners(),
                 };
+                if managed {
+                    hb.config_hash.clear();
+                    hb.config_apply_error.clear();
+                    hb.last_config_sync_at = None;
+                    hb.last_policy_sync_at = None;
+                    hb.site_statuses.clear();
+                    hb.upstream_health.clear();
+                    hb.cache_persist_healthy = None;
+                    hb.cache_status_reason.clear();
+                    hb.health = heartbeat_health("") as i32;
+                }
 
                 if hb_tx.send(hb).await.is_err() {
                     debug!("Heartbeat channel closed");
@@ -833,13 +951,8 @@ impl ControlPlaneClient {
 
         // Start the bidirectional stream; on failure stop the sender so it
         // does not buffer heartbeats no one will ever read.
-        let response = match client.heartbeat(outbound).await {
-            Ok(response) => response,
-            Err(e) => {
-                sender_task.abort();
-                return Err(e.into());
-            },
-        };
+        let _stop_sender = AbortOnDrop(sender_task.abort_handle());
+        let response = client.heartbeat(outbound).await?;
         let mut inbound = response.into_inner();
 
         // Process incoming server commands
@@ -856,6 +969,15 @@ impl ControlPlaneClient {
                 msg = inbound.message() => {
                     match msg {
                         Ok(Some(command)) => {
+                            if let Some(hint) = managed_hint {
+                                if is_managed_hint(&command) {
+                                    hint.notify_one();
+                                    continue;
+                                }
+                                if is_legacy_config_command(&command) {
+                                    continue;
+                                }
+                            }
                             Self::handle_server_command(
                                 &command,
                                 &rule_cache,
@@ -880,7 +1002,6 @@ impl ControlPlaneClient {
             }
         }
 
-        sender_task.abort();
         Ok(())
     }
 
@@ -2652,6 +2773,26 @@ mod tests {
             request.metadata().get("x-agent-token").unwrap(),
             "abc.def.ghi"
         );
+    }
+
+    #[test]
+    fn opted_in_agent_does_not_fall_back_to_unordered_config() {
+        let mut reply = proto::RegisterAgentResponse {
+            agent_token: "test-token".into(),
+            initial_config: Some(proto::SiteConfig::default()),
+            ..Default::default()
+        };
+        assert!(validate_registration(&reply, false).is_ok());
+        assert!(validate_registration(&reply, true).is_err());
+        reply.managed_protocol_version =
+            pingwaf_proto::MANAGED_PROTOCOL_VERSION;
+        reply.managed_session_id = uuid::Uuid::new_v4().to_string();
+        assert!(validate_registration(&reply, true).is_err());
+        reply.initial_config = None;
+        assert!(validate_registration(&reply, true).is_ok());
+        assert!(validate_registration(&reply, false).is_err());
+        reply.managed_session_id = uuid::Uuid::nil().to_string();
+        assert!(validate_registration(&reply, true).is_err());
     }
 
     #[test]
