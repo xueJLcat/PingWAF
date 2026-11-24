@@ -34,7 +34,7 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
   const valid = edit && /^[a-zA-Z0-9_-]{1,64}$/.test(edit.id) &&
     (edit.action==='remove' || edit.path.startsWith('/')) &&
     (edit.action!=='add' || !Object.hasOwn(data?.paths??{},edit.id))
-  return <Dialog open onClose={close} size="lg" title="静态目录" description={name??node}>
+  return <Dialog open onClose={close} size="lg" className="[overflow-wrap:anywhere]" title="静态目录" description={name??node}>
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <Button onClick={()=>void query.refetch()} loading={query.isFetching}>刷新节点清单</Button>
@@ -42,7 +42,7 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
       </div>
       {query.error && <p role="alert">{query.error.message}</p>}
       {data && !data.revision && <p role="alert">{data.last_error || '节点尚未返回可用清单'}</p>}
-      {data && <><p className="text-sm text-fg-subtle">可登记的父目录 <code>{data.public_root}</code></p>
+      {data && <><p className="text-sm text-fg-subtle">可登记的父目录 <code className="break-all">{data.public_root}</code></p>
         {Object.keys(data.paths).length===0 && <p>暂无目录。登记后可在静态站点的目录列表中选择。</p>}
         <ul className="divide-y divide-border">{Object.entries(data.paths).sort(([a],[b])=>a.localeCompare(b)).map(([id,path])=>
           <li key={id} className="flex flex-wrap items-center justify-between gap-2 py-2">
