@@ -365,6 +365,8 @@ impl ControlPlaneClient {
             memory_bytes,
             public_ip: addresses.public_ip,
             private_ip: addresses.private_ip,
+            // Negotiate only once this binary can apply ordered snapshots.
+            managed_protocol_version: 0,
         };
 
         let response = client.register_agent(request).await?.into_inner();

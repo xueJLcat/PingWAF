@@ -102,11 +102,7 @@ pub async fn load(
         return Ok(row);
     }
 
-    let insert = origin_settings::ActiveModel {
-        id: Set(SETTINGS_ID),
-        verify_cert: Set(false),
-        updated_at: Set(Utc::now()),
-    };
+    let insert: origin_settings::ActiveModel = default_row().into();
     use sea_orm::sea_query::OnConflict;
     let ignore_conflict = OnConflict::column(origin_settings::Column::Id)
         .do_nothing()
@@ -126,6 +122,23 @@ pub async fn load(
         .ok_or_else(|| {
             ApiError::Internal("origin settings row vanished".to_string())
         })
+}
+
+fn default_row() -> origin_settings::Model {
+    origin_settings::Model {
+        id: SETTINGS_ID,
+        verify_cert: false,
+        updated_at: Utc::now(),
+    }
+}
+
+pub(crate) async fn read_or_default(
+    db: &impl sea_orm::ConnectionTrait,
+) -> Result<origin_settings::Model, sea_orm::DbErr> {
+    Ok(origin_settings::Entity::find_by_id(SETTINGS_ID)
+        .one(db)
+        .await?
+        .unwrap_or_else(default_row))
 }
 
 #[cfg(test)]

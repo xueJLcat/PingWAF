@@ -281,6 +281,7 @@ async fn site_ingress_migration_postgres() {
         82
     );
 
+    Migrator::down(&db, Some(1)).await.unwrap();
     assert!(Migrator::down(&db, Some(1))
         .await
         .unwrap_err()

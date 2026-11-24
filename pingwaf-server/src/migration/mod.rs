@@ -109,6 +109,7 @@ mod m20240101_000101_agent_site_assignments;
 mod m20240101_000102_access_log_asn;
 mod m20240101_000103_challenge_adaptive_pow;
 mod m20240101_000104_site_ingress;
+mod m20240101_000105_managed_config_order;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -235,6 +236,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000102_access_log_asn::Migration),
             Box::new(m20240101_000103_challenge_adaptive_pow::Migration),
             Box::new(m20240101_000104_site_ingress::Migration),
+            Box::new(m20240101_000105_managed_config_order::Migration),
         ]
     }
 }
@@ -246,7 +248,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 104);
+        assert_eq!(migrations.len(), 105);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

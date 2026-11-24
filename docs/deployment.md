@@ -506,6 +506,9 @@ TCP bind only: valid unmatched HTTP requests return `404`, HTTPS connections
 are closed without a handshake, and neither entry can be assigned to a site.
 The legacy agent protocol delivers default-ingress sites only. A custom TCP
 bind report does not grant the agent permission to serve custom-ingress sites.
+The control plane has an opt-in ordered snapshot RPC for protocol testing;
+the bundled agent does not yet consume it. Migration `000105` adds internal
+ordering state but does not allow custom assignments or traffic.
 
 ## Deployment Modes
 

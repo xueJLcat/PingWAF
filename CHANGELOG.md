@@ -25,6 +25,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Added
 
+- **Managed snapshot protocol groundwork.** Migration `000105` stores a
+  deployment epoch and per-agent generation. A negotiated, authenticated
+  session can request a complete, ordered snapshot; replaced sessions cannot
+  request another. This does not enable custom site assignment or forwarding.
 - **Experimental ingress listener inventory.** `PINGWAF_INGRESS_LISTENERS`
   lets a data plane pre-bind TCP sockets and report their bind state on the
   current heartbeat stream, even with no configured sites. It defaults to

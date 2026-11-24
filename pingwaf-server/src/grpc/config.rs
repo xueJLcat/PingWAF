@@ -24,8 +24,8 @@ use pingwaf_proto::control_plane::{
 use prost::Message;
 use prost_types::Timestamp;
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use uuid::Uuid;
 
@@ -149,7 +149,7 @@ fn json_to_string_map(
 /// Loads the WAF rule rows of a site, ordered by priority then name so that the
 /// fingerprint does not change between otherwise identical configurations.
 async fn load_rules(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<rule::Model>, sea_orm::DbErr> {
     rule::Entity::find()
@@ -161,7 +161,7 @@ async fn load_rules(
 }
 
 async fn load_rule_groups(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<rule_groups::Model>, sea_orm::DbErr> {
     rule_groups::Entity::find()
@@ -172,7 +172,7 @@ async fn load_rule_groups(
 }
 
 async fn load_rate_limits(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<rate_limit_rules::Model>, sea_orm::DbErr> {
     rate_limit_rules::Entity::find()
@@ -183,7 +183,7 @@ async fn load_rate_limits(
 }
 
 async fn load_cache_rules(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<cache_rules::Model>, sea_orm::DbErr> {
     cache_rules::Entity::find()
@@ -198,7 +198,7 @@ async fn load_cache_rules(
 }
 
 async fn load_upstreams(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<site_upstreams::Model>, sea_orm::DbErr> {
     site_upstreams::Entity::find()
@@ -209,7 +209,7 @@ async fn load_upstreams(
 }
 
 async fn load_pools(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<site_upstream_pools::Model>, sea_orm::DbErr> {
     site_upstream_pools::Entity::find()
@@ -221,7 +221,7 @@ async fn load_pools(
 }
 
 async fn load_routes(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<site_routes::Model>, sea_orm::DbErr> {
     site_routes::Entity::find()
@@ -235,7 +235,7 @@ async fn load_routes(
 /// Enabled path exceptions for a site, in a stable order so the pushed bundle
 /// hash only changes when the rules do.
 async fn load_path_exceptions(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<path_exceptions::Model>, sea_orm::DbErr> {
     path_exceptions::Entity::find()
@@ -275,7 +275,7 @@ fn path_exceptions_to_proto(
 }
 
 async fn load_ssl(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<site_ssl::Model>, sea_orm::DbErr> {
     site_ssl::Entity::find()
@@ -304,7 +304,7 @@ impl SiteCertificates {
 }
 
 async fn load_certificates(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<SiteCertificates, sea_orm::DbErr> {
     // Own certificates plus the ones shared through `site_certificate_links`;
@@ -346,7 +346,7 @@ async fn load_certificates(
 }
 
 async fn load_ip_access_rules(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<ip_access_rules::Model>, sea_orm::DbErr> {
     ip_access_rules::Entity::find()
@@ -360,7 +360,7 @@ async fn load_ip_access_rules(
 /// Loads enabled IP groups that apply to a site: all global groups plus any
 /// non-global group explicitly linked to the site via `ip_group_sites`.
 async fn load_ip_groups(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<ip_groups::Model>, sea_orm::DbErr> {
     let linked_ids = ip_group_sites::Entity::find()
@@ -386,7 +386,7 @@ async fn load_ip_groups(
 /// Group-backed rules expand against these rows at bundle time, so a group
 /// update reaches agents without touching the rules themselves.
 async fn load_referenced_groups(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     rules: &[ip_access_rules::Model],
 ) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
     let ids: Vec<Uuid> = rules.iter().filter_map(|r| r.group_id).collect();
@@ -398,7 +398,7 @@ async fn load_referenced_groups(
 /// pushed config — the API refuses such writes, so this only happens after an
 /// out-of-band change.
 async fn load_route_groups(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     routes: &[site_routes::Model],
 ) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
     let ids: Vec<Uuid> = routes.iter().filter_map(|r| r.ip_group_id).collect();
@@ -406,7 +406,7 @@ async fn load_route_groups(
 }
 
 async fn load_enabled_groups(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     ids: Vec<Uuid>,
 ) -> Result<HashMap<Uuid, ip_groups::Model>, sea_orm::DbErr> {
     if ids.is_empty() {
@@ -421,7 +421,7 @@ async fn load_enabled_groups(
 }
 
 async fn load_geo_rules(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<geo_rules::Model>, sea_orm::DbErr> {
     geo_rules::Entity::find()
@@ -431,7 +431,7 @@ async fn load_geo_rules(
 }
 
 async fn load_challenge_settings(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<challenge_settings::Model>, sea_orm::DbErr> {
     challenge_settings::Entity::find()
@@ -441,7 +441,7 @@ async fn load_challenge_settings(
 }
 
 async fn load_waf_settings(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<waf_settings::Model>, sea_orm::DbErr> {
     waf_settings::Entity::find()
@@ -451,7 +451,7 @@ async fn load_waf_settings(
 }
 
 async fn load_basic_auth(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<site_basic_auth::Model>, sea_orm::DbErr> {
     site_basic_auth::Entity::find()
@@ -461,7 +461,7 @@ async fn load_basic_auth(
 }
 
 async fn load_oidc(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<site_oidc::Model>, sea_orm::DbErr> {
     site_oidc::Entity::find()
@@ -476,7 +476,7 @@ async fn load_oidc(
 /// and this runs once per site per config push, so the second query is
 /// cheaper than the machinery a join would add to the entity.
 async fn load_oidc_with_provider(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<
     (Option<site_oidc::Model>, Option<oidc_provider::Model>),
@@ -495,7 +495,7 @@ async fn load_oidc_with_provider(
 }
 
 async fn load_rewrite_rules(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Vec<rewrite_rules::Model>, sea_orm::DbErr> {
     rewrite_rules::Entity::find()
@@ -512,7 +512,7 @@ async fn load_rewrite_rules(
 /// list; the data plane picks the template matching the status code it is about
 /// to return.
 async fn load_error_pages(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
 ) -> Result<Vec<error_pages::Model>, sea_orm::DbErr> {
     error_pages::Entity::find()
         .filter(error_pages::Column::Enabled.eq(true))
@@ -872,7 +872,7 @@ pub struct MtlsPush {
 /// Only revoked certificates are pushed: the edge compares the fingerprint of
 /// whatever the client presents against this list, so it stays small.
 async fn load_mtls(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<MtlsPush, sea_orm::DbErr> {
     let revoked = mtls_client_certificate::Entity::find()
@@ -1553,7 +1553,7 @@ fn oidc_to_proto(
 }
 
 async fn load_bot_protection(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_id: Uuid,
 ) -> Result<Option<bot_protection::Model>, sea_orm::DbErr> {
     bot_protection::Entity::find()
@@ -1566,7 +1566,7 @@ async fn load_bot_protection(
 /// ranges the agent should treat as verified bot networks. Only enabled rows
 /// with IP verification turned on produce ranges.
 async fn load_verified_bot_ranges(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     row: Option<&bot_protection::Model>,
 ) -> Result<Vec<String>, sea_orm::DbErr> {
     let Some(gid) = row
@@ -1697,6 +1697,26 @@ pub async fn build_rule_bundle(
     db: &DatabaseConnection,
     site_row: &site::Model,
 ) -> Result<RuleBundle, sea_orm::DbErr> {
+    let settings = BundleSettings {
+        cache: crate::api::cache_settings::load(db).await.ok(),
+        origin: crate::api::origin_settings::load(db).await.ok(),
+        log: crate::api::log_retention::load(db).await.ok(),
+    };
+    build_rule_bundle_with_settings(db, site_row, &settings, None).await
+}
+
+struct BundleSettings {
+    cache: Option<crate::models::cache_settings::Model>,
+    origin: Option<crate::models::origin_settings::Model>,
+    log: Option<crate::models::log_retention::Model>,
+}
+
+async fn build_rule_bundle_with_settings(
+    db: &impl ConnectionTrait,
+    site_row: &site::Model,
+    settings: &BundleSettings,
+    scoped_policies: Option<&[SitePolicy]>,
+) -> Result<RuleBundle, DbErr> {
     let rules_rows = load_rules(db, site_row.id).await?;
     let groups = load_rule_groups(db, site_row.id).await?;
     let rate_limits = load_rate_limits(db, site_row.id).await?;
@@ -1735,29 +1755,28 @@ pub async fn build_rule_bundle(
     // Every bundle carries the complete domain → failover policy registry so
     // the agent can resolve a site's disconnected behaviour even for hosts
     // whose rule bundle was never synced.
-    let site_policies = load_site_policies(db).await?;
+    let site_policies = match scoped_policies {
+        Some(policies) => policies.to_vec(),
+        None => load_site_policies(db).await?,
+    };
     // Global cache ceiling + site-level cache limits; both optional so an
     // old row shape (or a read failure short of an error) degrades to the
     // agent-side defaults.
-    let cache_settings_row = crate::api::cache_settings::load(db).await.ok();
-    let global_cache =
-        cache_settings_row.as_ref().map(|row| GlobalCacheSettings {
-            max_file_size_mb: Some(row.max_file_size_mb.max(0) as u32),
-            max_space_mb: Some(row.max_space_mb.max(0) as u32),
-            master_enabled: Some(row.master_enabled),
-            default_edge_ttl_seconds: Some(
-                row.default_edge_ttl_seconds.max(0) as u32
-            ),
-        });
+    let global_cache = settings.cache.as_ref().map(|row| GlobalCacheSettings {
+        max_file_size_mb: Some(row.max_file_size_mb.max(0) as u32),
+        max_space_mb: Some(row.max_space_mb.max(0) as u32),
+        master_enabled: Some(row.master_enabled),
+        default_edge_ttl_seconds: Some(
+            row.default_edge_ttl_seconds.max(0) as u32
+        ),
+    });
     let site_cache_settings = site_cache_settings_to_proto(site_row);
     // Deployment-wide origin certificate check. A read failure leaves the
     // field unset, which the agent reads as "keep the historical lenient
     // behaviour" — never as "verify strictly", because that would 502 every
     // HTTPS origin with a certificate outside the system trust store.
-    let origin_verify_cert = crate::api::origin_settings::load(db)
-        .await
-        .ok()
-        .map(|row| row.verify_cert);
+    let origin_verify_cert =
+        settings.origin.as_ref().map(|row| row.verify_cert);
     // A `$host` SNI resolves at request time from the client's Host header,
     // so an attacker can send any Host and have the pool dial an origin with
     // that name in SNI. Without certificate verification that name is never
@@ -1776,14 +1795,10 @@ pub async fn build_rule_bundle(
     // Deployment-wide access-log filtering. A read failure leaves the field
     // unset, which the agent reads as "never skip logging" (fail-open), the
     // same degradation an old server without the field produces.
-    let log_settings =
-        crate::api::log_retention::load(db)
-            .await
-            .ok()
-            .map(|row| LogSettings {
-                skip_static_access_logs: Some(row.skip_static_access_logs),
-                static_suffixes: row.static_suffixes,
-            });
+    let log_settings = settings.log.as_ref().map(|row| LogSettings {
+        skip_static_access_logs: Some(row.skip_static_access_logs),
+        static_suffixes: row.static_suffixes.clone(),
+    });
 
     // Groups control which custom rules are delivered. They are not a second
     // master switch: disabling the last group must not turn off the managed
@@ -1888,7 +1903,7 @@ pub async fn build_rule_bundle(
 /// of `off` sends empty bodies, which the data plane reads as "do not serve
 /// the file".
 async fn load_ai_crawl(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     site_row: &site::Model,
     routes: &[site_routes::Model],
 ) -> Result<Option<AiCrawlConfig>, DbErr> {
@@ -2037,21 +2052,22 @@ fn failover_mode_of(policy: &str) -> FailoverMode {
 /// Builds the legacy domain → failover-policy registry for default ingress.
 /// One lightweight query; the result rides in every `RuleBundle`.
 async fn load_site_policies(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
 ) -> Result<Vec<SitePolicy>, sea_orm::DbErr> {
     let rows = site::Entity::find()
         .filter(site::Column::IngressPort.is_null())
         .order_by_asc(site::Column::Domain)
         .all(db)
         .await?;
-    Ok(rows
-        .iter()
-        .map(|row| SitePolicy {
-            domain: row.domain.clone(),
-            alternate_domains: row.alternate_domains.clone(),
-            mode: failover_mode_of(&row.failover_policy) as i32,
-        })
-        .collect())
+    Ok(rows.iter().map(site_policy).collect())
+}
+
+fn site_policy(row: &site::Model) -> SitePolicy {
+    SitePolicy {
+        domain: row.domain.clone(),
+        alternate_domains: row.alternate_domains.clone(),
+        mode: failover_mode_of(&row.failover_policy) as i32,
+    }
 }
 
 /// Merges a site's hand-entered trusted-proxy ranges with the ranges of the
@@ -2120,26 +2136,7 @@ async fn assemble_site_config(
     }
     let rows = query.order_by_asc(site::Column::Id).all(db).await?;
 
-    // Resolve every trusted-proxy IP group the sites reference in one query;
-    // disabled groups are skipped so they stop widening the trust scope.
-    let mut group_ids: Vec<Uuid> = rows
-        .iter()
-        .flat_map(|row| row.trusted_proxy_group_ids.iter().copied())
-        .collect();
-    group_ids.sort();
-    group_ids.dedup();
-    let group_ranges: HashMap<Uuid, Vec<String>> = if group_ids.is_empty() {
-        HashMap::new()
-    } else {
-        ip_groups::Entity::find()
-            .filter(ip_groups::Column::Enabled.eq(true))
-            .filter(ip_groups::Column::Id.is_in(group_ids))
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|group| (group.id, group.ip_ranges))
-            .collect()
-    };
+    let group_ranges = load_trusted_proxy_group_ranges(db, &rows).await?;
 
     let mut sites = Vec::with_capacity(rows.len());
     let mut updated_at = Utc.timestamp_opt(0, 0).unwrap();
@@ -2148,26 +2145,7 @@ async fn assemble_site_config(
         if row.updated_at > updated_at {
             updated_at = row.updated_at;
         }
-        sites.push(Site {
-            id: row.id.to_string(),
-            name: row.name.clone(),
-            domain: row.domain.clone(),
-            alternate_domains: row.alternate_domains.clone(),
-            status: site_status_proto(&row.status),
-            rules: Some(bundle),
-            trust_proxy_headers: row.trust_proxy_headers,
-            trusted_header: row.trusted_header.clone(),
-            trust_last_hop: row.trust_last_hop,
-            downstream_timeout_secs:
-                crate::defaults::normalize_site_downstream_timeout_secs(
-                    row.downstream_timeout_secs,
-                ),
-            trusted_proxy_ranges: merge_trusted_proxy_ranges(
-                &row.trusted_proxy_ranges,
-                &row.trusted_proxy_group_ids,
-                &group_ranges,
-            ),
-        });
+        sites.push(site_to_proto(row, bundle, &group_ranges));
     }
 
     let mut config = SiteConfig {
@@ -2194,6 +2172,112 @@ async fn assemble_site_config(
         }
     }
     Ok(config)
+}
+
+async fn load_trusted_proxy_group_ranges(
+    db: &impl ConnectionTrait,
+    rows: &[site::Model],
+) -> Result<HashMap<Uuid, Vec<String>>, DbErr> {
+    let ids: HashSet<Uuid> = rows
+        .iter()
+        .flat_map(|row| row.trusted_proxy_group_ids.iter().copied())
+        .collect();
+    Ok(load_enabled_groups(db, ids.into_iter().collect())
+        .await?
+        .into_iter()
+        .map(|(id, group)| (id, group.ip_ranges))
+        .collect())
+}
+
+fn site_to_proto(
+    row: &site::Model,
+    bundle: RuleBundle,
+    group_ranges: &HashMap<Uuid, Vec<String>>,
+) -> Site {
+    Site {
+        id: row.id.to_string(),
+        name: row.name.clone(),
+        domain: row.domain.clone(),
+        alternate_domains: row.alternate_domains.clone(),
+        status: site_status_proto(&row.status),
+        rules: Some(bundle),
+        trust_proxy_headers: row.trust_proxy_headers,
+        trusted_header: row.trusted_header.clone(),
+        trust_last_hop: row.trust_last_hop,
+        downstream_timeout_secs:
+            crate::defaults::normalize_site_downstream_timeout_secs(
+                row.downstream_timeout_secs,
+            ),
+        trusted_proxy_ranges: merge_trusted_proxy_ranges(
+            &row.trusted_proxy_ranges,
+            &row.trusted_proxy_group_ids,
+            group_ranges,
+        ),
+    }
+}
+
+/// Internally assemble a complete configuration from the caller's consistent
+/// view. Storage errors propagate; missing settings use the usual defaults
+/// without writing to the database. Callers supply only authorized rows.
+pub(super) async fn assemble_managed_config(
+    db: &sea_orm::DatabaseTransaction,
+    rows: &[site::Model],
+) -> Result<pingwaf_proto::ManagedSiteConfig, DbErr> {
+    use pingwaf_proto::{
+        IngressProtocol, ManagedSite, ManagedSiteConfig, SiteIngress,
+    };
+
+    if rows.is_empty() {
+        return Ok(ManagedSiteConfig::default());
+    }
+    let settings = BundleSettings {
+        cache: Some(crate::api::cache_settings::read_or_default(db).await?),
+        origin: Some(crate::api::origin_settings::read_or_default(db).await?),
+        log: Some(crate::api::log_retention::read_or_default(db).await?),
+    };
+    let policies: Vec<_> = rows
+        .iter()
+        .filter(|row| row.ingress_port.is_none())
+        .map(site_policy)
+        .collect();
+    let ranges = load_trusted_proxy_group_ranges(db, rows).await?;
+    let mut sites = Vec::with_capacity(rows.len());
+    for row in rows {
+        let ingress =
+            match (row.ingress_port, row.ingress_protocol.as_deref()) {
+                (None, None) => None,
+                (
+                    Some(port @ 1..=65535),
+                    Some(protocol @ ("http" | "https")),
+                ) if !matches!(port, 80 | 443) => Some(SiteIngress {
+                    port: port as u32,
+                    protocol: if protocol == "http" {
+                        IngressProtocol::Http as i32
+                    } else {
+                        IngressProtocol::Https as i32
+                    },
+                }),
+                _ => {
+                    return Err(DbErr::Custom(format!(
+                        "invalid ingress for site {}",
+                        row.id
+                    )))
+                },
+            };
+        let bundle = build_rule_bundle_with_settings(
+            db,
+            row,
+            &settings,
+            Some(&policies),
+        )
+        .await?;
+        sites.push(ManagedSite {
+            site: Some(site_to_proto(row, bundle, &ranges)),
+            ingress,
+            failover_mode: failover_mode_of(&row.failover_policy) as i32,
+        });
+    }
+    Ok(ManagedSiteConfig { sites })
 }
 
 #[cfg(test)]

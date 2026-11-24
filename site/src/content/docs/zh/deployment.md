@@ -26,6 +26,7 @@ minutes: 10
 `PINGWAF_INGRESS_LISTENERS` 仅用于隔离开发环境中的 TCP 绑定诊断，不用于部署自定义站点，默认不设置。Agent 或 all-in-one 可预绑定 `http@127.0.0.1:81,https@[::1]:8443` 这类入口；绑定状态与站点状态独立上报。HTTP 入口不回源，HTTPS 入口不进行 TLS 握手。
 
 旧版 Agent 协议只下发默认入口站点。TCP 绑定上报不代表节点获准转发自定义入口流量。
+迁移 `000105` 新增实验性受管快照 RPC 的内部排序状态。随附 Agent 尚未使用此 RPC，自定义入口的站点分派和转发仍未开启。
 
 ## Docker Compose
 

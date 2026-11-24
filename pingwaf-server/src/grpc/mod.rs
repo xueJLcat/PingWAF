@@ -11,6 +11,7 @@
 pub mod cache_status;
 pub mod config;
 pub mod control_plane;
+mod managed;
 pub mod registry;
 pub mod visitor_auth;
 
@@ -613,4 +614,7 @@ pub(crate) async fn check_legacy_ingress_delivery(
         .unwrap()
         .sites
         .is_empty());
+
+    managed::check_postgres(db, &service, raw_key, key_id, default, custom)
+        .await;
 }

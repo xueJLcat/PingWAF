@@ -46,9 +46,8 @@ pub struct Claims {
     /// as 0 — the pre-revocation epoch.
     #[serde(default)]
     pub ver: i64,
-    /// Unique id of a refresh token, used to make it single-use. Absent on
-    /// access/agent tokens and on refresh tokens minted before rotation
-    /// existed (those keep working, for compatibility).
+    /// Unique ID of a dashboard refresh token or a negotiated agent session.
+    /// Absent on dashboard access tokens and legacy agent tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
 }
@@ -187,16 +186,18 @@ pub fn create_agent_token(
     agent_id: Uuid,
     secret: &str,
     expiration_hours: i64,
+    session_id: Option<Uuid>,
 ) -> Result<String, JwtError> {
-    create_token_with_type(
-        agent_id,
-        "",
-        crate::auth::jwt::AGENT_ROLE,
+    let mut claims = build_claims(
+        agent_id.to_string(),
+        String::new(),
+        AGENT_ROLE.to_string(),
         TOKEN_TYPE_AGENT,
         0,
-        secret,
         expiration_hours,
-    )
+    );
+    claims.jti = session_id.map(|id| id.to_string());
+    sign_claims(&claims, secret)
 }
 
 fn create_token_with_type(
@@ -220,9 +221,13 @@ fn create_token_with_type(
         // Single-use marker: the refresh handler remembers it until expiry.
         claims.jti = Some(Uuid::new_v4().to_string());
     }
+    sign_claims(&claims, secret)
+}
+
+fn sign_claims(claims: &Claims, secret: &str) -> Result<String, JwtError> {
     encode(
         &Header::new(Algorithm::HS256),
-        &claims,
+        claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|err| JwtError::Signing(err.to_string()))
@@ -323,7 +328,8 @@ mod tests {
 
     #[test]
     fn agent_tokens_are_segregated() {
-        let agent = create_agent_token(Uuid::new_v4(), SECRET, 1).unwrap();
+        let agent =
+            create_agent_token(Uuid::new_v4(), SECRET, 1, None).unwrap();
         assert!(verify_agent_token(&agent, SECRET).is_ok());
         assert!(verify_user_token(&agent, SECRET).is_err());
 

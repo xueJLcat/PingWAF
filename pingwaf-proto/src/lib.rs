@@ -10,3 +10,5 @@ pub use control_plane::*;
 
 /// Per-process socket budget and upper bound for a heartbeat's inventory.
 pub const MAX_INGRESS_LISTENERS: usize = 32;
+
+pub const MANAGED_PROTOCOL_VERSION: u32 = 1;

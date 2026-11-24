@@ -185,14 +185,7 @@ pub async fn load(
         return Ok(row);
     }
 
-    let insert = cache_settings::ActiveModel {
-        id: Set(SETTINGS_ID),
-        max_file_size_mb: Set(16),
-        max_space_mb: Set(10240),
-        master_enabled: Set(true),
-        default_edge_ttl_seconds: Set(0),
-        updated_at: Set(Utc::now()),
-    };
+    let insert: cache_settings::ActiveModel = default_row().into();
     use sea_orm::sea_query::OnConflict;
     let ignore_conflict = OnConflict::column(cache_settings::Column::Id)
         .do_nothing()
@@ -212,6 +205,26 @@ pub async fn load(
         .ok_or_else(|| {
             ApiError::Internal("cache settings row vanished".to_string())
         })
+}
+
+fn default_row() -> cache_settings::Model {
+    cache_settings::Model {
+        id: SETTINGS_ID,
+        max_file_size_mb: 16,
+        max_space_mb: 10240,
+        master_enabled: true,
+        default_edge_ttl_seconds: 0,
+        updated_at: Utc::now(),
+    }
+}
+
+pub(crate) async fn read_or_default(
+    db: &impl sea_orm::ConnectionTrait,
+) -> Result<cache_settings::Model, sea_orm::DbErr> {
+    Ok(cache_settings::Entity::find_by_id(SETTINGS_ID)
+        .one(db)
+        .await?
+        .unwrap_or_else(default_row))
 }
 
 #[cfg(test)]

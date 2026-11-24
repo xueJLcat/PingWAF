@@ -27,6 +27,9 @@ service ControlPlane {
 
   // Configuration sync (agent pulls full site config)
   rpc GetSiteConfig(GetSiteConfigRequest) returns (SiteConfig);
+  // Opt-in, full snapshots for the current registered session. This RPC does
+  // not authorize forwarding; a snapshot is not an ingress lease.
+  rpc GetManagedSnapshot(GetManagedSnapshotRequest) returns (ManagedSnapshot);
 
   // Visitor authentication.
   //
@@ -103,6 +106,7 @@ message RegisterAgentRequest {
   string public_ip = 8;
   // First non-virtual LAN address (docker/veth/bridge and loopback excluded).
   string private_ip = 9;
+  uint32 managed_protocol_version = 10; // 0 = legacy
 }
 
 message RegisterAgentResponse {
@@ -110,6 +114,7 @@ message RegisterAgentResponse {
   string agent_token = 2;  // JWT for subsequent communication
   int64 heartbeat_interval_seconds = 3;
   SiteConfig initial_config = 4;
+  uint32 managed_protocol_version = 5; // 0 = not negotiated
 }
 
 message AgentHeartbeat {
@@ -1111,6 +1116,37 @@ message SiteConfig {
   repeated Site sites = 1;
   google.protobuf.Timestamp updated_at = 2;
   string config_hash = 3;
+}
+
+// Never sent in a legacy SiteConfig or RuleBundle. The presence of ingress
+// distinguishes a custom listener from the default listeners.
+message ManagedSite {
+  Site site = 1;
+  SiteIngress ingress = 2;
+  FailoverMode failover_mode = 3;
+}
+
+message SiteIngress {
+  uint32 port = 1;
+  IngressProtocol protocol = 2;
+}
+
+message ManagedSiteConfig {
+  repeated ManagedSite sites = 1;
+}
+
+message GetManagedSnapshotRequest {
+  string agent_token = 1;
+}
+
+// Hash the bytes exactly as transmitted, not a re-encoded protobuf with maps.
+// Compare generations only within an authority epoch.
+message ManagedSnapshot {
+  string authority_epoch = 1;
+  int64 generation = 2;
+  string config_hash = 3;
+  bytes config = 4; // Serialized ManagedSiteConfig
+  string session_id = 5; // Registration session, carried in the agent JWT
 }
 
 message Site {

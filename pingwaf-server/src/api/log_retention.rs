@@ -146,19 +146,7 @@ pub async fn load(
         return Ok(row);
     }
 
-    let insert = log_retention::ActiveModel {
-        id: Set(SETTINGS_ID),
-        access_log_retention_days: Set(log_retention::DEFAULT_RETENTION_DAYS),
-        security_event_retention_days: Set(
-            log_retention::DEFAULT_RETENTION_DAYS,
-        ),
-        skip_static_access_logs: Set(true),
-        static_suffixes: Set(log_retention::DEFAULT_STATIC_SUFFIXES
-            .iter()
-            .map(ToString::to_string)
-            .collect()),
-        updated_at: Set(Utc::now()),
-    };
+    let insert: log_retention::ActiveModel = default_row().into();
     let ignore_conflict = OnConflict::column(log_retention::Column::Id)
         .do_nothing()
         .to_owned();
@@ -179,4 +167,27 @@ pub async fn load(
                 "log retention settings row vanished".to_string(),
             )
         })
+}
+
+fn default_row() -> log_retention::Model {
+    log_retention::Model {
+        id: SETTINGS_ID,
+        access_log_retention_days: log_retention::DEFAULT_RETENTION_DAYS,
+        security_event_retention_days: log_retention::DEFAULT_RETENTION_DAYS,
+        skip_static_access_logs: true,
+        static_suffixes: log_retention::DEFAULT_STATIC_SUFFIXES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        updated_at: Utc::now(),
+    }
+}
+
+pub(crate) async fn read_or_default(
+    db: &impl sea_orm::ConnectionTrait,
+) -> Result<log_retention::Model, DbErr> {
+    Ok(log_retention::Entity::find_by_id(SETTINGS_ID)
+        .one(db)
+        .await?
+        .unwrap_or_else(default_row))
 }

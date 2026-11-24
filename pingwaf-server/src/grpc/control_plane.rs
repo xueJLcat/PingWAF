@@ -14,8 +14,9 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
-    BlockedIp, CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample,
-    LogAck, LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
+    BlockedIp, CertEventAck, CertEventEntry, GetManagedSnapshotRequest,
+    GetSiteConfigRequest, HostSample, LogAck, LogEntry, ManagedSnapshot,
+    Metric, MetricAck, MetricBatch, RegisterAgentRequest,
     RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
     SyncRulesRequest, UpstreamHealth, VisitorChallengeRequest,
     VisitorChallengeResponse, VisitorChangePasswordRequest,
@@ -30,7 +31,7 @@ use pingwaf_proto::control_plane::{
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    QueryFilter, QuerySelect, Set, UpdateMany,
+    QueryFilter, QuerySelect, Set, TransactionTrait, UpdateMany,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -52,6 +53,7 @@ use crate::grpc::cache_status::CacheStatusRegistry;
 use crate::grpc::config::{
     build_rule_bundle, build_site_config, from_timestamp,
 };
+use crate::grpc::managed;
 use crate::grpc::registry::{
     AgentRegistry, ConfigDrift, HeartbeatMetrics, COMMAND_CHANNEL_CAPACITY,
 };
@@ -467,6 +469,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         if payload.hostname.trim().is_empty() {
             return Err(Status::invalid_argument("hostname is required"));
         }
+        let session_id = (payload.managed_protocol_version
+            == pingwaf_proto::MANAGED_PROTOCOL_VERSION)
+            .then(Uuid::new_v4);
 
         // The API key is only ever presented here; everything afterwards uses the
         // agent token minted below.
@@ -487,10 +492,14 @@ impl ControlPlaneTrait for ControlPlaneService {
         // match ignores the reported IP on purpose: an agent whose address
         // changed (DHCP, migration) must reclaim its row rather than orphan
         // the old one as a permanently-offline ghost.
+        let tx = self.db.begin().await.map_err(db_status)?;
+        managed::lock_registration(&tx, key.id, &payload.hostname)
+            .await
+            .map_err(db_status)?;
         let existing = agent::Entity::find()
             .filter(agent::Column::Hostname.eq(payload.hostname.clone()))
             .filter(agent::Column::ApiKeyId.eq(Some(key.id)))
-            .one(&self.db)
+            .one(&tx)
             .await
             .map_err(db_status)?;
 
@@ -530,8 +539,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 active.private_ip = Set(optional(&payload.private_ip));
                 active.peer_ip = Set(peer_ip.clone());
                 active.peer_ip_seen_at = Set(peer_ip.as_ref().map(|_| now));
-                let updated =
-                    active.update(&self.db).await.map_err(db_status)?;
+                let updated = active.update(&tx).await.map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent re-registered");
                 updated
             },
@@ -567,18 +575,23 @@ impl ControlPlaneTrait for ControlPlaneService {
                     peer_ip: Set(peer_ip.clone()),
                     peer_ip_seen_at: Set(peer_ip.as_ref().map(|_| now)),
                 }
-                .insert(&self.db)
+                .insert(&tx)
                 .await
                 .map_err(db_status)?;
                 tracing::info!(%agent_id, hostname = %payload.hostname, "agent registered");
                 created
             },
         };
+        managed::register_session(&tx, row.id, session_id)
+            .await
+            .map_err(db_status)?;
+        tx.commit().await.map_err(db_status)?;
 
         let token = create_agent_token(
             row.id,
             &self.config.jwt_secret,
             self.config.refresh_token_expiration_hours,
+            session_id,
         )
         .map_err(|err| Status::internal(err.to_string()))?;
 
@@ -598,7 +611,36 @@ impl ControlPlaneTrait for ControlPlaneService {
             agent_token: token,
             heartbeat_interval_seconds: self.config.heartbeat_interval_seconds,
             initial_config: Some(initial_config),
+            managed_protocol_version: session_id
+                .map_or(0, |_| pingwaf_proto::MANAGED_PROTOCOL_VERSION),
         }))
+    }
+
+    async fn get_managed_snapshot(
+        &self,
+        request: Request<GetManagedSnapshotRequest>,
+    ) -> Result<Response<ManagedSnapshot>, Status> {
+        let claims = verify_agent_token(
+            &request.into_inner().agent_token,
+            &self.config.jwt_secret,
+        )
+        .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        if claims.is_expired() {
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        }
+        let agent_id = claims
+            .subject_id()
+            .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        let session_id = claims
+            .jti
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .ok_or_else(|| {
+                Status::permission_denied("managed protocol was not negotiated")
+            })?;
+        managed::build_snapshot(&self.db, agent_id, session_id)
+            .await
+            .map(Response::new)
     }
 
     type HeartbeatStream = BoxedStream<ServerCommand>;
