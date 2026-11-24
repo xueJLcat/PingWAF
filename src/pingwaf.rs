@@ -62,6 +62,10 @@ use pingwaf_server::ServerConfig;
 use tracing::{error, info, warn};
 
 mod ingress;
+// The view is built in isolation; only the test harness can accept requests
+// against one until listener authorization and site policy are wired.
+#[cfg(all(test, target_os = "linux"))]
+mod managed_http;
 
 /// Stable tracing target for the shared startup and data-plane logs.
 ///
@@ -925,6 +929,16 @@ fn convert_cached_rules(
     cached: &CachedRules,
     cache_dir: &Path,
 ) -> PingapConfig {
+    convert_proxy_config(cached, cache_dir, true).0
+}
+
+/// The shared site translator can omit listeners and unmatched-host policy:
+/// a managed listener has already authorized exactly one site by hostname.
+fn convert_proxy_config(
+    cached: &CachedRules,
+    cache_dir: &Path,
+    include_default_listeners: bool,
+) -> (PingapConfig, Vec<String>) {
     // The cache plugin carries no per-site settings of its own — rules,
     // namespaces and quotas all flow from the agent's rule cache at request
     // time. It only earns a slot in the config when some site actually has
@@ -1388,6 +1402,38 @@ fn convert_cached_rules(
         }
     }
 
+    // A generated site must not accept an unbounded request body by default.
+    // Explicit per-location caps from the control plane still win.
+    for location in locations.values_mut() {
+        if location.client_max_body_size.is_none() {
+            location.client_max_body_size = "16MB".parse().ok();
+        }
+    }
+    let basic = BasicConf {
+        // A self-signed origin must be explicitly allowed by the control
+        // plane; a pool without an override inherits this default.
+        origin_verify_cert: Some(cached.origin_verify_cert.unwrap_or(true)),
+        ..Default::default()
+    };
+    if !include_default_listeners {
+        // No second hostname lookup after the managed listener's site
+        // selection. Keep per-site host names for upstream SNI policy.
+        for location in locations.values_mut() {
+            location.host = None;
+        }
+        return (
+            PingapConfig {
+                basic,
+                upstreams,
+                locations,
+                certificates,
+                plugins,
+                ..Default::default()
+            },
+            location_names,
+        );
+    }
+
     // Host fallback pages: only when at least one enabled error page carries
     // the `unmatched_host` scope does the edge serve a branded page for hosts
     // no site matches. The generated location is host-less, matches `/`,
@@ -1454,6 +1500,7 @@ fn convert_cached_rules(
                 // Below every route and tied with (behind, by stable sort)
                 // the site `/` fallbacks.
                 weight: Some(0),
+                client_max_body_size: "16MB".parse().ok(),
                 ..Default::default()
             },
         );
@@ -1526,30 +1573,18 @@ fn convert_cached_rules(
         },
     );
 
-    // A generated site must not accept an unbounded request body by default.
-    // Explicit per-location caps from the control plane still win.
-    for location in locations.values_mut() {
-        if location.client_max_body_size.is_none() {
-            location.client_max_body_size = "16MB".parse().ok();
-        }
-    }
-
-    PingapConfig {
-        basic: BasicConf {
-            // Always a concrete value, never `None`: pools that do not state
-            // their own `verify_cert` resolve against it. The default is
-            // strict; a self-signed origin must be explicitly allowed by the
-            // control plane rather than silently trusted.
-            origin_verify_cert: Some(cached.origin_verify_cert.unwrap_or(true)),
+    (
+        PingapConfig {
+            basic,
+            upstreams,
+            locations,
+            servers,
+            certificates,
+            plugins,
             ..Default::default()
         },
-        upstreams,
-        locations,
-        servers,
-        certificates,
-        plugins,
-        ..Default::default()
-    }
+        Vec::new(),
+    )
 }
 
 /// Build a `PingapConfig` from the agent's cached rules.

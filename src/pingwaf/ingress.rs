@@ -140,6 +140,13 @@ impl ServerLocationsProvider for Unassigned {
 }
 
 fn unassigned_http(port: u16) -> anyhow::Result<HttpProxy<Server>> {
+    http_proxy(port, std::convert::identity)
+}
+
+pub(super) fn http_proxy(
+    port: u16,
+    configure: impl FnOnce(Server) -> Server,
+) -> anyhow::Result<HttpProxy<Server>> {
     let server = Server::new(
         &ServerConf {
             name: format!("pingwaf_ingress_{port}"),
@@ -161,8 +168,10 @@ fn unassigned_http(port: u16) -> anyhow::Result<HttpProxy<Server>> {
             logger: None,
         },
     )?;
-    let mut proxy =
-        HttpProxy::new(server, Arc::new(configuration::ServerConf::default()));
+    let mut proxy = HttpProxy::new(
+        configure(server),
+        Arc::new(configuration::ServerConf::default()),
+    );
     proxy.handle_init_modules();
     let mut options = HttpServerOptions::default();
     options.keepalive_request_limit = Some(1000);

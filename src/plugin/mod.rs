@@ -256,6 +256,19 @@ pub fn new_plugin_provider() -> Arc<dyn PluginProvider> {
     PLUGIN_PROVIDER.clone()
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn isolated_plugins(
+    config: HashMap<String, PluginConf>,
+) -> anyhow::Result<Arc<dyn PluginProvider>> {
+    // Do not install the global admin plugin or reuse a live plugin object.
+    let (plugins, errors) = parse_plugins(config.into_iter().collect());
+    anyhow::ensure!(errors.is_empty(), "invalid managed plugins: {errors:?}");
+    Ok(Arc::new(Provider {
+        plugins: ArcSwap::from_pointee(plugins),
+        version: AtomicU64::new(0),
+    }))
+}
+
 /// Parses plugin configurations and instantiates plugin instances.
 ///
 /// # Arguments

@@ -62,6 +62,24 @@ pub fn new_upstream_provider() -> Arc<dyn UpstreamProvider> {
     UPSTREAM_PROVIDER.clone()
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn isolated_upstreams(
+    config: &HashMap<String, UpstreamConf>,
+    default_verify_cert: Option<bool>,
+) -> anyhow::Result<Arc<dyn UpstreamProvider>> {
+    let provider = Arc::new(Provider {
+        upstreams: ArcSwap::from_pointee(AHashMap::new()),
+    });
+    let (upstreams, _) = new_ahash_upstreams(
+        config,
+        provider.clone(),
+        None,
+        default_verify_cert,
+    )?;
+    provider.store(upstreams);
+    Ok(provider)
+}
+
 /// Initialize the upstreams
 ///
 /// # Arguments

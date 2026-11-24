@@ -5374,6 +5374,7 @@ dependencies = [
  "pingwaf-server",
  "pingwaf-system",
  "pretty_assertions",
+ "prost",
  "rcgen",
  "regex",
  "rust-embed",

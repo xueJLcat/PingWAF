@@ -182,6 +182,7 @@ edge = []
 [dev-dependencies]
 criterion = { workspace = true }
 pretty_assertions = { workspace = true }
+prost = { workspace = true }
 rcgen = { workspace = true }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }

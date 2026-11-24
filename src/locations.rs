@@ -58,6 +58,21 @@ pub fn new_location_provider() -> Arc<dyn LocationProvider> {
     LOCATION_PROVIDER.clone()
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn isolated_locations(
+    config: &HashMap<String, LocationConf>,
+) -> anyhow::Result<Arc<dyn LocationProvider>> {
+    let locations = config
+        .iter()
+        .map(|(name, conf)| {
+            Ok((name.clone(), Arc::new(Location::new(name, conf)?)))
+        })
+        .collect::<anyhow::Result<Locations>>()?;
+    Ok(Arc::new(Provider {
+        locations: ArcSwap::from_pointee(locations),
+    }))
+}
+
 /// Initializes or updates the global location configurations
 /// Returns list of location names that were updated
 pub fn try_init_locations(

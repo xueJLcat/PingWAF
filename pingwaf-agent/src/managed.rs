@@ -127,6 +127,10 @@ impl Compiled {
         self.sites.get(&id)
     }
 
+    pub fn sites(&self) -> impl Iterator<Item = (Uuid, &CompiledSite)> {
+        self.sites.iter().map(|(id, site)| (*id, site))
+    }
+
     pub fn select(
         &self,
         listener: Listener,
