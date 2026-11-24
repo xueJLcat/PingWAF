@@ -8,11 +8,11 @@
 
 use std::collections::HashMap;
 
-use axum::Json;
-use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::Json;
+use axum::Router;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TryGetable,
@@ -197,7 +197,11 @@ impl Resolved {
 
     /// Index of the next free `$n` placeholder.
     fn next_placeholder(&self) -> usize {
-        if self.site_id.is_some() { 4 } else { 3 }
+        if self.site_id.is_some() {
+            4
+        } else {
+            3
+        }
     }
 
     /// The row cap, re-clamped and widened to `u64` here rather than at the

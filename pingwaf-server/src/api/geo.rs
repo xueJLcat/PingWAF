@@ -1,9 +1,9 @@
 //! Geo restriction management: per-site geographic blocking/allowing.
 
-use axum::Json;
-use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
+use axum::Json;
+use axum::Router;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
