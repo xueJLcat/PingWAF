@@ -42,7 +42,7 @@ use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::{
     ChallengeConfig as CacheChallengeConfig,
-    ChallengeLevel as CacheChallengeLevel,
+    ChallengeLevel as CacheChallengeLevel, SiteRules,
 };
 use pingwaf_challenge::js_challenge::page::{
     ChallengePageParams, REQUIRED_DOM_IDS, challenge_scripts,
@@ -59,12 +59,13 @@ use pingwaf_challenge::{
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tera::{Context, Tera};
 use tracing::{debug, warn};
 
 use crate::host_cache::{HostCacheSweep, touch};
+use crate::{RuleKey, RuleRevision};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -90,6 +91,8 @@ const RATE_WINDOW_SECS: i64 = 60;
 pub(crate) struct PendingChallenge {
     pub nonce: String,
     pub site_id: String,
+    /// Do not complete a challenge under a new managed policy generation.
+    managed_rules: Option<Weak<SiteRules>>,
     pub original_url: String,
     /// Proof-of-work difficulty this challenge was issued with. Adaptive
     /// difficulty changes the required work per challenge, so verification
@@ -217,13 +220,14 @@ static GC_TICK: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Record a freshly issued challenge, opportunistically dropping stale ones.
-pub(crate) fn store_pending(
+fn store_pending(
     request_id: &str,
     site_id: &str,
     original_url: &str,
     client_ip: &str,
     user_agent: &str,
     difficulty: u32,
+    managed_rules: Option<&Arc<SiteRules>>,
 ) -> String {
     let now = now_secs();
     // Opportunistic garbage collection so the map cannot grow without bound.
@@ -251,6 +255,7 @@ pub(crate) fn store_pending(
     let entry = PendingChallenge {
         nonce: nonce.clone(),
         site_id: site_id.to_string(),
+        managed_rules: managed_rules.map(Arc::downgrade),
         original_url,
         difficulty,
         client_ip: client_ip.to_string(),
@@ -306,9 +311,7 @@ pub(crate) enum ChallengeKind {
 /// The template is global (`error_pages` scope `challenge`, status 503), but
 /// it is delivered in every site bundle; the challenge page is rendered only
 /// when the request's site has it enabled.
-fn challenge_page_template(site_id: &str) -> Option<String> {
-    let agent = PingWafAgent::instance()?;
-    let rules = agent.get_rules_for_domain(site_id)?;
+fn challenge_page_template(rules: &SiteRules) -> Option<String> {
     rules
         .error_pages
         .iter()
@@ -398,7 +401,8 @@ fn render_challenge_template(
 
 /// Build a 503 challenge response, registering the pending challenge so the
 /// verify endpoint can later resolve the nonce.
-pub(crate) fn build_challenge_response(
+#[allow(clippy::too_many_arguments)]
+fn build_challenge_response(
     request_id: &str,
     original_url: &str,
     site_id: &str,
@@ -406,6 +410,8 @@ pub(crate) fn build_challenge_response(
     user_agent: &str,
     difficulty: u32,
     kind: ChallengeKind,
+    rules: Option<&SiteRules>,
+    managed_rules: Option<&Arc<SiteRules>>,
 ) -> HttpResponse {
     let nonce = store_pending(
         request_id,
@@ -414,6 +420,7 @@ pub(crate) fn build_challenge_response(
         client_ip,
         user_agent,
         difficulty,
+        managed_rules,
     );
     let params = ChallengePageParams {
         request_id: request_id.to_string(),
@@ -423,7 +430,8 @@ pub(crate) fn build_challenge_response(
         original_url: original_url.to_string(),
         brand_name: "PingWAF".to_string(),
     };
-    let body = challenge_page_template(site_id)
+    let body = rules
+        .and_then(challenge_page_template)
         .and_then(|template| render_challenge_template(&template, &params))
         .unwrap_or_else(|| match kind {
             ChallengeKind::Js => generate_js_challenge_html(&params),
@@ -883,9 +891,7 @@ fn sweep_pressure(now: i64) {
 /// page must still honour the site's difficulty and per-IP budget. `None` means
 /// "no site configuration" (standalone, or no row), so the caller's own
 /// configuration applies.
-fn site_mint_config(host: &str) -> Option<(ChallengeLimits, u32)> {
-    let agent = PingWafAgent::instance()?;
-    let rules = agent.get_rules_for_domain(host)?;
+fn site_mint_config(rules: &SiteRules) -> Option<(ChallengeLimits, u32)> {
     let cfg = rules.challenge_config.as_ref()?;
     Some((site_limits(cfg), effective_rate_threshold(cfg)))
 }
@@ -896,8 +902,8 @@ pub(crate) struct MintRequest<'a> {
     pub(crate) request_id: &'a str,
     /// Path (and query) the visitor is redirected to after solving.
     pub(crate) original_url: &'a str,
-    /// Host the challenge is bound to; also the site id in the cookie.
-    pub(crate) site_id: &'a str,
+    pub(crate) host: &'a str,
+    pub(crate) managed_rules: Option<&'a Arc<SiteRules>>,
     pub(crate) client_ip: &'a str,
     pub(crate) user_agent: &'a str,
     /// Requests from this client in the current window when the caller tracks
@@ -946,15 +952,25 @@ impl MintOutcome {
 /// still mints, without a budget entry, because locking every new visitor out
 /// after an attacker fills the table would turn a burst guard into an outage.
 pub(crate) fn mint_challenge(request: MintRequest<'_>) -> MintOutcome {
-    let (limits, rate_threshold) = site_mint_config(request.site_id)
+    let managed = request.managed_rules.map(Arc::as_ref);
+    let site_id = clearance_audience(request.host, managed);
+    let legacy_rules = if request.managed_rules.is_none() {
+        PingWafAgent::instance()
+            .and_then(|agent| agent.get_rules_for_domain(request.host))
+    } else {
+        None
+    };
+    let rules = managed.or(legacy_rules.as_deref());
+    let (limits, rate_threshold) = rules
+        .and_then(site_mint_config)
         .unwrap_or((request.fallback, request.fallback_rate_threshold));
-    let key = guard_key(request.site_id, request.client_ip);
+    let key = guard_key(&site_id, request.client_ip);
     let now = now_secs();
     match ISSUE_LIMITER.allow(&key, limits.issue_limit, now) {
         LimitDecision::Deny => {
             warn!(
                 request_id = %request.request_id,
-                site = %request.site_id,
+                site = %site_id,
                 "challenge issuance rate limit exceeded"
             );
             return MintOutcome::RateLimited(rate_limit_page(
@@ -968,7 +984,7 @@ pub(crate) fn mint_challenge(request: MintRequest<'_>) -> MintOutcome {
             // refuse a legitimate visitor. Logged at debug so a many-source
             // flood cannot turn this into a log amplifier.
             debug!(
-                site = %request.site_id,
+                site = %site_id,
                 "challenge issuance table saturated; issuing without a budget entry"
             );
         },
@@ -985,11 +1001,13 @@ pub(crate) fn mint_challenge(request: MintRequest<'_>) -> MintOutcome {
     MintOutcome::Challenge(build_challenge_response(
         request.request_id,
         request.original_url,
-        request.site_id,
+        &site_id,
         request.client_ip,
         request.user_agent,
         difficulty,
         request.kind,
+        rules,
+        request.managed_rules,
     ))
 }
 
@@ -1026,12 +1044,10 @@ fn site_limits(cfg: &CacheChallengeConfig) -> ChallengeLimits {
 }
 
 /// A cached per-site decision engine plus the guard configuration and the
-/// agent config fingerprint it was built from.
+/// revision it was built from.
 struct CachedChallengeEngine {
-    /// Config fingerprint the engine was built from. An `Arc` so the per
-    /// request fingerprint check stays allocation-free.
-    fingerprint: Arc<str>,
-    engine: Option<Arc<ChallengeEngine>>,
+    revision: RuleRevision,
+    engine: Arc<ChallengeEngine>,
     limits: ChallengeLimits,
     /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
     /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
@@ -1040,8 +1056,8 @@ struct CachedChallengeEngine {
 }
 
 /// Builds the decision engine for one site's challenge configuration. Every
-/// engine shares the plugin's clearance-cookie secret so a cookie earned on
-/// one site validates everywhere the plugin runs.
+/// engine shares the plugin's signing secret. Callers must also validate the
+/// signed site's audience before honoring the cookie.
 fn build_site_engine(
     cfg: &CacheChallengeConfig,
     cookie_secret: &str,
@@ -1137,6 +1153,26 @@ fn site_proxy_trust(host: &str) -> Option<ProxyTrust> {
     })
 }
 
+const MANAGED_AUDIENCE_PREFIX: &str = "managed:";
+
+pub(crate) fn clearance_audience<'a>(
+    host: &'a str,
+    rules: Option<&SiteRules>,
+) -> Cow<'a, str> {
+    rules.map_or(Cow::Borrowed(host), |rules| {
+        Cow::Owned(format!("{MANAGED_AUDIENCE_PREFIX}{}", rules.site_id))
+    })
+}
+
+pub(crate) fn scoped_clearance_name<'a>(
+    name: &'a str,
+    rules: Option<&SiteRules>,
+) -> Cow<'a, str> {
+    rules.map_or(Cow::Borrowed(name), |rules| {
+        Cow::Owned(format!("{name}_{}", rules.site_id))
+    })
+}
+
 // ─────────────────────────────────────────────────────────────
 // ChallengePlugin
 // ─────────────────────────────────────────────────────────────
@@ -1153,8 +1189,8 @@ pub struct ChallengePlugin {
     enabled: bool,
     cookie_name: String,
     cookie_secret: String,
-    /// Per-site decision engines built from agent rules, keyed by host.
-    site_engines: DashMap<String, CachedChallengeEngine>,
+    /// Per-site decision engines, keyed by UUID or legacy host.
+    site_engines: DashMap<RuleKey, CachedChallengeEngine>,
     /// Sweep gate for the `site_engines` host cache (TTL + hard cap).
     engine_sweep: HostCacheSweep,
     /// Per host+IP request counter used to feed `request_rate` to the engine.
@@ -1209,36 +1245,46 @@ impl ChallengePlugin {
     fn site_challenge(
         &self,
         host: &str,
+        managed: Option<&Arc<SiteRules>>,
+        verify: bool,
     ) -> Option<(Arc<ChallengeEngine>, ChallengeLimits)> {
-        if PingWafAgent::instance().is_none() {
-            return Some((Arc::clone(&self.engine), self.standalone_limits));
-        }
-        if host.is_empty() {
-            return None;
-        }
-        let agent = PingWafAgent::instance()?;
+        let (key, revision, site_rules) = if let Some(rules) = managed {
+            (
+                RuleKey::Managed(rules.site_id.clone()),
+                RuleRevision::Managed(Arc::downgrade(rules)),
+                rules.clone(),
+            )
+        } else {
+            let Some(agent) = PingWafAgent::instance() else {
+                return Some((
+                    Arc::clone(&self.engine),
+                    self.standalone_limits,
+                ));
+            };
+            if host.is_empty() {
+                return None;
+            }
+            let key = RuleKey::Legacy(host.to_owned());
+            let Some(rules) = agent.get_rules_for_domain(host) else {
+                self.site_engines.remove(&key);
+                return None;
+            };
+            (key, RuleRevision::Legacy(agent.config_hash()), rules)
+        };
         let now = crate::host_cache::unix_now();
         self.engine_sweep.prune(&self.site_engines, now, |cached| {
             cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
         });
-        let Some(site_rules) = agent.get_rules_for_domain(host) else {
-            // The host no longer resolves in the cache (deleted or renamed
-            // site): drop the compiled engine so the per-domain cache
-            // cannot grow without bound across config churn.
-            self.site_engines.remove(host);
-            return None;
-        };
         let cfg = site_rules
             .challenge_config
             .as_ref()
-            .filter(|cfg| cfg.enabled)?;
+            .filter(|cfg| cfg.enabled || (managed.is_some() && verify))?;
 
-        let fingerprint = agent.config_hash();
-        if let Some(cached) = self.site_engines.get(host)
-            && cached.fingerprint == fingerprint
+        if let Some(cached) = self.site_engines.get(&key)
+            && cached.revision == revision
         {
             touch(&cached.last_used, now);
-            return cached.engine.clone().map(|engine| (engine, cached.limits));
+            return Some((cached.engine.clone(), cached.limits));
         }
         let limits = site_limits(cfg);
         let engine = Arc::new(build_site_engine(
@@ -1248,10 +1294,10 @@ impl ChallengePlugin {
             limits.adaptive.base(),
         ));
         self.site_engines.insert(
-            host.to_string(),
+            key,
             CachedChallengeEngine {
-                fingerprint,
-                engine: Some(Arc::clone(&engine)),
+                revision,
+                engine: Arc::clone(&engine),
                 limits,
                 last_used: AtomicU64::new(now),
             },
@@ -1300,6 +1346,7 @@ impl ChallengePlugin {
         &self,
         session: &mut Session,
         ctx: &mut Ctx,
+        managed: Option<&Arc<SiteRules>>,
     ) -> pingora::Result<RequestPluginResult> {
         let mut buf = BytesMut::with_capacity(4096);
         while let Some(chunk) = session.read_request_body().await? {
@@ -1346,11 +1393,6 @@ impl ChallengePlugin {
             .get("timestamp")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(now_secs);
-        // The submission names the challenge it answers; carry it on the
-        // request context so an edge-generated answer (the over-limit 429)
-        // can be written to the access log under the same id the page shows.
-        ctx.state.request_id = Some(request_id.clone());
-
         // The pending entry identifies the site the challenge was issued for;
         // resolving the budget from it (rather than from the request's Host
         // header) keeps a forged Host from steering which site's limits apply
@@ -1362,9 +1404,28 @@ impl ChallengePlugin {
             )));
         };
 
+        let same_scope = match (&pending.managed_rules, managed) {
+            (None, None) => true,
+            (Some(issued), Some(current)) => {
+                issued.ptr_eq(&Arc::downgrade(current))
+                    && pending.site_id == clearance_audience("", Some(current))
+            },
+            _ => false,
+        };
+        if !same_scope {
+            return Ok(RequestPluginResult::Respond(block_page(
+                &request_id,
+                "challenge belongs to another site",
+            )));
+        }
+        // Only use the submitted id for access accounting after checking
+        // that it belongs to this site's challenge.
+        ctx.state.request_id = Some(request_id.clone());
+
         // Resolve the same trusted client address the challenge issuance
         // used, then bind the submission to it and to the live User-Agent.
-        if let Some(trust) = site_proxy_trust(&pending.site_id)
+        if managed.is_none()
+            && let Some(trust) = site_proxy_trust(&pending.site_id)
             && let Some(ip) = resolve_client_ip_with_trust(session, &trust)
         {
             ctx.conn.client_ip = Some(ip);
@@ -1382,7 +1443,7 @@ impl ChallengePlugin {
         // visitor's challenge. The nonce is only consumed once a submission
         // has actually been accepted.
         let (engine, limits) = self
-            .site_challenge(&pending.site_id)
+            .site_challenge(&pending.site_id, managed, true)
             .unwrap_or((Arc::clone(&self.engine), self.standalone_limits));
         // Unlike issuance, verification fails closed when the table is full:
         // a full table must not become an unmetered guessing channel. The
@@ -1408,7 +1469,8 @@ impl ChallengePlugin {
             super::waf::emit_challenge_access(
                 session,
                 ctx,
-                &pending.site_id,
+                managed
+                    .map_or(pending.site_id.as_str(), |rules| &rules.site_id),
                 &actual_ip,
                 &response,
             );
@@ -1469,14 +1531,21 @@ impl ChallengePlugin {
             } => {
                 // The nonce is spent and the challenge resolved; drop it only
                 // after the verifier accepted the submission.
-                if let Some((_, removed)) =
-                    PENDING_CHALLENGES.remove(&request_id)
+                if let Some((_, removed)) = PENDING_CHALLENGES
+                    .remove_if(&request_id, |_, entry| {
+                        Arc::ptr_eq(&pending, entry)
+                    })
                 {
                     account_pending_removed(&removed);
                 }
                 let set_cookie = format!(
                     "{}={}; {}",
-                    self.cookie_name, cookie_value, cookie_attributes
+                    scoped_clearance_name(
+                        &self.cookie_name,
+                        managed.map(Arc::as_ref)
+                    ),
+                    cookie_value,
+                    cookie_attributes
                 );
                 // Redirect instead of echoing the URL into an inline script:
                 // the original URL is client-controlled, and reflecting it
@@ -1653,16 +1722,18 @@ impl Plugin for ChallengePlugin {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
+        let managed = crate::managed_rules(session)?;
 
         // ACME http-01 validation requests are answered by the proxy before
         // the plugin chain runs; skip them here too, as a second line of
         // defense: challenging a CA verification request would make the
         // certificate unissuable regardless of `exempt_paths`.
-        if session
-            .req_header()
-            .uri
-            .path()
-            .starts_with(super::waf::ACME_HTTP_01_PATH_PREFIX)
+        if managed.is_none()
+            && session
+                .req_header()
+                .uri
+                .path()
+                .starts_with(super::waf::ACME_HTTP_01_PATH_PREFIX)
         {
             return Ok(RequestPluginResult::Continue);
         }
@@ -1673,7 +1744,7 @@ impl Plugin for ChallengePlugin {
         // The verify endpoint is always served, even if challenges would
         // otherwise be skipped for this path.
         if path == VERIFY_ENDPOINT && method == "POST" {
-            return self.handle_verify(session, ctx).await;
+            return self.handle_verify(session, ctx, managed.as_ref()).await;
         }
 
         // Only the decision path needs the feature switch. The verify endpoint
@@ -1690,7 +1761,8 @@ impl Plugin for ChallengePlugin {
         // the pending-access entry the WAF stamps when it runs; a missing
         // entry (WAF not in the chain, table full) falls through to the
         // direct site-rule lookup below.
-        if let Some(request_id) = ctx.state.request_id.as_deref()
+        if managed.is_none()
+            && let Some(request_id) = ctx.state.request_id.as_deref()
             && (super::waf::pending_path_bypasses_challenge(request_id)
                 || super::waf::pending_path_bypasses_rate_limit(request_id))
         {
@@ -1704,13 +1776,18 @@ impl Plugin for ChallengePlugin {
         // the WAF's pending-access handshake: the WAF may be absent from the
         // chain or its pending table may be full, yet `skip_layers = ["*"]`
         // must still suppress this gate.
-        if super::waf::path_exception_skips_challenge(&host, &path) {
+        if super::waf::path_exception_skips_challenge(
+            &host,
+            &path,
+            managed.as_ref(),
+        ) {
             return Ok(RequestPluginResult::Continue);
         }
         // Sites behind a CDN/proxy derive the client IP from the trusted
         // forwarded header so challenge rate limiting keys on the real
         // visitor address.
-        if let Some(trust) = site_proxy_trust(&host)
+        if managed.is_none()
+            && let Some(trust) = site_proxy_trust(&host)
             && let Some(ip) = resolve_client_ip_with_trust(session, &trust)
         {
             ctx.conn.client_ip = Some(ip);
@@ -1721,11 +1798,19 @@ impl Plugin for ChallengePlugin {
                 .unwrap_or_default()
                 .to_string();
 
-        let Some((engine, limits)) = self.site_challenge(&host) else {
+        let Some((engine, limits)) =
+            self.site_challenge(&host, managed.as_ref(), false)
+        else {
             return Ok(RequestPluginResult::Continue);
         };
+        let site_key = clearance_audience(&host, managed.as_deref());
+        let cookie_name =
+            scoped_clearance_name(&self.cookie_name, managed.as_deref());
+        let log_site_id = managed
+            .as_ref()
+            .map_or(host.as_str(), |rules| &rules.site_id);
 
-        // A clearance cookie issued for *this* host short-circuits
+        // A clearance cookie issued for *this* site short-circuits
         // everything. Per-site engines share this engine's secret, so a valid
         // signature only says that some site in this deployment issued the
         // cookie — the site id inside it is what says which. Without the
@@ -1734,9 +1819,9 @@ impl Plugin for ChallengePlugin {
         // the two; see `waf::clearance_valid`). The level is checked too, so
         // a JS clearance cannot stand in for an interactive one.
         if let Some(cookie) =
-            get_cookie_value(session.req_header(), &self.cookie_name)
+            get_cookie_value(session.req_header(), &cookie_name)
             && let Some(payload) = self.engine.validate_clearance(cookie)
-            && payload.site_id == host
+            && payload.site_id == site_key
             && engine.clearance_level_sufficient(&payload)
         {
             return Ok(RequestPluginResult::Continue);
@@ -1744,7 +1829,7 @@ impl Plugin for ChallengePlugin {
 
         // Rate windows are per site so one domain's burst never charges
         // another's budget.
-        let rate_key = guard_key(&host, &client_ip);
+        let rate_key = guard_key(&site_key, &client_ip);
         let request_rate = self.record_rate(&rate_key);
         let challenge_request = ChallengeRequest {
             path,
@@ -1754,11 +1839,8 @@ impl Plugin for ChallengePlugin {
             cookies: Vec::new(),
             has_js_support: None,
             request_rate,
-            // The host is this deployment's site id, on the issuing side and
-            // the checking side alike: the challenge page is built with it
-            // (see `build_challenge_response` below) and the cookie it issues
-            // is bound to it.
-            site_id: host.clone(),
+            // The signed clearance audience: managed UUID or legacy host.
+            site_id: site_key.into_owned(),
         };
 
         let decision = engine.should_challenge(&challenge_request);
@@ -1779,7 +1861,11 @@ impl Plugin for ChallengePlugin {
             // response phase; emit the entry here so the refusal stays
             // visible in analytics.
             super::waf::emit_challenge_access(
-                session, ctx, &host, &client_ip, &response,
+                session,
+                ctx,
+                log_site_id,
+                &client_ip,
+                &response,
             );
             return Ok(RequestPluginResult::Respond(response));
         }
@@ -1790,9 +1876,6 @@ impl Plugin for ChallengePlugin {
             Some(q) => format!("{}?{}", uri.path(), q),
             None => uri.path().to_string(),
         };
-        // The same value the request was evaluated against, so the cookie
-        // issued here is bound to exactly the site it was checked for.
-        let site_id = challenge_request.site_id;
         let request_id = ctx
             .state
             .request_id
@@ -1816,7 +1899,8 @@ impl Plugin for ChallengePlugin {
         let outcome = mint_challenge(MintRequest {
             request_id: &request_id,
             original_url: &original_url,
-            site_id: &site_id,
+            host: &host,
+            managed_rules: managed.as_ref(),
             client_ip: &client_ip,
             user_agent: &user_agent,
             request_rate,
@@ -1827,9 +1911,13 @@ impl Plugin for ChallengePlugin {
         let response = outcome.into_response();
         // L3-005: the challenge 503 never reached the access-log response
         // phase, so analytics showed none of the challenged traffic. Emit
-        // the entry here, keyed by the host the challenge was issued for.
+        // the entry here with the selected site identity.
         super::waf::emit_challenge_access(
-            session, ctx, &site_id, &client_ip, &response,
+            session,
+            ctx,
+            log_site_id,
+            &client_ip,
+            &response,
         );
         Ok(RequestPluginResult::Respond(response))
     }
@@ -1857,6 +1945,7 @@ pub(crate) mod tests {
         PendingChallenge {
             nonce: "nonce".to_string(),
             site_id: "example.com".to_string(),
+            managed_rules: None,
             original_url: "/".to_string(),
             difficulty: 20,
             client_ip: "203.0.113.10".to_string(),
@@ -1941,6 +2030,7 @@ pub(crate) mod tests {
             "203.0.113.10",
             "test-agent",
             20,
+            None,
         );
         let pending = peek_pending(&request_id).expect("pending entry");
         assert_eq!("/", pending.original_url);
@@ -2025,6 +2115,8 @@ pub(crate) mod tests {
             "test-agent",
             0,
             ChallengeKind::Js,
+            None,
+            None,
         );
         assert_eq!(StatusCode::SERVICE_UNAVAILABLE, resp.status);
         assert_eq!(Some("pingwaf"), header_value(&resp, "server").as_deref());
@@ -2680,6 +2772,16 @@ cookie_secret = "test-secret"
         client_ip: &str,
         payload: &serde_json::Value,
     ) -> RequestPluginResult {
+        verify_submission(plugin, host, client_ip, payload, None).await
+    }
+
+    async fn verify_submission(
+        plugin: &ChallengePlugin,
+        host: &str,
+        client_ip: &str,
+        payload: &serde_json::Value,
+        managed: Option<&Arc<SiteRules>>,
+    ) -> RequestPluginResult {
         let body = payload.to_string();
         let forwarded = if client_ip.is_empty() {
             String::new()
@@ -2693,11 +2795,16 @@ cookie_secret = "test-secret"
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = TestSession::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        if let Some(rules) = managed {
+            crate::test_support::pin_site(&mut session, rules.clone());
+            ctx.conn.client_ip = Some(client_ip.to_owned());
+        }
         plugin
             .handle_request(
                 TestPluginStep::EarlyRequest,
                 &mut session,
-                &mut Ctx::default(),
+                &mut ctx,
             )
             .await
             .unwrap()
@@ -2767,6 +2874,163 @@ cookie_secret = "test-secret"
                 )
             })
             .expect("an unsolved candidate")
+    }
+
+    #[tokio::test]
+    async fn managed_challenge_isolates_same_host_sites_and_rule_generations() {
+        // Keep the process-wide rate tables and cookie secret stable.
+        let (_guard, _agent, _dir) = install_challenge_agent(None).await;
+        let plugin = ChallengePlugin::new(&PluginConf::default()).unwrap();
+        let mut a = crate::waf::tests::site_rules(None);
+        a.site_id = uuid::Uuid::new_v4().to_string().into();
+        a.challenge_config = Some(CacheChallengeConfig {
+            enabled: true,
+            under_attack_mode: true,
+            default_level: CacheChallengeLevel::NonInteractive,
+            clearance_duration_seconds: 180,
+            exempt_paths: Vec::new(),
+            request_threshold: 0,
+            browser_integrity_check: false,
+            tls_fingerprint_check: false,
+            base_difficulty: 4,
+            max_difficulty: 4,
+            issue_limit_per_minute: 1,
+            verify_limit_per_minute: 1,
+        });
+        a.error_pages.push(pingwaf_agent::cache::CustomErrorPage {
+            id: "page-a".into(),
+            status_code: 503,
+            content_type: "text/html".into(),
+            body_template: format!(
+                "<h1>site-a template</h1>{}{{{{ challenge_scripts | safe }}}}",
+                REQUIRED_DOM_IDS
+                    .iter()
+                    .map(|id| format!("<div id=\"{id}\"></div>"))
+                    .collect::<String>(),
+            ),
+            name: "site-a".into(),
+            enabled: true,
+            scope: "challenge".into(),
+        });
+        a.path_exceptions
+            .push(pingwaf_agent::cache::PathExceptionConfig {
+                id: "skip-a".into(),
+                path: "/skip".into(),
+                match_type: "exact".into(),
+                skip_layers: vec!["challenge".into()],
+                enabled: true,
+                ..Default::default()
+            });
+        let mut b = a.clone();
+        b.site_id = uuid::Uuid::new_v4().to_string().into();
+        b.challenge_config.as_mut().unwrap().base_difficulty = 5;
+        b.challenge_config.as_mut().unwrap().max_difficulty = 5;
+        b.error_pages.clear();
+        b.path_exceptions.clear();
+        let (a, b) = (Arc::new(a), Arc::new(b));
+        let updated_a = Arc::new((*a).clone());
+        let host = "example.com";
+        let ip = "192.0.2.158";
+
+        async fn request(
+            plugin: &ChallengePlugin,
+            rules: &Arc<SiteRules>,
+            path: &str,
+            cookie: Option<&str>,
+            ip: &str,
+        ) -> RequestPluginResult {
+            let mut session =
+                crate::test_support::h1_session("GET", path, "example.com")
+                    .await;
+            crate::test_support::pin_site(&mut session, rules.clone());
+            if let Some(cookie) = cookie {
+                session
+                    .req_header_mut()
+                    .insert_header("cookie", cookie)
+                    .unwrap();
+            }
+            let mut ctx = Ctx::default();
+            ctx.conn.client_ip = Some(ip.to_owned());
+            plugin
+                .handle_request(
+                    PluginStep::EarlyRequest,
+                    &mut session,
+                    &mut ctx,
+                )
+                .await
+                .unwrap()
+        }
+
+        assert_eq!(
+            request(&plugin, &a, "/skip", None, ip).await,
+            RequestPluginResult::Continue
+        );
+        let RequestPluginResult::Respond(page_a) =
+            request(&plugin, &a, "/", None, ip).await
+        else {
+            panic!("site A must issue a challenge");
+        };
+        let body = String::from_utf8_lossy(&page_a.body);
+        assert!(body.contains("site-a template"));
+        assert_eq!(page_config(&body, "difficulty"), "4");
+        let id = page_config(&body, "requestId");
+        let pending = peek_pending(&id).unwrap();
+        assert_eq!(pending.site_id, clearance_audience(host, Some(&a)));
+        let answer = verify_payload(
+            &id,
+            &solve(&pending.nonce, pending.difficulty),
+            now_secs(),
+        );
+        for scope in [Some(&b), Some(&updated_a), None] {
+            let RequestPluginResult::Respond(response) =
+                verify_submission(&plugin, host, ip, &answer, scope).await
+            else {
+                panic!("wrong scope must be denied");
+            };
+            assert_eq!(response.status, StatusCode::FORBIDDEN);
+            assert!(peek_pending(&id).is_some());
+        }
+        let RequestPluginResult::Respond(response) =
+            verify_submission(&plugin, host, ip, &answer, Some(&a)).await
+        else {
+            panic!("the original site must answer");
+        };
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(peek_pending(&id).is_none());
+        let set_cookie = header_value(&response, "set-cookie").unwrap();
+        let (name, value) = set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap();
+        assert_eq!(name, scoped_clearance_name(&plugin.cookie_name, Some(&a)));
+        assert_eq!(
+            request(&plugin, &a, "/", Some(&format!("{name}={value}")), ip)
+                .await,
+            RequestPluginResult::Continue
+        );
+        let b_cookie = format!(
+            "{}={value}",
+            scoped_clearance_name(&plugin.cookie_name, Some(&b))
+        );
+        let RequestPluginResult::Respond(page_b) =
+            request(&plugin, &b, "/skip", Some(&b_cookie), ip).await
+        else {
+            panic!(
+                "site B must not honor site A's signed clearance or exceptions"
+            );
+        };
+        assert_eq!(page_b.status, StatusCode::SERVICE_UNAVAILABLE);
+        let body = String::from_utf8_lossy(&page_b.body);
+        assert!(!body.contains("site-a template"));
+        assert_eq!(page_config(&body, "difficulty"), "5");
+        let RequestPluginResult::Respond(over_budget) =
+            request(&plugin, &a, "/", None, ip).await
+        else {
+            panic!("site A's budget should be exhausted for this client");
+        };
+        assert_eq!(over_budget.status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     /// Requests one challenge page as `client_ip` and returns

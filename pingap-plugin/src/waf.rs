@@ -648,18 +648,25 @@ static PATH_EXCEPTION_CACHE: LazyLock<
 /// `rate_limit` is part of the answer because the standalone challenge plugin
 /// shares its rate window with CC: skipping that layer must also suppress the
 /// plugin's own rate challenge, exactly like the WAF's pending flag does.
-pub(crate) fn path_exception_skips_challenge(host: &str, path: &str) -> bool {
-    let Some(agent) = PingWafAgent::instance() else {
+pub(crate) fn path_exception_skips_challenge(
+    host: &str,
+    path: &str,
+    managed: Option<&Arc<CacheSiteRules>>,
+) -> bool {
+    let site_rules = managed.cloned().or_else(|| {
+        PingWafAgent::instance()
+            .and_then(|agent| agent.get_rules_for_domain(host))
+    });
+    let Some(site_rules) = site_rules else {
         return false;
     };
-    let Some(site_rules) = agent.get_rules_for_domain(host) else {
-        return false;
-    };
+    let key =
+        super::challenge::clearance_audience(host, managed.map(Arc::as_ref));
     if site_rules.path_exceptions.is_empty() {
         return false;
     }
     let cached = PATH_EXCEPTION_CACHE
-        .get(host)
+        .get(key.as_ref())
         .filter(|entry| Arc::ptr_eq(&entry.0, &site_rules))
         .map(|entry| entry.1.clone());
     let compiled = match cached {
@@ -671,7 +678,7 @@ pub(crate) fn path_exception_skips_challenge(host: &str, path: &str) -> bool {
                 PATH_EXCEPTION_CACHE.clear();
             }
             PATH_EXCEPTION_CACHE.insert(
-                host.to_string(),
+                key.into_owned(),
                 (Arc::clone(&site_rules), compiled.clone()),
             );
             compiled
@@ -2250,18 +2257,34 @@ fn request_user_agent(headers: &[(String, String)]) -> &str {
 }
 
 /// Extracts the clearance cookie value, if the client carries one.
-fn clearance_cookie(headers: &[(String, String)]) -> Option<String> {
+fn clearance_cookie(
+    headers: &[(String, String)],
+    name: &str,
+) -> Option<String> {
     headers
         .iter()
         .find(|(k, _)| k == "cookie")
         .and_then(|(_, v)| {
             v.split(';').find_map(|pair| {
-                let (name, value) = pair.trim().split_once('=')?;
-                name.trim()
-                    .eq_ignore_ascii_case(CLEARANCE_COOKIE_NAME)
+                let (key, value) = pair.trim().split_once('=')?;
+                key.trim()
+                    .eq_ignore_ascii_case(name)
                     .then(|| value.trim().to_string())
             })
         })
+}
+
+fn request_clearance_valid(
+    headers: &[(String, String)],
+    host: &str,
+    managed: Option<&CacheSiteRules>,
+) -> bool {
+    use super::challenge::{clearance_audience, scoped_clearance_name};
+    let name = scoped_clearance_name(CLEARANCE_COOKIE_NAME, managed);
+    clearance_valid(
+        clearance_cookie(headers, &name),
+        &clearance_audience(host, managed),
+    )
 }
 
 /// Clearance cookie manager of the challenge system, cached against the agent
@@ -3283,13 +3306,8 @@ fn emit_generated_access(
 /// from the session.
 /// Emits the access-log entry for a response the challenge plugin generated.
 ///
-/// `site_id` here is the **host** the challenge engine binds its clearance
-/// cookie to, not the site UUID: the challenge plugin only knows the host, and
-/// the cookie's `site_id` claim has always been the host. The control plane
-/// parses it as a UUID, so challenge rows land in `access_logs` with a NULL
-/// `site_id` (visible globally, absent from per-site views). Passing the host
-/// is therefore intentional and must not be "fixed" by inventing a UUID;
-/// closing that gap needs the host→site mapping on the control plane.
+/// The managed caller supplies the selected UUID. A legacy hostname is not
+/// a UUID; in that case the control plane still records a NULL site id.
 pub(crate) fn emit_challenge_access(
     session: &Session,
     ctx: &Ctx,
@@ -4309,6 +4327,7 @@ impl WafPlugin {
         site_id: &str,
         request_id: &str,
         host: &str,
+        managed: Option<&Arc<CacheSiteRules>>,
         request_data: &RequestData,
         denial: &Denial,
         original_url: &str,
@@ -4350,17 +4369,19 @@ impl WafPlugin {
             // A client holding a valid clearance for this site already
             // solved its challenge: re-issuing it would loop forever, so
             // let it pass.
-            // Bind the clearance to the host the challenge plugin also uses
-            // as its subject. The two plugins share one cookie name, so a
-            // UUID-vs-host mismatch makes each reject the other's cookie and
-            // re-challenge forever.
-            if clearance_valid(clearance_cookie(&request_data.headers), host) {
+            // Use the same audience and cookie name as the challenge plugin.
+            if request_clearance_valid(
+                &request_data.headers,
+                host,
+                managed.map(Arc::as_ref),
+            ) {
                 return RequestPluginResult::Continue;
             }
             let outcome = mint_challenge(MintRequest {
                 request_id,
                 original_url,
-                site_id: host,
+                host,
+                managed_rules: managed,
                 client_ip: &request_data.client_ip,
                 user_agent: request_user_agent(&request_data.headers),
                 // The WAF keeps no per-IP request window, so this mint
@@ -4400,6 +4421,7 @@ impl WafPlugin {
         site_id: &str,
         request_id: &str,
         host: &str,
+        managed: Option<&Arc<CacheSiteRules>>,
         request_data: &RequestData,
         choice: &EngineChoice,
         context: Option<&Arc<SiteContext>>,
@@ -4645,7 +4667,11 @@ impl WafPlugin {
             // clearance for this site solved its challenge before: issuing
             // the same challenge again would loop forever, so let it
             // through.
-            if clearance_valid(clearance_cookie(&request_data.headers), host) {
+            if request_clearance_valid(
+                &request_data.headers,
+                host,
+                managed.map(Arc::as_ref),
+            ) {
                 if let Some(agent) = agent {
                     agent.record_request(false);
                 }
@@ -4662,7 +4688,8 @@ impl WafPlugin {
             let outcome = mint_challenge(MintRequest {
                 request_id,
                 original_url: &original_url,
-                site_id: host,
+                host,
+                managed_rules: managed,
                 client_ip: &request_data.client_ip,
                 user_agent: request_user_agent(&request_data.headers),
                 request_rate: 0,
@@ -4960,6 +4987,7 @@ impl Plugin for WafPlugin {
         // trusted forwarded header instead of the TCP peer, so IP access
         // rules, rate limiting and logs all key on the real visitor address.
         let resolved = self.resolve_request_site(session, &host)?;
+        let managed = crate::managed_rules(session)?;
         let site_id = resolved.site_id.clone();
         let context = resolved.context.clone();
         let choice = resolved.choice;
@@ -5325,6 +5353,7 @@ impl Plugin for WafPlugin {
                         &site_id,
                         &request_id,
                         &host,
+                        managed.as_ref(),
                         &request_data,
                         denial,
                         &original_url,
@@ -5445,6 +5474,7 @@ impl Plugin for WafPlugin {
                             &site_id,
                             &request_id,
                             &host,
+                            managed.as_ref(),
                             &request_data,
                             &denial,
                             &original_url,
@@ -5491,6 +5521,7 @@ impl Plugin for WafPlugin {
                             &site_id,
                             &request_id,
                             &host,
+                            managed.as_ref(),
                             &request_data,
                             &denial,
                             &original_url,
@@ -5531,9 +5562,10 @@ impl Plugin for WafPlugin {
         {
             let cleared =
                 rate.rules.iter().any(|r| r.action == RateAction::Challenge)
-                    && clearance_valid(
-                        clearance_cookie(&request_data.headers),
+                    && request_clearance_valid(
+                        &request_data.headers,
                         &host,
+                        managed.as_deref(),
                     );
             let outcome = rate.evaluate(
                 &self.rate_counters,
@@ -5637,7 +5669,8 @@ impl Plugin for WafPlugin {
                         let outcome = mint_challenge(MintRequest {
                             request_id: &request_id,
                             original_url: &original_url,
-                            site_id: &host,
+                            host: &host,
+                            managed_rules: managed.as_ref(),
                             client_ip: &request_data.client_ip,
                             user_agent: request_user_agent(
                                 &request_data.headers,
@@ -5722,6 +5755,7 @@ impl Plugin for WafPlugin {
                 &site_id,
                 &request_id,
                 &host,
+                managed.as_ref(),
                 &request_data,
                 &choice,
                 context.as_ref(),
@@ -6035,6 +6069,7 @@ impl Plugin for WafPlugin {
                     &dv.site_id,
                     &request_id,
                     &dv.host,
+                    crate::managed_rules(session)?.as_ref(),
                     &dv.request_data,
                     &dv.choice,
                     dv.context.as_ref(),
@@ -6199,6 +6234,7 @@ impl Plugin for WafPlugin {
                                 &dv.site_id,
                                 &request_id,
                                 &dv.host,
+                                crate::managed_rules(session)?.as_ref(),
                                 &dv.request_data,
                                 &dv.choice,
                                 dv.context.as_ref(),
@@ -6267,6 +6303,7 @@ impl Plugin for WafPlugin {
                     &dv.site_id,
                     &request_id,
                     &dv.host,
+                    crate::managed_rules(session)?.as_ref(),
                     &dv.request_data,
                     &dv.choice,
                     dv.context.as_ref(),
@@ -11718,6 +11755,7 @@ inspect_body = true"###,
             "site1",
             "req-skip",
             "example.com",
+            None,
             &request,
             &denial,
             "/x",
@@ -11734,6 +11772,7 @@ inspect_body = true"###,
             "site1",
             "req-serve",
             "example.com",
+            None,
             &request,
             &denial,
             "/x",
@@ -11754,6 +11793,7 @@ inspect_body = true"###,
             "site1",
             "req-block",
             "example.com",
+            None,
             &request,
             &block,
             "/x",
@@ -11806,6 +11846,7 @@ inspect_body = true"###,
             "site-1",
             "req-waf-mint-1",
             "example.com",
+            None,
             &request,
             &denial,
             "/x",
@@ -11838,6 +11879,7 @@ inspect_body = true"###,
             "site-1",
             "req-waf-mint-2",
             "example.com",
+            None,
             &request,
             &denial,
             "/x",
@@ -11917,6 +11959,46 @@ inspect_body = true"###,
         assert!(clearance_valid(Some(cookie), "example.com"));
     }
 
+    #[tokio::test]
+    async fn managed_waf_clearance_requires_both_cookie_name_and_site_audience()
+    {
+        use super::super::challenge::{
+            clearance_audience, scoped_clearance_name,
+        };
+
+        let _guard = lock_agent().await;
+        let manager =
+            CookieManager::new(resolve_cookie_secret("").as_bytes(), 3600);
+        let mut a = site_rules(None);
+        a.site_id = "aed6eae1-3426-4cbc-981f-3957487b185d".into();
+        let mut b = a.clone();
+        b.site_id = "aed6eae1-3426-4cbc-981f-3957487b185e".into();
+        let host = "example.com";
+        let audience = clearance_audience(host, Some(&a));
+        let cookie = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            &audience,
+            "fingerprint",
+        );
+        let headers =
+            |name: &str| [("cookie".to_owned(), format!("{name}={cookie}"))];
+
+        let a_name = scoped_clearance_name(CLEARANCE_COOKIE_NAME, Some(&a));
+        let b_name = scoped_clearance_name(CLEARANCE_COOKIE_NAME, Some(&b));
+        assert!(request_clearance_valid(&headers(&a_name), host, Some(&a)));
+        assert!(!request_clearance_valid(&headers(&b_name), host, Some(&b)));
+        assert!(!request_clearance_valid(
+            &headers(CLEARANCE_COOKIE_NAME),
+            host,
+            Some(&a)
+        ));
+        assert!(!request_clearance_valid(
+            &headers(CLEARANCE_COOKIE_NAME),
+            host,
+            None
+        ));
+    }
+
     /// A broad rule must not challenge the endpoint that issues the clearance
     /// cookie; otherwise the page can never finish.
     #[tokio::test]
@@ -11982,9 +12064,21 @@ inspect_body = true"###,
             })
             .unwrap();
 
-        assert!(path_exception_skips_challenge("example.com", "/api/x"));
-        assert!(!path_exception_skips_challenge("example.com", "/other"));
-        assert!(!path_exception_skips_challenge("unknown.example", "/api"));
+        assert!(path_exception_skips_challenge(
+            "example.com",
+            "/api/x",
+            None
+        ));
+        assert!(!path_exception_skips_challenge(
+            "example.com",
+            "/other",
+            None
+        ));
+        assert!(!path_exception_skips_challenge(
+            "unknown.example",
+            "/api",
+            None
+        ));
     }
 
     #[test]
