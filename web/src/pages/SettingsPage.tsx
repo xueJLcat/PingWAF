@@ -1,3 +1,4 @@
+import { AsnDataCard } from './AsnDataCard'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -69,7 +70,7 @@ import { aiApi, aiKeys } from '@/api/ai'
 import { mcpApi, mcpKeys } from '@/api/mcp'
 import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { systemApi } from '@/api/system'
-import { ApiError } from '@/api/client'
+import { api, ApiError } from '@/api/client'
 import {
   DOCS_BASE_URL,
   failureReference,
@@ -128,6 +129,7 @@ const SETTINGS_NAV = [
   { id: 'origin-tls', labelKey: 'pages.settings.originTls' },
   { id: 'ai-assistant', labelKey: 'pages.settings.aiAssistant' },
   { id: 'mcp', labelKey: 'pages.settings.mcp' },
+  { id: 'asn-data', labelKey: 'ASN 数据源' },
   { id: 'elasticsearch', labelKey: 'pages.settings.elasticsearch' },
   { id: 'log-retention', labelKey: 'pages.settings.logRetention' },
   { id: 'error-pages', labelKey: 'pages.settings.errorPages' },
@@ -142,6 +144,7 @@ const ADMIN_ONLY_NAV_IDS = new Set([
   'cache',
   'origin-tls',
   'ai-assistant',
+  'asn-data',
   'elasticsearch',
   'log-retention',
   'error-pages',
@@ -204,6 +207,7 @@ export function SettingsPage() {
           <section id="mcp" className="scroll-mt-6">
             <McpCard />
           </section>
+          {isAdmin && <section id="asn-data" className="scroll-mt-6"><AsnDataCard canWrite={canWrite} /></section>}
           <section id="elasticsearch" className="scroll-mt-6">
             {isAdmin && <ElasticsearchCard canWrite={canWrite} />}
           </section>
@@ -538,14 +542,7 @@ function ElasticsearchCard({ canWrite }: { canWrite: boolean }) {
                 disabled={!canWrite}
                 onChange={(e) => num('request_timeout_secs', e.target.value)}
               />
-              <Input
-                label={t('pages.settings.esBufferDir')}
-                value={draft.buffer_dir ?? ''}
-                placeholder={t('pages.settings.esBufferDirPlaceholder')}
-                className="pw-mono text-[13px]"
-                disabled={!canWrite}
-                onChange={(e) => patch({ buffer_dir: e.target.value || null })}
-              />
+              <EsBufferDirectory canWrite={canWrite} />
               <Input
                 type="number"
                 label={t('pages.settings.esBufferMaxMb')}
@@ -3210,3 +3207,23 @@ function AboutCard() {
 }
 
 export default SettingsPage
+
+function EsBufferDirectory({canWrite}: {canWrite: boolean}) {
+  type View = { root: string; active: string | null; desired: string | null }
+  const key = ['settings', 'es-buffer']
+  const client = useQueryClient()
+  const path = '/settings/elasticsearch/buffer'
+  const query = useQuery({queryKey: key, queryFn: () => api.get<View>(path)})
+  const [edit, setEdit] = useState<string | null>(null)
+  const save = useMutation({
+    mutationFn: () => api.put<View>(path, { directory: edit?.trim() || null }),
+    onSuccess: view => { client.setQueryData(key, view); setEdit(null) },
+  })
+  return <div className="col-span-full grid gap-2 rounded-lg border border-line p-3">
+    <Input label="磁盘缓冲目录" placeholder={query.data?.root} value={edit ?? query.data?.desired ?? ''} disabled={!query.data || !canWrite || save.isPending} onChange={e => setEdit(e.target.value)} />
+    <p className="break-all text-xs">当前运行目录：{query.data ? query.data.active || '未启用' : '读取中…'}。新目录须位于 {query.data?.root} 下，留空关闭磁盘缓冲。</p>
+    {query.data && query.data.active !== query.data.desired && <p role="status">已保存，控制平面重启后切换。旧目录有积压时继续使用旧目录。</p>}
+    {(query.error || save.error) && <p role="alert">{query.error?.message || save.error?.message}</p>}
+    <Button type="button" variant="secondary" disabled={!canWrite || edit === null || save.isPending} onClick={() => save.mutate()}>保存缓冲目录</Button>
+  </div>
+}

@@ -14,7 +14,7 @@
 //! The mapping is loaded lazily on first use and then read-only, so a request
 //! never performs a network call, a download or a file read: replacing the
 //! operator file takes effect on the next restart, and there is no runtime
-//! dependency on any registry. An operator who needs complete coverage exports
+//! dependency on any registry. A managed TSV overlay can override both sources at runtime. An operator who needs complete coverage exports
 //! it once (PeeringDB, an iptoasn.com dump, RIR delegation files, …) and
 //! points the environment variable at it.
 //!
@@ -41,6 +41,8 @@
 //! database [`lookup_ip`] answers `None` and `access_logs.asn` stays NULL —
 //! the ranking is then empty, which is the documented behaviour rather than a
 //! guessed value.
+
+pub mod managed_names;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -76,8 +78,8 @@ const MAX_ENTRIES: usize = 200_000;
 static NAMES: LazyLock<HashMap<u32, String>> = LazyLock::new(load);
 
 /// Organization name registered for `asn`, when the mapping knows it.
-pub fn name_for(asn: u32) -> Option<&'static str> {
-    NAMES.get(&asn).map(String::as_str)
+pub fn name_for(asn: u32) -> Option<String> {
+    managed_names::lookup(asn).or_else(|| NAMES.get(&asn).cloned())
 }
 
 /// The name to show for `asn`.
@@ -87,7 +89,7 @@ pub fn name_for(asn: u32) -> Option<&'static str> {
 /// can never be mistaken for a name that happens to be a number.
 pub fn display_name(asn: u32) -> String {
     match name_for(asn) {
-        Some(name) => name.to_string(),
+        Some(name) => name,
         None => format!("Unknown (AS{asn})"),
     }
 }
@@ -96,6 +98,7 @@ pub fn display_name(asn: u32) -> String {
 /// not pay for the (small) file read. Called from the startup warm-up task.
 pub fn warm_names() {
     let _ = &*NAMES;
+    let _ = managed_names::lookup(0);
 }
 
 /// Builds the process-wide mapping: bundled snapshot first, operator file on

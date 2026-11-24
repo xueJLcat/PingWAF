@@ -6,7 +6,7 @@
 //! read-back of `login_history`. Everything is administrator-only.
 
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::Deserialize;
@@ -28,7 +28,10 @@ pub fn routes() -> Router<AppState> {
         .route("/login-security", get(show).put(update))
         .route(
             "/login-security/geoip",
-            post(upload_geoip).layer(DefaultBodyLimit::max(MAX_MMDB_BYTES)),
+            get(geoip_status)
+                .post(upload_geoip)
+                .delete(remove_geoip)
+                .layer(DefaultBodyLimit::max(MAX_MMDB_BYTES)),
         )
         .route("/login-history", get(list_history))
 }
@@ -132,37 +135,43 @@ async fn upload_geoip(
     }
 
     let path = crate::notify::login_anomaly::geoip_mmdb_path();
-    let tmp = path.with_extension("mmdb.tmp");
-    std::fs::write(&tmp, &bytes)
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
-    // Validate before replacing: a corrupt upload must keep the old file.
-    if let Err(err) = maxminddb::Reader::open_readfile(&tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(ApiError::BadRequest(format!(
-            "not a valid mmdb database: {err}"
-        )));
-    }
-    if let Err(err) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(ApiError::Internal(err.to_string()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o600),
-        );
-    }
-
+    let size = bytes.len();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let reader = maxminddb::Reader::from_source(bytes.as_slice())
+            .map_err(|e| ApiError::BadRequest(format!("invalid MMDB: {e}")))?;
+        let kind = reader.metadata().database_type.to_ascii_lowercase();
+        if !["country", "city", "enterprise"]
+            .iter()
+            .any(|s| kind.contains(s))
+        {
+            return Err(ApiError::BadRequest(
+                "expected a country or city MMDB".into(),
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let io = |e: std::io::Error| ApiError::Internal(e.to_string());
+        std::fs::create_dir_all(parent).map_err(io)?;
+        let mut pending =
+            tempfile::NamedTempFile::new_in(parent).map_err(io)?;
+        pending.write_all(&bytes).map_err(io)?;
+        pending.as_file().sync_all().map_err(io)?;
+        pending.persist(path).map_err(|e| io(e.error))?;
+        Ok::<_, ApiError>(())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))??;
     tracing::info!(
         actor = %current.email,
-        bytes = bytes.len(),
+        bytes = size,
         "GeoIP database uploaded"
     );
     Ok(Json(json!({
         "uploaded": true,
-        "bytes": bytes.len(),
+        "bytes": size,
     })))
 }
 
@@ -339,4 +348,30 @@ mod tests {
             Some("geo.example.com")
         );
     }
+}
+
+async fn geoip_status(current: AuthUser) -> Result<Json<Value>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let path = crate::notify::login_anomaly::geoip_mmdb_path();
+    let installed = tokio::fs::try_exists(&path)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(
+        json!({"path":path,"external":std::env::var_os("PINGWAF_GEOIP_MMDB").is_some(),"installed":installed}),
+    ))
+}
+
+async fn remove_geoip(current: AuthUser) -> Result<Json<Value>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    if std::env::var_os("PINGWAF_GEOIP_MMDB").is_some() {
+        return Err(ApiError::Conflict(
+            "运维指定的文件不能从控制台删除".into(),
+        ));
+    }
+    match tokio::fs::remove_file(crate::notify::login_anomaly::geoip_mmdb_path()).await {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(ApiError::Internal(e.to_string())),
+        _ => (),
+    }
+    tracing::info!(actor=%current.email,"login GeoIP database removed");
+    Ok(Json(json!({"removed":true})))
 }

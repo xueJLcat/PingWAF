@@ -381,11 +381,11 @@ export function SitesListPage() {
   const wantsNewSite = canWrite && searchParams.get('new') === '1'
   if (wantsNewSite && !urlCreateOpen) setUrlCreateOpen(true)
   useEffect(() => {
-    if (searchParams.get('new') !== '1') return
+    if (!urlCreateOpen || searchParams.get('new') !== '1') return
     const next = new URLSearchParams(searchParams)
     next.delete('new')
     setSearchParams(next, { replace: true })
-  }, [searchParams, setSearchParams])
+  }, [searchParams, setSearchParams, urlCreateOpen])
 
   const openClone = (site: Site) => {
     setCloneSource(site)

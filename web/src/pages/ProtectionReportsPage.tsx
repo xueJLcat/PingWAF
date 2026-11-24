@@ -47,7 +47,11 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
     setChosen(ids)
     setPage(next)
   }
-  const invalidRange = !!from && !!to && Date.parse(from) >= Date.parse(to)
+  const start = Date.parse(from)
+  const end = Date.parse(to)
+  const rangeError = !from || !to ? '' : start >= end ? '结束时间须晚于开始时间。'
+    : end-start > 7*86400000 ? '单份报告最多包含七天，请缩短统计时段。'
+    : end > Date.now()+30000 ? '结束时间不能晚于当前时间。' : ''
   const selection = {sites:ids, timezone}
   const [now,setNow]=useState(Date.now())
   useEffect(()=>{ if (!live) return; const timer=setInterval(()=>setNow(Date.now()),5000);return ()=>clearInterval(timer) },[live])
@@ -107,9 +111,9 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
       <label>统计时区<Input value={timezone} onChange={e=>setTimezone(e.target.value)} placeholder="Asia/Shanghai" /></label>
       {!live && <><label>开始（本机时间）<Input type="datetime-local" value={from} onChange={e=>setFrom(e.target.value)}/></label>
         <label>结束（本机时间）<Input type="datetime-local" value={to} onChange={e=>setTo(e.target.value)}/></label>
-        <Button loading={create.isPending} disabled={invalidRange || !ids.length || !from || !to || !timezone} onClick={()=>create.mutate()}>生成报告</Button></>}
+        <Button loading={create.isPending} disabled={!!rangeError || !ids.length || !from || !to || !timezone} onClick={()=>create.mutate()}>生成报告</Button></>}
     </div>
-    {!live && invalidRange && <p role="alert">结束时间须晚于开始时间。</p>}
+    {!live && rangeError && <p role="alert">{rangeError}</p>}
     {sites.data?.total === 0 && <p role="status">当前账号没有可选站点。</p>}
     {sites.data && sites.data.total > 0 && !ids.length && <p role="status">请在站点范围中选择至少一个站点。</p>}
     {alerts.map((message,i)=><p key={i} role="alert">{message}</p>)}

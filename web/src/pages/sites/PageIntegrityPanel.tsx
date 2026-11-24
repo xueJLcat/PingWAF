@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/Input'
 type Rule = { id: string; path: string; mode: string; active_version: number | null; candidate_digest: string | null; dynamic_stage: 'off' | 'test' | 'live' }
 type Preview = {
   path: string; mode: string; candidate_digest: string | null; candidate_type: string | null
-  dynamic_stage: string; dynamic_region: string;
+  dynamic_stage: string; dynamic_region: string; tested_digest: string;
   candidate_base64: string | null; approved_base64: string | null; approved_digest: string | null
   approved_type: string | null; approved_at: string | null; approved_by: string | null
   events: { category: string; detail: string; observations: number; last_seen: string }[]
@@ -48,11 +48,13 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
   })
   const error = mutation.error || detail.error || list.error
   return <section role="tabpanel" aria-label="网页防篡改" className="space-y-4">
-    {canWrite && <form className="flex items-end gap-2" onSubmit={e => { e.preventDefault(); mutation.mutate('add') }}>
-      <label>公开页面路径<Input placeholder="/index.html" value={path} onChange={e => setPath(e.target.value)} /></label>
+    {canWrite && <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); mutation.mutate('add') }}>
+      <div className="min-w-0 flex-1"><Input label="公开页面路径" placeholder="/index.html" value={path} onChange={e => setPath(e.target.value)} /></div>
       <Button type="submit" disabled={!path || mutation.isPending}>登记页面</Button>
     </form>}
     {error && <p role="alert">{error.message}</p>}
+    {list.isLoading && <p role="status">正在读取页面规则…</p>}
+    {selected && detail.isLoading && <p role="status">正在读取候选正文与审批记录…</p>}
     {list.data?.length===0 && <p className="text-sm text-fg-subtle">尚未登记公开页面。登记路径后，访问该页以获取可预览的正文。</p>}
     <ul className="divide-y divide-border">{list.data?.map(rule => <li className="flex flex-wrap items-center justify-between gap-2" key={rule.id}>
       <button type="button" className="py-2 underline" onClick={() => { select(rule.id); setMode(rule.mode); setConfirmRemoval(false) }}>
@@ -65,7 +67,7 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
       <Button onClick={() => void detail.refetch()}>刷新候选与事件</Button>
       <div className="grid gap-3 md:grid-cols-2">
         {([['已批准正文', preview.approved_base64, preview.approved_type], ['当前候选正文', preview.candidate_base64, preview.candidate_type]] as const).map(([title, body, media]) =>
-          <div key={title}><h4>{title}</h4><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words">{source(body, media)}</pre></div>)}
+          <div key={title} className="min-w-0 rounded-lg border border-border"><h4 className="border-b border-border px-3 py-2 font-medium">{title}</h4><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words p-3 text-xs">{source(body, media)}</pre></div>)}
       </div>
       {preview.approved_at && <p>审批人 {preview.approved_by} · {new Date(preview.approved_at).toLocaleString()}</p>}
       {preview.candidate_digest && <p className="break-all">{preview.candidate_type} · SHA-256 {preview.candidate_digest}</p>}
@@ -81,6 +83,8 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
       </div>}
       {canWrite && <DynamicRegion key={selected} base={base} rule={selected} initial={preview}
         refresh={()=>client.invalidateQueries({queryKey:[base]})} />}
+      <h4 className="font-medium">最近事件</h4>
+      {!preview.events.length && <p className="text-sm text-fg-subtle">暂无事件。</p>}
       <ul>{preview.events.map(event => <li key={event.category + event.detail}>
         {event.last_seen} · {event.category} · {event.detail} · {event.observations} 次
       </li>)}</ul>
@@ -98,25 +102,29 @@ function DynamicRegion({base,rule,initial,refresh}: {
     if(stage==='disable'){
       await apiClient.post(base.replace(/\/integrity$/, '/dynamic/disable'),{})
       setToken('')
+      setSample(undefined)
     }else{
       const value=await apiClient.post<{html?:string;test_token?:string}>(`${base}/${rule}/dynamic`,{stage,region,digest:initial.candidate_digest??''})
       if(value.html!==undefined)setSample({html:value.html,digest:initial.candidate_digest!,region})
       if(stage!=='preview')setToken(value.test_token??'')
+      if(stage!=='preview')setSample(undefined)
     }
     await refresh()
   }})
   const reviewed=sample?.digest===initial.candidate_digest && sample?.region===region
-  return <section className="space-y-2"><h4>页面动态防护</h4>
+  const tested=initial.dynamic_stage==='test' && initial.dynamic_region===region &&
+    !!initial.tested_digest && initial.tested_digest===initial.candidate_digest
+  return <section className="space-y-3 rounded-lg border border-border p-4"><h4 className="font-medium">页面动态防护</h4>
     <p>当前状态：{({off:'已关闭',test:'测试访问',live:'正式发布'} as Record<string,string>)[initial.dynamic_stage]}</p>
-    <label>纯文本元素 ID<Input value={region} onChange={e=>{setRegion(e.target.value);setSample(undefined)}} placeholder="article-summary"/></label>
+    <Input label="纯文本元素 ID" disabled={change.isPending} value={region} onChange={e=>{setRegion(e.target.value);setSample(undefined)}} placeholder="article-summary"/>
     <div className="flex flex-wrap gap-2">
       <Button disabled={!region || !initial.candidate_digest || change.isPending} onClick={()=>change.mutate('preview')}>预览变换</Button>
       <Button disabled={!reviewed || change.isPending} onClick={()=>change.mutate('test')}>开启测试访问</Button>
-      <Button disabled={!reviewed || initial.dynamic_stage!=='test' || initial.dynamic_region!==region || change.isPending} onClick={()=>change.mutate('live')}>发布该页面</Button>
+      <Button disabled={!tested || change.isPending} onClick={()=>change.mutate('live')}>发布该页面</Button>
       <Button disabled={change.isPending} onClick={()=>change.mutate('off')}>关闭该页面</Button>
       <Button disabled={change.isPending} onClick={()=>change.mutate('disable')}>关闭整站动态防护</Button>
     </div>
-    {sample && <details open><summary>变换后的 HTML 源码</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{sample.html}</pre></details>}
+    {sample && reviewed && <details open><summary>变换后的 HTML 源码</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{sample.html}</pre></details>}
     {token && <p>测试请求头 <code>X-PingWAF-Page-Test: {token}</code></p>}
     {change.error && <p role="alert">{change.error.message}</p>}
   </section>

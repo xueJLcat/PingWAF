@@ -39,13 +39,26 @@ where
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/asn/database",
-        get(show)
-            .post(upload)
-            .delete(remove)
-            .layer(DefaultBodyLimit::max(asn::MAX_MMDB_BYTES as usize)),
-    )
+    Router::new()
+        .route(
+            "/asn/names",
+            get(names_status)
+                .put(install_names)
+                .delete(remove_names)
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/asn/names/preview",
+            axum::routing::post(preview_names)
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/asn/database",
+            get(show)
+                .post(upload)
+                .delete(remove)
+                .layer(DefaultBodyLimit::max(asn::MAX_MMDB_BYTES as usize)),
+        )
 }
 
 /// `GET /api/v1/asn/database` — administrators only.
@@ -142,5 +155,44 @@ async fn remove(
             }
         })?;
     tracing::info!(actor = %current.email, "ASN database removed");
+    Ok(Json(status))
+}
+
+use asn::managed_names;
+
+async fn names_status(
+    current: AuthUser,
+) -> Result<Json<managed_names::Status>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    Ok(Json(run_blocking(managed_names::status).await?))
+}
+
+async fn preview_names(
+    current: AuthUser,
+    data: axum::body::Bytes,
+) -> Result<Json<usize>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    Ok(Json(
+        run_blocking(move || managed_names::preview(&data)).await??,
+    ))
+}
+
+async fn install_names(
+    current: AuthUser,
+    data: axum::body::Bytes,
+) -> Result<Json<managed_names::Status>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let status =
+        run_blocking(move || managed_names::replace(Some(&data))).await??;
+    tracing::info!(actor=%current.email, "ASN name overrides installed");
+    Ok(Json(status))
+}
+
+async fn remove_names(
+    current: AuthUser,
+) -> Result<Json<managed_names::Status>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let status = run_blocking(|| managed_names::replace(None)).await??;
+    tracing::info!(actor=%current.email, "ASN name overrides removed");
     Ok(Json(status))
 }

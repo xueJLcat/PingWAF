@@ -195,6 +195,17 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
         }
     }
     let agents = AgentRegistry::with_admin_port(admin_port);
+    if let Some(choice) = es::directory::load(&db).await? {
+        let setting = config.elasticsearch.get_or_insert_with(Default::default);
+        // A restart may follow a final failed bulk flush: check the old WAL again.
+        match es::directory::prepare(&choice) {
+            Ok(()) => setting.buffer_dir = choice.directory,
+            Err(error) => {
+                tracing::warn!(%error, "retaining previous Elasticsearch buffer directory");
+                setting.buffer_dir = choice.previous;
+            }
+        }
+    }
     let shared_config = Arc::new(config);
 
     // ── 6b. Optional Elasticsearch log shipper ──────────────────────────────

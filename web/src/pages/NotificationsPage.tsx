@@ -647,7 +647,8 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
   const [anomalyEnabled, setAnomalyEnabled] = useState<boolean | null>(null)
   const [baseline, setBaseline] = useState<string>('')
   const [trustedHeader, setTrustedHeader] = useState<string>('')
-  const [trustLastHop, setTrustLastHop] = useState<boolean>(false)
+  const [trustLastHop, setTrustLastHop] = useState<boolean | null>(null)
+  const [useGeo, setUseGeo] = useState<boolean | null>(null)
   const [geoUrl, setGeoUrl] = useState<string>('')
 
   const stored = settingsQuery.data
@@ -658,10 +659,11 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
       anomaly_enabled: anomalyEnabled ?? stored.anomaly_enabled,
       baseline_count: baseline === '' ? stored.baseline_count : Number(baseline),
       trusted_header: trustedHeader === '' ? stored.trusted_header : trustedHeader.trim().toLowerCase(),
-      trust_last_hop: trustLastHop || stored.trust_last_hop,
+      trust_last_hop: trustLastHop ?? stored.trust_last_hop,
+      geoip_local_enabled: useGeo ?? stored.geoip_local_enabled,
       online_geo_url: geoUrl === '' ? stored.online_geo_url : geoUrl.trim(),
     }
-  }, [stored, anomalyEnabled, baseline, trustedHeader, trustLastHop, geoUrl])
+  }, [stored, anomalyEnabled, baseline, trustedHeader, trustLastHop, geoUrl, useGeo])
 
   const saveMutation = useMutation({
     mutationFn: (payload: LoginSecurityInput) =>
@@ -672,13 +674,20 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
       setAnomalyEnabled(null)
       setBaseline('')
       setTrustedHeader('')
-      setTrustLastHop(false)
+      setTrustLastHop(null)
+      setUseGeo(null)
       setGeoUrl('')
     },
     onError: (error) =>
       toast.error(error.message || t('pages.notifications.settingsSaveFailed')),
   })
 
+  const geo = useQuery({queryKey: ['login-security', 'geoip'], queryFn: loginSecurityApi.geoipStatus})
+  const removeGeo = useMutation({
+    mutationFn: loginSecurityApi.removeGeoip,
+    onSuccess: () => queryClient.invalidateQueries({queryKey:['login-security', 'geoip']}),
+    onError: e => toast.error(e.message),
+  })
   const uploadMutation = useMutation({
     mutationFn: (file: File) => loginSecurityApi.uploadGeoip(file),
     onSuccess: (result) => {
@@ -770,6 +779,9 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
               {t('pages.notifications.uploadGeoip')}
             </Button>
           )}
+          <span className="break-all text-xs">{geo.error?.message || (geo.data && ((geo.data.external ? '运维指定' : '控制台维护') + ' · ' + geo.data.path + (geo.data.installed ? '（已安装）' : '（未安装）')))}</span>
+          {canWrite && <Button size="sm" variant="ghost" disabled={!geo.data?.installed || geo.data.external || uploadMutation.isPending || removeGeo.isPending} onClick={() => { if (window.confirm('移除登录地理位置数据库？')) removeGeo.mutate() }}>移除数据库</Button>}
+          <label className="flex items-center gap-2"><input type="checkbox" checked={current?.geoip_local_enabled ?? false} disabled={!current || !canWrite} onChange={e => setUseGeo(e.target.checked)} />优先使用本地地理库</label>
           <Badge tone={current?.geoip_local_enabled ? 'success' : 'neutral'}>
             {current?.geoip_local_enabled
               ? t('pages.notifications.geoipLocalOn')

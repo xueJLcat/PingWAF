@@ -620,7 +620,10 @@ Remove a rule together with its stored candidate, approved versions and events.
 
 Submit the captured HTML digest, a leaf element ID in `region`, and a `stage`
 of `preview`, `test`, `live` or `off`. Preview returns transformed HTML for
-display as source. Test returns a visitor token for the `X-PingWAF-Page-Test`
+display as source and records the operator, digest and region that were
+reviewed. The same operator must preview the current selection before starting
+test access. A missing or stale review returns 409. Test returns a visitor
+token for the `X-PingWAF-Page-Test`
 header. The edge consumes the header before forwarding. Publication requires
 the tested region and digest. Turning off this transformation preserves the
 page's integrity baseline.
@@ -3613,6 +3616,22 @@ decompresses it, and installs it through one of the two rows above. Re-download
 monthly to pick up reallocated networks; re-upload (or restart) after replacing
 the file.
 
+### GET /asn/names
+
+Administrator-only status of the managed TSV overlay. Includes its path, entry count, load error and operator fallback path.
+
+### POST /asn/names/preview
+
+Validate raw UTF-8 TSV (16 MiB maximum) and return the number of mappings. Duplicate or invalid records are rejected with their line number.
+
+### PUT /asn/names
+
+Validate the raw TSV, atomically replace the managed file and apply it to subsequent lookups.
+
+### DELETE /asn/names
+
+Remove the managed overlay and resume using the operator and bundled mappings.
+
 ### GET /asn/database
 
 Status of the data source. Administrators only. When no database is active
@@ -4857,6 +4876,14 @@ Delete an error page.
 > `GET/PUT /login-security` and the `/notifications/*` endpoints. In a
 > multi-instance deployment each instance must be configured separately.
 
+### GET /settings/elasticsearch/buffer
+
+Read the active and saved disk buffer directory (administrator only).
+
+### PUT /settings/elasticsearch/buffer
+
+Save an absolute directory under /var/lib/pingwaf/buffer, or a null directory to disable the WAL. Takes effect on restart. A pending segment in the previous directory blocks the switch.
+
 ### GET /settings/elasticsearch
 
 Get Elasticsearch configuration.
@@ -5266,6 +5293,14 @@ Partial update: omitted fields keep their value.
 | `geoip_local_enabled` | See above. |
 
 **Errors:** `400` for a rejected geo URL or a failing settings validation.
+
+### GET /login-security/geoip
+
+Administrator-only view of the effective MMDB path, ownership and presence.
+
+### DELETE /login-security/geoip
+
+Remove the managed MMDB. An operator-owned path returns 409.
 
 ### POST /login-security/geoip
 

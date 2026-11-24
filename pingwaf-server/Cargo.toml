@@ -109,8 +109,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 printpdf = { version = "0.7.0", default-features = false }
 
-[dev-dependencies]
 tempfile = { workspace = true }
+
+[dev-dependencies]
 pretty_assertions = { workspace = true }
 # Drives `ServiceExt::oneshot` requests through middleware in unit tests.
 tower = { workspace = true }

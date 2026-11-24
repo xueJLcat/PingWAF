@@ -41,6 +41,8 @@ export const loginSecurityApi = {
 
   /** Uploads a MaxMind-format mmdb; validated server-side before it
    * replaces the previous database. */
+  geoipStatus: () => apiClient.get<{ path: string; external: boolean; installed: boolean }>('/login-security/geoip'),
+  removeGeoip: () => apiClient.delete('/login-security/geoip'),
   uploadGeoip: (file: File) => {
     const form = new FormData()
     form.append('file', file)

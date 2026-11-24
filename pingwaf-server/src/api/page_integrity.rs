@@ -120,7 +120,7 @@ async fn preview(
     common::load_site_read(&s.db, id, &user).await?;
     let row=s.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT jsonb_build_object('path',r.path,'mode',r.mode,'candidate_digest',r.candidate_digest,
-         'dynamic_stage',r.dynamic_stage,'dynamic_region',r.dynamic_region,'candidate_type',r.candidate_type,'candidate_base64',encode(r.candidate_body,'base64'),
+         'dynamic_stage',r.dynamic_stage,'dynamic_region',r.dynamic_region,'tested_digest',r.dynamic_preview_digest,'candidate_type',r.candidate_type,'candidate_base64',encode(r.candidate_body,'base64'),
          'active_version',r.active_version,'approved_type',v.content_type,'approved_digest',v.digest,
          'approved_base64',encode(v.body,'base64'),'approved_at',v.approved_at,'approved_by',v.approved_by,
          'events',(SELECT coalesce(jsonb_agg(to_jsonb(e)-'rule_id'),'[]'::jsonb) FROM
@@ -237,7 +237,7 @@ mod tests {
         .await
         .unwrap()
         .0;
-        let body = b"approved".to_vec();
+        let body = br#"<p id="summary">approved</p><p id="footer">about</p>"#.to_vec();
         let digest = pingwaf_content::protection::body_digest(&body);
         db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE page_integrity_rules SET candidate_digest=$2,candidate_body=$3,candidate_type='text/html' WHERE id=$1",
@@ -249,6 +249,19 @@ mod tests {
                 mode: "trusted_copy".into(),
             })
         };
+        let stage = |user, stage: &str, region: &str| dynamic(
+            state.clone(), user, Path((site,rule)),
+            Json(DynamicSelection { stage:stage.into(), region:region.into(), digest:digest.clone() }),
+        );
+        assert!(matches!(stage(admin.clone(),"test","summary").await, Err(ApiError::Conflict(_))));
+        let previewed = stage(admin.clone(),"preview","summary").await.unwrap();
+        assert!(previewed.0["html"].as_str().unwrap().contains("&#x"));
+        let other_admin = AuthUser::new(Uuid::new_v4(),"second@example.test","admin");
+        assert!(matches!(stage(other_admin,"test","summary").await, Err(ApiError::Conflict(_))));
+        assert!(matches!(stage(admin.clone(),"test","footer").await, Err(ApiError::Conflict(_))));
+        assert!(stage(admin.clone(),"test","summary").await.unwrap().0["test_token"].is_string());
+        assert!(matches!(stage(admin.clone(),"live","footer").await, Err(ApiError::Conflict(_))));
+        assert!(stage(admin.clone(),"live","summary").await.unwrap().0["test_token"].is_null());
         assert!(matches!(
             approve(
                 state.clone(),
@@ -311,7 +324,7 @@ async fn dynamic(
     common::load_site_write(&s.db, site, &user).await?;
     let tx = s.db.begin().await?;
     let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT dynamic_stage,dynamic_region,dynamic_preview_digest,candidate_digest,candidate_body,candidate_type FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",
+        "SELECT dynamic_review,dynamic_stage,dynamic_region,dynamic_preview_digest,candidate_digest,candidate_body,candidate_type FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",
         [site.into(),rule.into()])).await?.ok_or_else(||ApiError::NotFound("page not found".into()))?;
     let mut token = None;
     let mut token_digest = String::new();
@@ -332,13 +345,21 @@ async fn dynamic(
         let body: Vec<u8> = row.try_get("", "candidate_body")?;
         let preview = pingwaf_content::dynamic::transform(&body, &input.region)
             .map_err(|reason| ApiError::BadRequest(reason.into()))?;
+        let review = serde_json::json!({"actor": user.id, "digest": input.digest, "region": input.region});
         match input.stage.as_str() {
             "preview" => {
+                tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                    "UPDATE page_integrity_rules SET dynamic_review=$3 WHERE site_id=$1 AND id=$2",
+                    [site.into(), rule.into(), review.into()])).await?;
+                tx.commit().await?;
                 return Ok(Json(
                     serde_json::json!({"html":String::from_utf8_lossy(&preview),"digest":digest}),
                 ));
             },
             "test" => {
+                if row.try_get::<Option<Value>>("", "dynamic_review")?.as_ref() != Some(&review) {
+                    return Err(ApiError::Conflict("preview the current page and region before enabling test access".into()));
+                }
                 let secret = Uuid::new_v4().to_string();
                 token_digest =
                     pingwaf_content::protection::body_digest(secret.as_bytes());
@@ -359,7 +380,7 @@ async fn dynamic(
         }
     }
     tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE page_integrity_rules SET dynamic_stage=$3,dynamic_region=$4,dynamic_test_digest=$5,dynamic_preview_digest=$6 WHERE site_id=$1 AND id=$2",
+        "UPDATE page_integrity_rules SET dynamic_stage=$3,dynamic_region=$4,dynamic_test_digest=$5,dynamic_preview_digest=$6,dynamic_review=NULL WHERE site_id=$1 AND id=$2",
         [site.into(),rule.into(),input.stage.into(),input.region.into(),token_digest.into(),input.digest.into()])).await?;
     tx.commit().await?;
     crate::grpc::notify_config_changed(&s, site, Some(&user.email)).await;
@@ -374,7 +395,7 @@ async fn disable_dynamic(
     common::require_write(&user)?;
     common::load_site_write(&s.db, site, &user).await?;
     s.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE page_integrity_rules SET dynamic_stage='off',dynamic_test_digest='' WHERE site_id=$1 AND dynamic_stage<>'off'",[site.into()])).await?;
+        "UPDATE page_integrity_rules SET dynamic_stage='off',dynamic_test_digest='',dynamic_review=NULL WHERE site_id=$1 AND (dynamic_stage<>'off' OR dynamic_review IS NOT NULL)",[site.into()])).await?;
     crate::grpc::notify_config_changed(&s, site, Some(&user.email)).await;
     Ok(Json(serde_json::json!({"disabled":true})))
 }

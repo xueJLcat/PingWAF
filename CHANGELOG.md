@@ -10,6 +10,13 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Add console maintenance for ASN databases and institution name tables, login GeoIP file status and removal, and persistent Elasticsearch buffer directories.
+
+- Require a matching operator preview before issuing dynamic page test
+  access. Page protection now distinguishes current, reviewed and tested
+  content when enabling publication. Report forms validate the supported
+  seven-day range and reject future end times before submitting.
+
 - Administrators can register static directories from the node inventory.
   Linux nodes validate the selected directory, persist changes by revision,
   and acknowledge the result. Site editors continue to select identifiers.

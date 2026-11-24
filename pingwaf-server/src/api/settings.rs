@@ -27,6 +27,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/settings/elasticsearch", get(show).put(update))
         .route("/settings/elasticsearch/test", post(test))
+        .route(
+            "/settings/elasticsearch/buffer",
+            get(buffer_status).put(save_buffer),
+        )
 }
 
 /// The redacted settings view returned to the dashboard.
@@ -181,6 +185,7 @@ async fn test(
 
 /// Builds an ephemeral client, checks health and installs the template.
 async fn run_probe(mut config: EsConfig) -> EsTestResult {
+    config.buffer_dir = None; // A probe must never replay the production WAL.
     config.normalise();
     let client = match ElasticsearchClient::new(config).await {
         Ok(client) => client,
@@ -229,4 +234,61 @@ async fn probe(config: EsConfig) -> Result<EsHealth, ApiError> {
             })))
         },
     }
+}
+
+#[derive(serde::Deserialize)]
+struct BufferInput {
+    directory: Option<String>,
+}
+
+async fn buffer_status(
+    State(state): State<AppState>,
+    current: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let active = state
+        .config
+        .elasticsearch
+        .as_ref()
+        .and_then(|c| c.buffer_dir.clone());
+    let saved = crate::es::directory::load(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let desired = saved.map(|s| s.directory).unwrap_or_else(|| active.clone());
+    Ok(Json(
+        serde_json::json!({"root":crate::es::directory::root(),"active":active,"desired":desired}),
+    ))
+}
+
+async fn save_buffer(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Json(input): Json<BufferInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let active = state
+        .config
+        .elasticsearch
+        .as_ref()
+        .and_then(|c| c.buffer_dir.clone());
+    let choice = crate::es::directory::Choice {
+        previous: active.clone(),
+        directory: input
+            .directory
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty()),
+    };
+    let choice = tokio::task::spawn_blocking(move || {
+        crate::es::directory::prepare(&choice).map(|_| choice)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    crate::es::directory::save(&state.db, &choice)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    tracing::info!(actor=%current.email, directory=?choice.directory, "Elasticsearch buffer directory saved");
+    Ok(Json(
+        serde_json::json!({"root":crate::es::directory::root(),"active":active,"desired":choice.directory}),
+    ))
 }
