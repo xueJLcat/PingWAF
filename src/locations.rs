@@ -58,7 +58,7 @@ pub fn new_location_provider() -> Arc<dyn LocationProvider> {
     LOCATION_PROVIDER.clone()
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn isolated_locations(
     config: &HashMap<String, LocationConf>,
 ) -> anyhow::Result<Arc<dyn LocationProvider>> {

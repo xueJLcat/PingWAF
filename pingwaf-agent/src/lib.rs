@@ -163,6 +163,16 @@ impl PingWafAgent {
     /// registers the agent, and starts heartbeat/log-shipping tasks.
     /// If the server is unreachable, the agent operates from cached rules.
     pub async fn start(config: AgentConfig) -> anyhow::Result<Arc<Self>> {
+        Self::start_with_client(config, |client, _| client).await
+    }
+
+    pub async fn start_with_client(
+        config: AgentConfig,
+        configure: impl FnOnce(
+            ControlPlaneClient,
+            &Arc<RuleCache>,
+        ) -> ControlPlaneClient,
+    ) -> anyhow::Result<Arc<Self>> {
         info!("Starting PingWAF agent...");
 
         let agent_id = config.resolved_agent_id();
@@ -175,10 +185,13 @@ impl PingWafAgent {
         let metrics = Arc::new(MetricsCollector::new());
 
         // Create the gRPC client
-        let client = Arc::new(ControlPlaneClient::new(
-            config.clone(),
-            Arc::clone(&rule_cache),
-            Arc::clone(&metrics),
+        let client = Arc::new(configure(
+            ControlPlaneClient::new(
+                config.clone(),
+                Arc::clone(&rule_cache),
+                Arc::clone(&metrics),
+            ),
+            &rule_cache,
         ));
 
         let agent = Arc::new(Self {

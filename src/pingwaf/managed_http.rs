@@ -21,6 +21,117 @@ use super::convert_proxy_config;
 #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
 mod tls;
 
+pub(super) struct Host {
+    state: pingwaf_agent::managed::AppliedState<Arc<View>>,
+    cache: Arc<pingwaf_agent::cache::RuleCache>,
+    defaults: std::sync::Mutex<Option<pingwaf_proto::SiteConfig>>,
+    worker: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl Host {
+    pub(super) fn new(
+        cache: Arc<pingwaf_agent::cache::RuleCache>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Default::default(),
+            cache,
+            defaults: Default::default(),
+            worker: Default::default(),
+        })
+    }
+    fn cancel_worker(&self) {
+        if let Some(worker) =
+            self.worker.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            worker.abort();
+        }
+    }
+
+    async fn apply(
+        &self,
+        pending: pingwaf_agent::managed::Pending,
+    ) -> anyhow::Result<()> {
+        let dir = self.cache.cache_dir().to_owned();
+        let (pending, view) = tokio::task::spawn_blocking(move || {
+            View::build(pending.candidate(), &dir)
+                .map(|view| (pending, Arc::new(view)))
+        })
+        .await??;
+        view.check_upstreams().await?;
+        if self.state.publish(pending, view)?
+            && let Some(forwarding) = self.state.forwarding()
+        {
+            forwarding.run(|view| view.refresh_upstreams()).await;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn serve(
+        &self,
+        tcp: tokio::net::TcpStream,
+        listener: Listener,
+        shutdown: ShutdownWatch,
+    ) {
+        if let Some(forwarding) = self.state.forwarding() {
+            let _ =
+                serve_http(forwarding, tcp, listener, shutdown, false).await;
+        }
+    }
+}
+
+struct HostCallbacks(Arc<Host>);
+
+impl Host {
+    pub(super) fn callbacks(
+        self: &Arc<Self>,
+    ) -> Arc<dyn pingwaf_agent::client::ManagedHost> {
+        Arc::new(HostCallbacks(self.clone()))
+    }
+}
+
+impl pingwaf_agent::client::ManagedHost for HostCallbacks {
+    fn session_started(&self, session: Uuid) {
+        self.0.state.start_session(session);
+    }
+    fn session_ended(&self, session: Uuid) {
+        self.0.state.end_session(session);
+        self.0.cancel_worker();
+    }
+    fn candidate_received(&self, received: pingwaf_agent::managed::Received) {
+        let host = self.0.clone();
+        let pending = match host.state.prepare(received) {
+            Ok(Some(pending)) => pending,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "managed authorization failed");
+                return;
+            },
+        };
+        host.cancel_worker();
+        let defaults = pending.candidate().default_config();
+        let mut previous =
+            host.defaults.lock().unwrap_or_else(|e| e.into_inner());
+        if previous.as_ref() != Some(&defaults) {
+            let mut config = defaults.clone();
+            config.config_hash =
+                hex::encode(pending.candidate().version().hash);
+            if let Err(error) = host.cache.update_from_site_config(&config) {
+                tracing::warn!(%error, "default configuration update failed");
+                return;
+            }
+            *previous = Some(defaults);
+        }
+        drop(previous);
+        let task = tokio::spawn(async move {
+            if let Err(error) = host.apply(pending).await {
+                tracing::warn!(%error, "managed snapshot could not be applied");
+            }
+        });
+        *self.0.worker.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(task.abort_handle());
+    }
+}
+
 struct View {
     rules: Compiled,
     sites: HashMap<Uuid, ManagedRequestSite>,
@@ -29,6 +140,27 @@ struct View {
 }
 
 impl View {
+    async fn refresh_upstreams(&self) {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            if let Err(error) = self.check_upstreams().await {
+                tracing::warn!(%error, "managed upstream check failed");
+            }
+        }
+    }
+
+    async fn check_upstreams(&self) -> anyhow::Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for site in self.sites.values() {
+            for (_, upstream) in site.upstreams.list() {
+                if seen.insert(Arc::as_ptr(&upstream) as usize) {
+                    upstream.run_health_check().await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn build(candidate: &Candidate, cache_dir: &Path) -> anyhow::Result<Self> {
         let rules = candidate.compile()?;
         let sites = rules
@@ -328,6 +460,7 @@ async fn serve_http(
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(test)]
 mod tests {
     use super::*;
     use pingwaf_agent::managed::{AppliedState, PullWindow, Receiver};
@@ -394,10 +527,9 @@ mod tests {
         }
     }
 
-    fn apply(
+    fn receive(
         sites: Vec<ManagedSite>,
-        cache_dir: &Path,
-    ) -> (Arc<AppliedState<Arc<View>>>, Uuid) {
+    ) -> (Uuid, pingwaf_agent::managed::Received) {
         let config = ManagedSiteConfig { sites }.encode_to_vec();
         let session = Uuid::new_v4();
         let mut receiver = Receiver::default();
@@ -417,6 +549,14 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+        (session, received)
+    }
+
+    fn apply(
+        sites: Vec<ManagedSite>,
+        cache_dir: &Path,
+    ) -> (Arc<AppliedState<Arc<View>>>, Uuid) {
+        let (session, received) = receive(sites);
         let state = Arc::new(AppliedState::default());
         state.start_session(session);
         let pending = state.prepare(received).unwrap().unwrap();
@@ -726,45 +866,42 @@ mod tests {
                 }
             }
             let cache = tempfile::tempdir().unwrap();
-            let (state, _) = apply(sites, cache.path());
-            let forwarded = state.forwarding().unwrap();
-            let [a_origin, b_origin] = forwarded
-                .run(|view| {
-                    let upstreams = [0, 1].map(|index| {
-                        let id = view
-                            .rules
-                            .select(
-                                listener(endpoints[index].0.port()),
-                                "alias.example",
-                            )
-                            .unwrap()
-                            .0;
-                        view.sites[&id].upstreams.get("same-pool").unwrap()
-                    });
-                    std::future::ready(upstreams)
-                })
-                .await
-                .unwrap();
-            assert!(!Arc::ptr_eq(&a_origin, &b_origin));
-            a_origin.run_health_check().await.unwrap();
-            b_origin.run_health_check().await.unwrap();
+            let rules = pingwaf_agent::cache::RuleCache::new(
+                cache.path().into(),
+                "integration".into(),
+            )
+            .unwrap();
+            let host = Host::new(rules.clone());
+            let callbacks = host.callbacks();
+            let (session, received) = receive(sites);
+            let defaults = received.candidate.default_config();
+            assert_eq!(defaults.sites.len(), 1);
+            assert_eq!(
+                defaults.sites[0]
+                    .rules
+                    .as_ref()
+                    .unwrap()
+                    .site_policies
+                    .len(),
+                1
+            );
+            callbacks.session_started(session);
+            callbacks.candidate_received(received);
+            assert_eq!(rules.all_sites().sites.len(), 1);
+            assert!(
+                rules.get_site_rules_by_id(&defaults.sites[0].id).is_some()
+            );
+            while host.state.forwarding().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
 
             let mut clients = Vec::new();
             for (addr, proxy, marker) in endpoints {
-                let state = state.clone();
+                let host = host.clone();
                 tasks.spawn(async move {
                     let (tcp, _) = proxy.accept().await.unwrap();
                     let (_shutdown, watch) = tokio::sync::watch::channel(false);
-                    serve_http(
-                        state.forwarding().unwrap(),
-                        tcp,
-                        listener(addr.port()),
-                        watch,
-                        false,
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap();
+                    host.serve(tcp, listener(addr.port()), watch).await;
                 });
                 clients.push((addr, marker));
             }
@@ -788,6 +925,8 @@ mod tests {
                     assert!(response.starts_with("HTTP/1.1 421"), "{response}");
                 }
             }
+            callbacks.session_ended(session);
+            assert!(host.state.forwarding().is_none());
             while let Some(result) = tasks.join_next().await {
                 result.unwrap();
             }

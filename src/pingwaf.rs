@@ -62,9 +62,8 @@ use pingwaf_server::ServerConfig;
 use tracing::{error, info, warn};
 
 mod ingress;
-// The view is built in isolation; only the test harness can accept requests
-// against one until listener authorization and site policy are wired.
-#[cfg(all(test, target_os = "linux"))]
+// Managed leases use Linux boottime so suspend cannot extend authorization.
+#[cfg(target_os = "linux")]
 mod managed_http;
 
 /// Stable tracing target for the shared startup and data-plane logs.
@@ -2182,14 +2181,47 @@ async fn start_legacy_data_plane(
     Ok(())
 }
 
-async fn run_data_plane(rule_cache: Arc<RuleCache>, control_ports: Vec<u16>) {
+#[cfg(target_os = "linux")]
+type IngressHost = Option<Arc<managed_http::Host>>;
+#[cfg(not(target_os = "linux"))]
+type IngressHost = Option<()>;
+
+async fn start_data_plane_agent(
+    config: AgentConfig,
+) -> anyhow::Result<(Arc<pingwaf_agent::PingWafAgent>, IngressHost)> {
+    #[cfg(target_os = "linux")]
+    if ingress::configured() {
+        let mut host = None;
+        let agent = pingwaf_agent::PingWafAgent::start_with_client(
+            config,
+            |client, cache| {
+                let runtime = managed_http::Host::new(cache.clone());
+                let client = client.with_managed_host(runtime.callbacks());
+                host = Some(runtime);
+                client
+            },
+        )
+        .await?;
+        return Ok((agent, host));
+    }
+    Ok((pingwaf_agent::start_agent(config).await?, None))
+}
+
+async fn run_data_plane(
+    rule_cache: Arc<RuleCache>,
+    control_ports: Vec<u16>,
+    host: IngressHost,
+) {
     // Preconfigured ingress is independent of the legacy proxy, which may
     // be waiting for a site (or fail configuration validation).
-    tokio::join!(ingress::run(rule_cache.clone(), control_ports), async {
-        if let Err(error) = start_legacy_data_plane(rule_cache).await {
-            error!(target: LOG_TARGET, %error, "data plane proxy exited with error");
+    tokio::join!(
+        ingress::run(rule_cache.clone(), control_ports, host),
+        async {
+            if let Err(error) = start_legacy_data_plane(rule_cache).await {
+                error!(target: LOG_TARGET, %error, "data plane proxy exited with error");
+            }
         }
-    });
+    );
 }
 
 /// How often the hot-reload watcher looks at the rule cache.
@@ -2408,11 +2440,13 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
 
             // Start the agent in the background first.
             // It will retry connecting to the server until it comes up.
-            let agent = match pingwaf_agent::start_agent(*agent_config).await {
-                Ok(agent) => Some(agent),
+            let (agent, host) = match start_data_plane_agent(*agent_config)
+                .await
+            {
+                Ok((agent, host)) => (Some(agent), host),
                 Err(e) => {
                     error!(target: LOG_TARGET, error = %e, "failed to start agent, continuing with server only");
-                    None
+                    (None, None)
                 },
             };
 
@@ -2427,7 +2461,11 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
                         })
                         .map(|addr| addr.port())
                         .collect();
-                Some(tokio::spawn(run_data_plane(rule_cache, control_ports)))
+                Some(tokio::spawn(run_data_plane(
+                    rule_cache,
+                    control_ports,
+                    host,
+                )))
             } else {
                 None
             };
@@ -2459,7 +2497,7 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
         cache_dir = %config.cache_dir,
         "starting PingWAF in Agent mode (data plane only)"
     );
-    let agent = pingwaf_agent::start_agent(config).await?;
+    let (agent, host) = start_data_plane_agent(config).await?;
     // Opt-in self-upgrade: follows the control plane's build, then re-execs
     // this process (see `pingwaf_agent::upgrade`).
     let upgrade = pingwaf_agent::upgrade::spawn(Arc::clone(&agent));
@@ -2467,7 +2505,8 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
 
     // Start the data plane proxy in the background
     let rule_cache = Arc::clone(&agent.rule_cache);
-    let proxy_handle = tokio::spawn(run_data_plane(rule_cache, Vec::new()));
+    let proxy_handle =
+        tokio::spawn(run_data_plane(rule_cache, Vec::new(), host));
 
     // Wait for shutdown signal
     shutdown_signal().await;

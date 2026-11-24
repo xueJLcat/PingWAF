@@ -256,7 +256,7 @@ pub fn new_plugin_provider() -> Arc<dyn PluginProvider> {
     PLUGIN_PROVIDER.clone()
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn isolated_plugins(
     config: HashMap<String, PluginConf>,
 ) -> anyhow::Result<Arc<dyn PluginProvider>> {

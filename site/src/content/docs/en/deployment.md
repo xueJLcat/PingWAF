@@ -21,10 +21,10 @@ minutes: 10
 
 `GET /healthz` answers on both HTTP and HTTPS, which is what the compose health check and most load balancers should probe. Everything else redirects to HTTPS.
 
-`PINGWAF_INGRESS_LISTENERS` is an experimental TCP bind diagnostic for isolated development, not a custom site deployment setting. It is unset by default. An agent or all-in-one process can pre-bind entries such as `http@127.0.0.1:81,https@[::1]:8443`; bind status is reported separately from site status. HTTP entries do not forward traffic and HTTPS entries do not negotiate TLS.
+On Linux, a valid `PINGWAF_INGRESS_LISTENERS` configuration enables managed snapshots for the agent and all-in-one process. A custom HTTP or HTTPS listener serves an assigned site only while its applied snapshot has a live lease. The default is unset.
 
 The legacy agent protocol delivers default-ingress sites only. A TCP bind report does not authorize custom-ingress traffic.
-Migration `000105` adds internal state for an experimental ordered snapshot RPC. The bundled agent does not yet use it, and custom site assignment and forwarding remain disabled.
+Custom site creation remains gated in the control plane.
 
 ## Docker Compose
 

@@ -480,7 +480,7 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
 | `PINGWAF_LISTEN_HTTP_ADDR` | — (data-plane `:80` listener; default `[::]:80`, automatic `0.0.0.0:80` fallback) |
 | `PINGWAF_LISTEN_HTTPS_ADDR` | — (data-plane `:443` listener; default `[::]:443`, automatic `0.0.0.0:443` fallback) |
-| `PINGWAF_INGRESS_LISTENERS` | — (experimental TCP bind diagnostics; unset by default; no custom site traffic) |
+| `PINGWAF_INGRESS_LISTENERS` | — (experimental managed ingress on Linux; unset by default) |
 | `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
 | `PINGWAF_ES_ENABLED` | — Elasticsearch shipper toggle |
 | `PINGWAF_ES_URLS` | — Elasticsearch URLs (comma-separated) |
@@ -501,14 +501,13 @@ nonzero port, one declaration per port, at most 32 entries. `[::]` is
 dual-stack; other IPv6 literals are IPv6-only. Port `80`, port `443`, overrides
 for the default data-plane listeners, and the all-in-one management and gRPC
 ports are reserved. An unavailable port does not stop the other entries; a
-change or retry requires a process restart. A `Bound` heartbeat entry means
-TCP bind only: valid unmatched HTTP requests return `404`, HTTPS connections
-are closed without a handshake, and neither entry can be assigned to a site.
-The legacy agent protocol delivers default-ingress sites only. A custom TCP
-bind report does not grant the agent permission to serve custom-ingress sites.
-The control plane has an opt-in ordered snapshot RPC for protocol testing;
-the bundled agent does not yet consume it. Migration `000105` adds internal
-ordering state but does not allow custom assignments or traffic.
+change or retry requires a process restart. A `Bound` heartbeat entry reports the socket state.
+Linux agents configured with these listeners negotiate the managed protocol. Use
+a control plane that supports ordered snapshots. Default-ingress sites continue
+through the default proxy. An assigned custom site uses its own HTTP or TLS
+configuration after initial upstream checks. Session loss or lease expiry
+withdraws its view and cancels in-flight forwarding. The control plane still
+gates custom site creation while end-to-end deployment acceptance is pending.
 
 ## Deployment Modes
 

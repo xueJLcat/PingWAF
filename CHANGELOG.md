@@ -12,6 +12,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Linux agents with configured custom listeners now consume managed snapshots,
+  refresh isolated upstreams and revoke custom forwarding on session loss.
+  Default listeners receive only the default sites in the snapshot.
+
 - Managed HTTPS site assembly now configures visitor authentication for local
   passwords and for sites that also offer OIDC. Both gates share the selected
   site and external origin. A validated local session satisfies the combined

@@ -53,6 +53,38 @@ impl Candidate {
         &self.sites
     }
 
+    /// Project only default listeners into the existing default proxy. Its
+    /// failover registry must never include aliases from a custom listener.
+    pub fn default_config(&self) -> pingwaf_proto::SiteConfig {
+        let mut rows: Vec<_> = self
+            .sites
+            .values()
+            .filter(|item| item.ingress.is_none())
+            .filter_map(|item| {
+                Some((item.site.as_ref()?.clone(), item.failover_mode))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+        let policies = rows
+            .iter()
+            .map(|(site, mode)| pingwaf_proto::SitePolicy {
+                domain: site.domain.clone(),
+                alternate_domains: site.alternate_domains.clone(),
+                mode: *mode,
+            })
+            .collect();
+        // RuleCache reads the common registry from the first site's bundle.
+        if let Some(bundle) =
+            rows.first_mut().and_then(|(s, _)| s.rules.as_mut())
+        {
+            bundle.site_policies = policies;
+        }
+        pingwaf_proto::SiteConfig {
+            sites: rows.into_iter().map(|(site, _)| site).collect(),
+            ..Default::default()
+        }
+    }
+
     /// Compare decoded policy, not protobuf bytes or legacy fingerprints.
     #[cfg(target_os = "linux")]
     fn same_policy(&self, other: &Self) -> bool {

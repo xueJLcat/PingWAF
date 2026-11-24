@@ -201,6 +201,8 @@ pub(super) fn http_proxy(
 
 async fn serve(
     listener: TcpListener,
+    _endpoint: Endpoint,
+    _host: super::IngressHost,
     app: Option<Arc<HttpProxy<Server>>>,
     shutdown: ShutdownWatch,
 ) {
@@ -212,12 +214,19 @@ async fn serve(
             _ = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => match accepted {
                 Ok((tcp, _)) => {
-                    // HTTPS currently reserves TCP only. Never hand these
-                    // connections to HTTP or borrow the legacy certificate.
-                    if let Some(app) = &app
-                        && connections.len() < MAX_CONNECTIONS_PER_LISTENER
-                    {
-                        let _ = tcp.set_nodelay(true);
+                    if connections.len() >= MAX_CONNECTIONS_PER_LISTENER { continue; }
+                    let _ = tcp.set_nodelay(true);
+                    #[cfg(target_os = "linux")]
+                    if let Some(host) = &_host {
+                        let identity = pingwaf_agent::managed::Listener::Custom {
+                            port: _endpoint.addr.port(), protocol: _endpoint.protocol,
+                        };
+                        let host = host.clone();
+                        let shutdown = shutdown.clone();
+                        connections.spawn(async move { host.serve(tcp, identity, shutdown).await });
+                        continue;
+                    }
+                    if let Some(app) = &app {
                         connections.spawn(Service::handle_event(
                             Box::new(downstream_stream(tcp)), app.clone(), shutdown.clone(),
                         ));
@@ -232,7 +241,17 @@ async fn serve(
     }
 }
 
-pub(super) async fn run(cache: Arc<RuleCache>, control_ports: Vec<u16>) {
+#[cfg(target_os = "linux")]
+pub(super) fn configured() -> bool {
+    std::env::var(LISTENERS_ENV)
+        .is_ok_and(|value| !parse_list(&value).is_empty())
+}
+
+pub(super) async fn run(
+    cache: Arc<RuleCache>,
+    control_ports: Vec<u16>,
+    host: super::IngressHost,
+) {
     let endpoints = match std::env::var(LISTENERS_ENV) {
         Ok(value) if value.trim().is_empty() => return,
         Ok(value) => parse_list(&value),
@@ -255,7 +274,7 @@ pub(super) async fn run(cache: Arc<RuleCache>, control_ports: Vec<u16>) {
             warn!(target: LOG_TARGET, addr = %endpoint.addr, "custom ingress port reserved by a default or control-plane listener");
             IngressBindState::Reserved
         } else {
-            match start(endpoint, watch.clone(), &mut tasks) {
+            match start(endpoint, watch.clone(), &mut tasks, host.clone()) {
                 Ok(()) => {
                     info!(target: LOG_TARGET, addr = %endpoint.addr, protocol = ?endpoint.protocol, "custom ingress TCP socket bound; no site applied");
                     IngressBindState::Bound
@@ -282,14 +301,15 @@ fn start(
     endpoint: Endpoint,
     shutdown: ShutdownWatch,
     tasks: &mut JoinSet<()>,
+    host: super::IngressHost,
 ) -> anyhow::Result<()> {
-    let app = if endpoint.protocol == IngressProtocol::Http {
+    let app = if host.is_none() && endpoint.protocol == IngressProtocol::Http {
         Some(Arc::new(unassigned_http(endpoint.addr.port())?))
     } else {
         None
     };
     let listener = bind(endpoint.addr)?;
-    tasks.spawn(serve(listener, app, shutdown));
+    tasks.spawn(serve(listener, endpoint, host, app, shutdown));
     Ok(())
 }
 
