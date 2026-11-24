@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/Input'
 type Rule = { id: string; path: string; mode: string; active_version: number | null }
 type Preview = {
   path: string; mode: string; candidate_digest: string | null; candidate_type: string | null
+  dynamic_stage: string; dynamic_region: string;
   candidate_base64: string | null; approved_base64: string | null; approved_digest: string | null
   approved_type: string | null; approved_at: string | null; approved_by: string | null
   events: { category: string; detail: string; observations: number; last_seen: string }[]
@@ -76,9 +77,45 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
         </Button>
         {confirmRemoval && <button onClick={() => setConfirmRemoval(false)}>取消</button>}
       </div>}
+      {canWrite && <DynamicRegion key={selected} base={base} rule={selected} initial={preview}
+        refresh={()=>client.invalidateQueries({queryKey:[base]})} />}
       <ul>{preview.events.map(event => <li key={event.category + event.detail}>
         {event.last_seen} · {event.category} · {event.detail} · {event.observations} 次
       </li>)}</ul>
     </div>}
+  </section>
+}
+
+function DynamicRegion({base,rule,initial,refresh}: {
+  base:string; rule:string; initial:Preview; refresh:()=>Promise<void>
+}) {
+  const [region,setRegion]=useState(initial.dynamic_region)
+  const [sample,setSample]=useState<{html:string;digest:string;region:string}>()
+  const [token,setToken]=useState('')
+  const change=useMutation({mutationFn:async(stage:string)=>{
+    if(stage==='disable'){
+      await apiClient.post(base.replace(/\/integrity$/, '/dynamic/disable'),{})
+      setToken('')
+    }else{
+      const value=await apiClient.post<{html?:string;test_token?:string}>(`${base}/${rule}/dynamic`,{stage,region,digest:initial.candidate_digest??''})
+      if(value.html!==undefined)setSample({html:value.html,digest:initial.candidate_digest!,region})
+      if(stage!=='preview')setToken(value.test_token??'')
+    }
+    await refresh()
+  }})
+  const reviewed=sample?.digest===initial.candidate_digest && sample?.region===region
+  return <section className="space-y-2"><h4>页面动态防护</h4>
+    <p>当前状态：{({off:'已关闭',test:'测试访问',live:'正式发布'} as Record<string,string>)[initial.dynamic_stage]}</p>
+    <label>纯文本元素 ID<Input value={region} onChange={e=>{setRegion(e.target.value);setSample(undefined)}} placeholder="article-summary"/></label>
+    <div className="flex flex-wrap gap-2">
+      <Button disabled={!region || !initial.candidate_digest || change.isPending} onClick={()=>change.mutate('preview')}>预览变换</Button>
+      <Button disabled={!reviewed || change.isPending} onClick={()=>change.mutate('test')}>开启测试访问</Button>
+      <Button disabled={!reviewed || initial.dynamic_stage!=='test' || initial.dynamic_region!==region || change.isPending} onClick={()=>change.mutate('live')}>发布该页面</Button>
+      <Button disabled={change.isPending} onClick={()=>change.mutate('off')}>关闭该页面</Button>
+      <Button disabled={change.isPending} onClick={()=>change.mutate('disable')}>关闭整站动态防护</Button>
+    </div>
+    {sample && <details open><summary>变换后的 HTML 源码</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{sample.html}</pre></details>}
+    {token && <p>测试请求头 <code>X-PingWAF-Page-Test: {token}</code></p>}
+    {change.error && <p role="alert">{change.error.message}</p>}
   </section>
 }

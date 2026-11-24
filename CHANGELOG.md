@@ -10,6 +10,9 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Add opt-in public HTML text transformation with preview, a test visitor
+  header, per-page publication and site-wide disable after integrity checking.
+
 - Add site-scoped, immutable protection reports with offline Chinese PDF and
   CSV exports, plus a read-only live dashboard showing coverage and node health.
 

@@ -124,6 +124,7 @@ impl Session<'_> {
                 supports_site_handlers: true,
                 supports_site_archives: true,
                 supports_page_integrity: true,
+                supports_dynamic_pages: true,
                 agent_token: token.to_string(),
             }),
         )

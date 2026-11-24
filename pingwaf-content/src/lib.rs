@@ -1,5 +1,6 @@
 //! Bounded ZIP validation shared by the static draft API and release installer.
 pub mod protection;
+pub mod dynamic;
 use std::{
     collections::BTreeMap,
     io::{self, Cursor, Read},

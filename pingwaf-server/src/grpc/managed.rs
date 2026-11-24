@@ -29,10 +29,11 @@ pub(super) async fn build_snapshot(
     supports_site_handlers: bool,
     supports_site_archives: bool,
     supports_page_integrity: bool,
+    supports_dynamic_pages: bool,
 ) -> Result<ManagedSnapshot, Status> {
     const MAX_ATTEMPTS: usize = 3;
     for _ in 0..MAX_ATTEMPTS {
-        match build_once(db, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity).await {
+        match build_once(db, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity, supports_dynamic_pages).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(BuildError::Forbidden) => {
                 return Err(Status::permission_denied(
@@ -240,11 +241,12 @@ async fn build_once(
     supports_site_handlers: bool,
     supports_site_archives: bool,
     supports_page_integrity: bool,
+    supports_dynamic_pages: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     let tx = db
         .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
         .await?;
-    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity).await?;
+    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity, supports_dynamic_pages).await?;
     tx.commit().await?;
     Ok(snapshot)
 }
@@ -256,6 +258,7 @@ async fn build_in_view(
     supports_site_handlers: bool,
     supports_site_archives: bool,
     supports_page_integrity: bool,
+    supports_dynamic_pages: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     require_session(tx, agent_id, session_id).await?;
     let (agent, owner_id) = authorize(tx, agent_id).await?;
@@ -263,6 +266,7 @@ async fn build_in_view(
     if !supports_site_archives { sites.retain(|site| site.site_handler.as_ref().and_then(|v| v["kind"].as_str()) != Some("zip")); }
     if !supports_site_handlers { sites.retain(|site| site.site_handler.is_none()); }
     let mut config = assemble_managed_config(tx, &sites).await?;
+    if !supports_dynamic_pages { config.sites.retain(|s| s.protected_pages.iter().all(|r| r.dynamic_stage == "off" || r.dynamic_stage.is_empty())); }
     if !supports_page_integrity { config.sites.retain(|site| site.protected_pages.is_empty()); }
     if config.encoded_len() > pingwaf_proto::MAX_MANAGED_CONFIG_BYTES {
         return Err(BuildError::TooLarge);
@@ -755,6 +759,7 @@ pub(super) async fn check_postgres(
                 supports_site_handlers: false,
                 supports_site_archives: false,
                 supports_page_integrity: false,
+                supports_dynamic_pages: false,
                 agent_token: token,
             }))
             .await
@@ -1062,7 +1067,7 @@ pub(super) async fn check_postgres(
     )
     .await;
     let Err(BuildError::Storage(stale)) =
-        build_in_view(&ready, id, session, false, false, false).await
+        build_in_view(&ready, id, session, false, false, false, false).await
     else {
         panic!("a stale view must not get a generation after newer content");
     };

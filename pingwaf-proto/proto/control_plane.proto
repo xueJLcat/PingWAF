@@ -1192,6 +1192,9 @@ message PageIntegrityRule {
   string digest = 5;
   string content_type = 6;
   bytes approved = 7;
+  string dynamic_stage = 8;
+  string dynamic_region = 9;
+  string dynamic_test_digest = 10;
 }
 message PageIntegrityObservation {
   string agent_token = 1;
@@ -1241,6 +1244,7 @@ message GetManagedSnapshotRequest {
   bool supports_site_handlers = 2;
   bool supports_site_archives = 3;
   bool supports_page_integrity = 4;
+  bool supports_dynamic_pages = 5;
 }
 
 // Hash the bytes exactly as transmitted, not a re-encoded protobuf with maps.

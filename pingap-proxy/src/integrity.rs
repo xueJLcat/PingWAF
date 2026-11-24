@@ -11,9 +11,18 @@ use std::sync::Arc;
 pub(crate) struct Selected {
     policy: Arc<Policy>,
     rule: Rule,
+    dynamic: bool,
 }
 
 pub(crate) fn select(session: &mut Session, policy: Option<&Arc<Policy>>) {
+    let test = session
+        .req_header()
+        .headers
+        .get("x-pingwaf-page-test")
+        .map(|v| pingwaf_content::protection::body_digest(v.as_bytes()));
+    session
+        .req_header_mut()
+        .remove_header("x-pingwaf-page-test");
     let Some(policy) = policy else { return };
     let req = session.req_header();
     let Some(rule) = policy.paths.get(req.uri.path()) else {
@@ -26,6 +35,9 @@ pub(crate) fn select(session: &mut Session, policy: Option<&Arc<Policy>>) {
         return;
     }
     session.req_header_mut().extensions_mut().insert(Selected {
+        dynamic: rule.dynamic_stage == "live"
+            || (rule.dynamic_stage == "test"
+                && test.as_ref() == Some(&rule.dynamic_test_digest)),
         policy: policy.clone(),
         rule: rule.clone(),
     });
@@ -42,6 +54,76 @@ pub(crate) fn unavailable(session: &Session) {
 }
 
 impl Selected {
+    fn allow_dynamic(&mut self, header: &ResponseHeader, media: &str) {
+        if !self.dynamic {
+            return;
+        }
+        let reason = if !media
+            .split(';')
+            .next()
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/html"))
+        {
+            Some("content_type")
+        } else if media.split(';').skip(1).any(|p| {
+            let p = p.trim().to_ascii_lowercase();
+            p.starts_with("charset")
+                && !matches!(p.as_str(), "charset=utf-8" | "charset=\"utf-8\"")
+        }) {
+            Some("charset")
+        } else if header.headers.contains_key("content-security-policy")
+            || header
+                .headers
+                .contains_key("content-security-policy-report-only")
+        {
+            Some("csp")
+        } else if header.headers.get_all(header::CACHE_CONTROL).iter().any(
+            |v| {
+                v.to_str()
+                    .unwrap_or("")
+                    .split(',')
+                    .any(|s| s.trim().eq_ignore_ascii_case("no-transform"))
+            },
+        ) {
+            Some("no_transform")
+        } else if !header.headers.contains_key(header::CONTENT_LENGTH) {
+            Some("streaming")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.dynamic = false;
+            self.policy.event(&self.rule, "skipped", reason);
+        }
+    }
+
+    fn body(&self, media: &str, encoding: &str, raw: &[u8]) -> Option<Vec<u8>> {
+        let trusted = self.policy.compare(&self.rule, media, encoding, raw);
+        if !self.dynamic {
+            return trusted;
+        }
+        let result = pingwaf_content::protection::decoded_body(
+            encoding,
+            trusted.as_deref().unwrap_or(raw),
+        )
+        .and_then(|data| {
+            pingwaf_content::dynamic::transform(
+                &data,
+                &self.rule.dynamic_region,
+            )
+        })
+        .and_then(|data| {
+            pingwaf_content::protection::encode_body(encoding, &data)
+                .map_err(|_| "encode_failure")
+        });
+        match result {
+            Ok(body) => Some(body),
+            Err(reason) => {
+                self.policy.event(&self.rule, "skipped", reason);
+                trusted
+            },
+        }
+    }
+
     fn representation(
         &self,
         header: &ResponseHeader,
@@ -121,13 +203,7 @@ impl ModifyResponseBody for Pending {
             let original = std::mem::take(&mut self.buffered);
             *chunk = Some(
                 self.page
-                    .policy
-                    .compare(
-                        &self.page.rule,
-                        &self.media,
-                        &self.encoding,
-                        &original,
-                    )
+                    .body(&self.media, &self.encoding, &original)
                     .unwrap_or(original)
                     .into(),
             );
@@ -141,7 +217,7 @@ pub(crate) fn start(
     ctx: &mut Ctx,
     header: &mut ResponseHeader,
 ) {
-    let Some(page) = selected(session) else {
+    let Some(mut page) = selected(session) else {
         return;
     };
     if ctx.upstream.stripped_managed_set_cookie {
@@ -151,6 +227,7 @@ pub(crate) fn start(
     let Some((media, encoding)) = page.representation(header) else {
         return;
     };
+    page.allow_dynamic(header, &media);
     if page.rule.trusted_copy
         && let Some(approved) = &page.rule.approved
     {
@@ -180,6 +257,9 @@ pub(crate) fn start(
                 approved.media_type.as_str().to_owned(),
             );
         }
+    }
+    if page.dynamic || (page.rule.trusted_copy && page.rule.approved.is_some())
+    {
         for name in [
             header::CONTENT_LENGTH,
             header::ETAG,
@@ -189,6 +269,8 @@ pub(crate) fn start(
             header.remove_header(&name);
         }
         header.remove_header("content-digest");
+        header.remove_header("digest");
+        header.remove_header("content-md5");
         let _ =
             header.insert_header(header::CACHE_CONTROL, "private, no-store");
     }
@@ -211,17 +293,15 @@ pub(crate) fn local(
     session: &Session,
     response: &mut HttpResponse,
 ) -> pingora::Result<()> {
-    let Some(page) = selected(session) else {
+    let Some(mut page) = selected(session) else {
         return Ok(());
     };
     let header = response.new_response_header()?;
     let Some((media, encoding)) = page.representation(&header) else {
         return Ok(());
     };
-    if let Some(bytes) =
-        page.policy
-            .compare(&page.rule, &media, &encoding, &response.body)
-    {
+    page.allow_dynamic(&header, &media);
+    if let Some(bytes) = page.body(&media, &encoding, &response.body) {
         let headers = response.headers.get_or_insert_with(Vec::new);
         headers.retain(|(name, _)| {
             !matches!(
@@ -231,13 +311,22 @@ pub(crate) fn local(
                     | "cache-control"
                     | "last-modified"
                     | "etag"
+                    | "digest"
+                    | "content-md5"
                     | "content-digest"
                     | "accept-ranges"
             )
         });
-        if let Some(approved) = page.rule.approved {
-            if let Ok(value) = http::HeaderValue::from_str(&approved.media_type)
-            {
+        {
+            let served_type = if page.rule.trusted_copy {
+                page.rule
+                    .approved
+                    .as_ref()
+                    .map_or(media.as_str(), |a| a.media_type.as_str())
+            } else {
+                &media
+            };
+            if let Ok(value) = http::HeaderValue::from_str(served_type) {
                 headers.push((header::CONTENT_TYPE, value));
             }
         }

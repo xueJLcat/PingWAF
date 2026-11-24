@@ -12,6 +12,8 @@ http.workspace = true
 hex.workspace = true
 sha2.workspace = true
 zip = { workspace = true }
+lol_html = { version = "3", default-features = false }
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

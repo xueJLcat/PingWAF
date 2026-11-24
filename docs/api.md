@@ -616,6 +616,19 @@ Submit the previewed `digest`, `content_type` and `mode` (`alert` or `trusted_co
 
 Remove a rule together with its stored candidate, approved versions and events.
 
+### POST /sites/{id}/integrity/{rule}/dynamic
+
+Submit the captured HTML digest, a leaf element ID in `region`, and a `stage`
+of `preview`, `test`, `live` or `off`. Preview returns transformed HTML for
+display as source. Test returns a visitor token for the `X-PingWAF-Page-Test`
+header. The edge consumes the header before forwarding. Publication requires
+the tested region and digest. Turning off this transformation preserves the
+page's integrity baseline.
+
+### POST /sites/{id}/dynamic/disable
+
+Disable all dynamic text transformations of the authorized site in one update.
+
 ### DELETE /static-drafts/{id}
 
 Discard an owned draft. Returns 204.

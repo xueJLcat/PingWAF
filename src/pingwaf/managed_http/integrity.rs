@@ -25,6 +25,9 @@ pub(super) async fn prepare(
             Rule {
                 id: rule.id.clone(),
                 trusted_copy: rule.mode == "trusted_copy",
+                dynamic_stage: rule.dynamic_stage.clone(),
+                dynamic_region: rule.dynamic_region.clone(),
+                dynamic_test_digest: rule.dynamic_test_digest.clone(),
                 approved,
             },
         );

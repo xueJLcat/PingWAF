@@ -737,7 +737,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             Status::permission_denied("managed protocol was not negotiated")
         })?;
         let mut snapshot =
-            managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers, request.supports_site_archives, request.supports_page_integrity).await?;
+            managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers, request.supports_site_archives, request.supports_page_integrity, request.supports_dynamic_pages).await?;
         // Never grant a lease beyond the issuing credential's expiry. Client
         // time spent in transit is charged against, not added to, this bound.
         let remaining = claims

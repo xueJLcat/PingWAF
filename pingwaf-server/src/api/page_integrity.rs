@@ -15,6 +15,8 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/sites/{id}/integrity", get(list).post(create))
         .route("/sites/{id}/integrity/{rule}", get(preview).delete(revoke))
         .route("/sites/{id}/integrity/{rule}/approve", post(approve))
+        .route("/sites/{id}/integrity/{rule}/dynamic", post(dynamic))
+        .route("/sites/{id}/dynamic/disable", post(disable_dynamic))
 }
 
 #[derive(Deserialize)]
@@ -118,7 +120,7 @@ async fn preview(
     common::load_site_read(&s.db, id, &user).await?;
     let row=s.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT jsonb_build_object('path',r.path,'mode',r.mode,'candidate_digest',r.candidate_digest,
-         'candidate_type',r.candidate_type,'candidate_base64',encode(r.candidate_body,'base64'),
+         'dynamic_stage',r.dynamic_stage,'dynamic_region',r.dynamic_region,'candidate_type',r.candidate_type,'candidate_base64',encode(r.candidate_body,'base64'),
          'active_version',r.active_version,'approved_type',v.content_type,'approved_digest',v.digest,
          'approved_base64',encode(v.body,'base64'),'approved_at',v.approved_at,'approved_by',v.approved_by,
          'events',(SELECT coalesce(jsonb_agg(to_jsonb(e)-'rule_id'),'[]'::jsonb) FROM
@@ -290,4 +292,89 @@ mod tests {
             .await
             .unwrap();
     }
+}
+
+#[derive(Deserialize)]
+struct DynamicSelection {
+    stage: String,
+    region: String,
+    digest: String,
+}
+
+async fn dynamic(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((site, rule)): Path<(Uuid, Uuid)>,
+    Json(input): Json<DynamicSelection>,
+) -> Result<Json<Value>, ApiError> {
+    common::require_write(&user)?;
+    common::load_site_write(&s.db, site, &user).await?;
+    let tx = s.db.begin().await?;
+    let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT dynamic_stage,dynamic_region,dynamic_preview_digest,candidate_digest,candidate_body,candidate_type FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",
+        [site.into(),rule.into()])).await?.ok_or_else(||ApiError::NotFound("page not found".into()))?;
+    let mut token = None;
+    let mut token_digest = String::new();
+    if input.stage != "off" {
+        let digest: Option<String> = row.try_get("", "candidate_digest")?;
+        let media: Option<String> = row.try_get("", "candidate_type")?;
+        if digest.as_deref() != Some(&input.digest)
+            || !media.as_deref().is_some_and(|m| {
+                m.split(';')
+                    .next()
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("text/html"))
+            })
+        {
+            return Err(ApiError::Conflict(
+                "refresh the public HTML preview".into(),
+            ));
+        }
+        let body: Vec<u8> = row.try_get("", "candidate_body")?;
+        let preview = pingwaf_content::dynamic::transform(&body, &input.region)
+            .map_err(|reason| ApiError::BadRequest(reason.into()))?;
+        match input.stage.as_str() {
+            "preview" => {
+                return Ok(Json(
+                    serde_json::json!({"html":String::from_utf8_lossy(&preview),"digest":digest}),
+                ));
+            },
+            "test" => {
+                let secret = Uuid::new_v4().to_string();
+                token_digest =
+                    pingwaf_content::protection::body_digest(secret.as_bytes());
+                token = Some(secret);
+            },
+            "live"
+                if row.try_get::<String>("", "dynamic_stage")? == "test"
+                    && row.try_get::<String>("", "dynamic_region")?
+                        == input.region
+                    && row
+                        .try_get::<String>("", "dynamic_preview_digest")?
+                        == input.digest => {},
+            _ => {
+                return Err(ApiError::Conflict(
+                    "test this region before publication".into(),
+                ));
+            },
+        }
+    }
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE page_integrity_rules SET dynamic_stage=$3,dynamic_region=$4,dynamic_test_digest=$5,dynamic_preview_digest=$6 WHERE site_id=$1 AND id=$2",
+        [site.into(),rule.into(),input.stage.into(),input.region.into(),token_digest.into(),input.digest.into()])).await?;
+    tx.commit().await?;
+    crate::grpc::notify_config_changed(&s, site, Some(&user.email)).await;
+    Ok(Json(serde_json::json!({"test_token":token})))
+}
+
+async fn disable_dynamic(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(site): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    common::require_write(&user)?;
+    common::load_site_write(&s.db, site, &user).await?;
+    s.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE page_integrity_rules SET dynamic_stage='off',dynamic_test_digest='' WHERE site_id=$1 AND dynamic_stage<>'off'",[site.into()])).await?;
+    crate::grpc::notify_config_changed(&s, site, Some(&user.email)).await;
+    Ok(Json(serde_json::json!({"disabled":true})))
 }

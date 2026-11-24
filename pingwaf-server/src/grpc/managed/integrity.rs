@@ -26,7 +26,7 @@ pub(in crate::grpc) async fn page_rules(
     rule: Option<Uuid>,
 ) -> Result<Vec<PageIntegrityRule>, DbErr> {
     let rows=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT r.id,r.path,r.mode,v.version,v.digest,v.content_type,
+            "SELECT r.id,r.path,r.mode,r.dynamic_stage,r.dynamic_region,r.dynamic_test_digest,v.version,v.digest,v.content_type,
              CASE WHEN $2::uuid IS NOT NULL THEN v.body END AS body
              FROM page_integrity_rules r LEFT JOIN page_integrity_versions v ON (v.rule_id,v.version)=(r.id,r.active_version)
              WHERE site_id=$1 AND ($2::uuid IS NULL OR r.id=$2) ORDER BY path", [site.into(),rule.into()])).await?;
@@ -36,6 +36,9 @@ pub(in crate::grpc) async fn page_rules(
             id: row.try_get::<Uuid>("", "id")?.to_string(),
             path: row.try_get("", "path")?,
             mode: row.try_get("", "mode")?,
+            dynamic_stage: row.try_get("", "dynamic_stage")?,
+            dynamic_region: row.try_get("", "dynamic_region")?,
+            dynamic_test_digest: row.try_get("", "dynamic_test_digest")?,
             version: row
                 .try_get::<Option<i64>>("", "version")?
                 .unwrap_or_default(),

@@ -151,6 +151,9 @@ pub fn body_digest(body: &[u8]) -> String {
 pub struct Rule {
     pub id: String,
     pub trusted_copy: bool,
+    pub dynamic_stage: String,
+    pub dynamic_region: String,
+    pub dynamic_test_digest: String,
     pub approved: Option<Approved>,
 }
 
@@ -231,7 +234,7 @@ impl Policy {
     }
 }
 
-fn encode_body(encoding: &str, body: &[u8]) -> std::io::Result<Vec<u8>> {
+pub fn encode_body(encoding: &str, body: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::io::Write;
     match encoding.trim().to_ascii_lowercase().as_str() {
         "" | "identity" => Ok(body.to_vec()),
@@ -321,6 +324,7 @@ mod tests {
         let mut rule = Rule {
             id: "example".into(),
             trusted_copy: true,
+            dynamic_stage: String::new(), dynamic_region: String::new(), dynamic_test_digest: String::new(),
             approved: Some(Approved {
                 digest: body_digest(b"trusted"),
                 media_type: "text/html".into(),
