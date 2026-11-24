@@ -122,6 +122,7 @@ impl Session<'_> {
             PULL_TIMEOUT,
             client.get_managed_snapshot(proto::GetManagedSnapshotRequest {
                 supports_site_handlers: true,
+                supports_site_archives: true,
                 agent_token: token.to_string(),
             }),
         )

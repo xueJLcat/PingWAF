@@ -30,6 +30,7 @@ service ControlPlane {
   // Opt-in, full snapshots for the current registered session. This RPC does
   // not authorize forwarding; a snapshot is not an ingress lease.
   rpc GetManagedSnapshot(GetManagedSnapshotRequest) returns (ManagedSnapshot);
+  rpc ReadSiteContent(ReadSiteContentRequest) returns (SiteContentChunk);
 
   // Visitor authentication.
   //
@@ -221,6 +222,7 @@ message IngressListeners {
   // Registered static roots. An empty digest means unreadable or invalid.
   map<string, string> static_directories = 3;
   bool supports_site_handlers = 4;
+  bool supports_site_archives = 5;
 }
 
 // Backend health of one upstream, reported per heartbeat.
@@ -1162,6 +1164,18 @@ message StaticRelease {
   string directory_id = 2;
 }
 
+message ReadSiteContentRequest {
+  string agent_token = 1;
+  string site_id = 2;
+  string digest = 3;
+  uint32 offset = 4;
+}
+
+message SiteContentChunk {
+  bytes data = 1;
+  uint32 total_size = 2;
+}
+
 message SiteIngress {
   uint32 port = 1;
   IngressProtocol protocol = 2;
@@ -1182,6 +1196,7 @@ message ManagedApplyReport {
 }
 
 message ManagedSiteApplication {
+  string failure_code = 4;
   string site_id = 1;
   string site_revision = 2;
   SiteIngress ingress = 3;
@@ -1190,6 +1205,7 @@ message ManagedSiteApplication {
 message GetManagedSnapshotRequest {
   string agent_token = 1;
   bool supports_site_handlers = 2;
+  bool supports_site_archives = 3;
 }
 
 // Hash the bytes exactly as transmitted, not a re-encoded protobuf with maps.

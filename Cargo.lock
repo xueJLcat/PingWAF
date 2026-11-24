@@ -5431,6 +5431,7 @@ dependencies = [
  "pingap-cache",
  "pingap-core",
  "pingap-upstream",
+ "pingwaf-content",
  "pingwaf-profiler",
  "pingwaf-proto",
  "prost",
@@ -5465,6 +5466,14 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "tracing",
+]
+
+[[package]]
+name = "pingwaf-content"
+version = "0.32.48"
+dependencies = [
+ "tempfile",
+ "zip",
 ]
 
 [[package]]
@@ -5508,6 +5517,7 @@ dependencies = [
  "maxminddb",
  "passkey-server",
  "pingwaf-challenge",
+ "pingwaf-content",
  "pingwaf-profiler",
  "pingwaf-proto",
  "pingwaf-system",

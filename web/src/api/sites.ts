@@ -28,14 +28,15 @@ interface SiteDeployment {
     bound: boolean | null
     observed_at: string | null
     applied_revision: string | null
-    state: 'applied' | 'received' | 'pending' | 'unknown' | 'withdrawn' | 'revoking'
+    failure_code?: 'content_download' | 'content_validation' | 'config_apply' | null
+    state: 'failed' | 'applied' | 'received' | 'pending' | 'unknown' | 'withdrawn' | 'revoking'
   }[]
 }
 
 export interface IngressOptions {
   admin_port: number
   writes_enabled: boolean
-  agents: { id: string; name: string; dynamic_bind: boolean; supports_site_handlers?: boolean; static_directories?: Record<string, string>; listeners: [number, 'http' | 'https'][] }[]
+  agents: { id: string; name: string; dynamic_bind: boolean; supports_site_handlers?: boolean; supports_site_archives?: boolean; static_directories?: Record<string, string>; listeners: [number, 'http' | 'https'][] }[]
   assigned_agent_ids: string[]
 }
 
@@ -47,6 +48,11 @@ export interface IngressOptions {
  * rather than `403` so existence is never leaked.
  */
 export const sitesApi = {
+  uploadArchive: (file: File) => apiClient.post<{id: string; sha256: string; files: string[]}>('/static-drafts', file, {headers: {'Content-Type': 'application/zip'}}),
+  discardArchive: (id: string) => apiClient.delete<void>(`/static-drafts/${id}`),
+  previewArchive: (id: string) => apiClient.post<{url: string}>(`/static-drafts/${id}/preview-session`),
+  archiveVersions: (site: string) => apiClient.get<{digest: string; published_at: string}[]>(`/sites/${site}/static-versions`),
+
   deployment: (id: string) => apiClient.get<SiteDeployment>(`/sites/${id}/deployment`),
 
   ingressOptions: (siteId?: string) =>

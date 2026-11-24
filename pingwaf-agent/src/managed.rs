@@ -102,6 +102,30 @@ impl Candidate {
                 .all(|id| self.sites.get(id) == other.sites.get(id))
     }
 
+    /// During static content preparation the previous content is still authorized
+    /// only while the entire listener routing table and every security setting match.
+    #[cfg(target_os = "linux")]
+    fn can_prepare_content(&self, other: &Self, listener: Listener) -> bool {
+        let Some(routes) = self.routes.get(&listener) else { return false };
+        if other.routes.get(&listener) != Some(routes) { return false; }
+        routes.values().all(|id| {
+            let (Some(before), Some(after)) = (self.sites.get(id), other.sites.get(id)) else { return false };
+            if before == after { return true; }
+            use pingwaf_proto::managed_site::Handler;
+            if !matches!((&before.handler, &after.handler), (Some(Handler::StaticRelease(_)), Some(Handler::StaticRelease(_)))) {
+                return false;
+            }
+            let mut normalized = after.clone();
+            normalized.handler = before.handler.clone();
+            normalized.site_revision.clone_from(&before.site_revision);
+            if let (Some(a), Some(b)) = (normalized.site.as_mut().and_then(|s| s.rules.as_mut()),
+                before.site.as_ref().and_then(|s| s.rules.as_ref())) {
+                a.updated_at = b.updated_at;
+            }
+            normalized == *before
+        })
+    }
+
     /// Takes the hostname only, not an HTTP authority or a forwarding header.
     /// A non-default listener cannot fall back to the default namespace.
     pub fn site_id(&self, listener: Listener, hostname: &str) -> Option<Uuid> {

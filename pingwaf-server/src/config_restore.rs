@@ -1467,6 +1467,12 @@ pub async fn apply_restore(
     .await?;
     // Report skipped validation rows, without implying the caller's
     crate::models::site_handler::check_redirects(txn).await?;
+    if txn.query_one(Statement::from_string(txn.get_database_backend(),
+        "SELECT 1 FROM sites s WHERE s.site_handler->>'kind'='zip' AND NOT EXISTS
+            (SELECT FROM static_releases r WHERE r.site_id=s.id AND r.digest=s.site_handler->>'digest') LIMIT 1"
+    )).await?.is_some() {
+        return Err(DbErr::Custom("uploaded static site has no matching release in backup".into()));
+    }
     // transaction has committed (deferred constraints can still fail).
     let restored: usize = report.rows_by_table.values().sum();
     tracing::info!(

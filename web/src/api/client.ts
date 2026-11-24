@@ -166,9 +166,9 @@ async function send(
 
   // FormData (multipart uploads) passes through untouched: the browser must
   // generate the Content-Type with its own multipart boundary.
-  const isForm = body instanceof FormData
+  const isRaw = body instanceof FormData || body instanceof Blob
   const finalHeaders = new Headers(headers)
-  if (body !== undefined && !isForm && !finalHeaders.has('Content-Type')) {
+  if (body !== undefined && !isRaw && !finalHeaders.has('Content-Type')) {
     finalHeaders.set('Content-Type', 'application/json')
   }
   finalHeaders.set('Accept', 'application/json')
@@ -177,7 +177,7 @@ async function send(
   return fetch(buildUrl(path, query), {
     ...rest,
     headers: finalHeaders,
-    body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
+    body: body === undefined ? undefined : isRaw ? body : JSON.stringify(body),
   })
 }
 

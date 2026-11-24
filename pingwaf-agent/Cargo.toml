@@ -57,6 +57,7 @@ rand = { workspace = true }
 ipnet = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+pingwaf-content = { path = "../pingwaf-content" }
 tempfile = { workspace = true }
 # Tokio's standard clock excludes suspend; timerfd and the hot-path check
 # must use the same clock that includes it.

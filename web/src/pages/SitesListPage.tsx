@@ -32,6 +32,7 @@ import { sitesApi, siteKeys } from '@/api/sites'
 import { sslApi } from '@/api/ssl'
 import { Select } from '@/components/ui/Select'
 import { validIngressPort } from './sites/ingressForm'
+import { SiteArchiveField } from './sites/SiteArchiveField'
 import { SiteIngressFields } from './sites/SiteIngressFields'
 import { defaultIngress, ingressRequest, siteListener, type IngressDraft } from './sites/ingressForm'
 import { ApiError } from '@/api/client'
@@ -55,6 +56,7 @@ import type {
   SiteStatus,
   RedirectHandler,
   StaticDirectoryHandler,
+  ZipHandler,
   UpdateSiteRequest,
 } from '@/api/types'
 
@@ -74,6 +76,8 @@ interface SiteFormErrors {
 }
 
 interface SiteFormState {
+  zip: ZipHandler | null
+  draftId?: string
   directory: StaticDirectoryHandler | null
   handler: RedirectHandler | null
   certificateId: string
@@ -86,6 +90,7 @@ interface SiteFormState {
 }
 
 const emptyForm: SiteFormState = {
+  zip: null,
   handler: null,
   directory: null,
   certificateId: '',
@@ -484,6 +489,7 @@ export function SitesListPage() {
     setEditing(site)
     setForm({
       ...emptyForm,
+      zip: site.site_handler?.kind === 'zip' ? site.site_handler : null,
       handler: site.site_handler?.kind === 'redirect' ? site.site_handler : null,
       directory: site.site_handler?.kind === 'static' ? site.site_handler : null,
       ingress: { ...defaultIngress, listener: siteListener(site), additional: site.additional_ingresses },
@@ -539,7 +545,7 @@ export function SitesListPage() {
     }))
   }
 
-  const activeHandler = form.directory ?? form.handler
+  const activeHandler = form.directory ?? form.handler ?? form.zip
   const selectedAgents = form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []
   const directoryNodes = (ingressInventory.data?.agents ?? []).filter(node => selectedAgents.includes(node.id))
   const directories = Object.entries(directoryNodes[0]?.static_directories ?? {}).filter(([id, digest]) =>
@@ -576,6 +582,7 @@ export function SitesListPage() {
     const ingress = ingressRequest(form.ingress, siteListener(editing))
     if (form.directory && !directories.some(([id, digest]) => id === form.directory?.directory_id && digest === form.directory.digest))
       errors.top = t('pages.sites.selectDirectory')
+    if (form.zip && !form.zip.digest) errors.top = t('pages.sites.uploadZip')
     if (form.handler && !redirectPreview(form.handler)) errors.upstream = t('pages.sites.redirectInvalid')
     if (form.ingress.listener && !form.ingress.paused && (!editing || editing.status === 'active') &&
         (form.ingress.agents !== null || !editing) && !form.ingress.agents?.length) {
@@ -591,7 +598,7 @@ export function SitesListPage() {
     if (editing) {
       updateSite.mutate({
         id: editing.id,
-        data: { name, domain, alternate_domains: alternateDomains, ...ingress, site_handler: activeHandler ?? undefined },
+        data: { name, domain, alternate_domains: alternateDomains, ...ingress, static_draft_id: form.draftId, site_handler: activeHandler ?? undefined },
       })
       return
     }
@@ -602,6 +609,7 @@ export function SitesListPage() {
       name,
       domain,
       alternate_domains: alternateDomains,
+      static_draft_id: form.draftId,
       ...(activeHandler ? { site_handler: activeHandler } : { upstream_address: upstreamAddress }),
       ...ingress,
     }
@@ -1051,17 +1059,20 @@ export function SitesListPage() {
 
           <Select label={t('pages.sites.siteMode')} disabled={!!editing} value={activeHandler?.kind ?? 'proxy'}
             onChange={event => setForm(f => event.target.value !== 'proxy' ? {
-              ...f, directory: event.target.value === 'static' ? { kind: 'static', directory_id: '', digest: '' } : null,
+              ...f, draftId: undefined, zip: event.target.value === 'zip' ? {kind: 'zip', digest: ''} : null, directory: event.target.value === 'static' ? { kind: 'static', directory_id: '', digest: '' } : null,
               handler: event.target.value === 'redirect' ? { kind: 'redirect', target: '', status: 302, preserve_path: true, preserve_query: true } : null,
               ingress: { ...f.ingress, listener: f.ingress.listener || 'http:80', additional: f.ingress.listener ? f.ingress.additional : ['https:443'], agents: [] },
-            } : { ...f, directory: null, handler: null, ingress: defaultIngress })}>
+            } : { ...f, draftId: undefined, zip: null, directory: null, handler: null, ingress: defaultIngress })}>
             <option value="proxy">{t('pages.sites.modeProxy')}</option>
             <option value="static">{t('pages.sites.modeDirectory')}</option>
+            <option value="zip">{t('pages.sites.modeZip')}</option>
             <option value="redirect">{t('pages.sites.modeRedirect')}</option>
           </Select>
-          <SiteIngressFields terminal={!!activeHandler} value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
+          <SiteIngressFields archive={!!form.zip} terminal={!!activeHandler} value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
             inventory={ingressInventory.data}
             loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
+          {form.zip && <SiteArchiveField site={editing?.id} digest={form.zip.digest}
+            onChange={(digest, draftId) => setForm(f => ({ ...f, zip: { kind: 'zip', digest }, draftId }))} />}
           {form.directory && <Select label={t('pages.sites.selectDirectory')} value={form.directory.directory_id}
             onChange={e => setForm(f => ({ ...f, directory: { kind: 'static', directory_id: e.target.value,
               digest: directories.find(([id]) => id === e.target.value)?.[1] ?? '' } }))}>

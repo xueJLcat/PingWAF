@@ -1,5 +1,6 @@
 //! Isolated proxy objects built from an already verified managed snapshot.
 
+use anyhow::Context as _;
 use std::{cmp::Reverse, collections::HashMap, path::Path, sync::Arc};
 
 use pingap_core::{ManagedSiteContext, ProxyTrust};
@@ -20,6 +21,13 @@ use uuid::Uuid;
 #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
 mod tls;
 mod shared;
+
+#[derive(Debug)]
+struct ContentFailure(&'static str);
+
+impl std::fmt::Display for ContentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+}
 
 pub(super) struct Host {
     shared: std::sync::RwLock<HashMap<u16, Arc<shared::DefaultApp>>>,
@@ -68,6 +76,19 @@ impl Host {
         pending: pingwaf_agent::managed::Pending,
     ) -> anyhow::Result<()> {
         let dir = self.cache.cache_dir().to_owned();
+        for (id, envelope) in pending.candidate().sites() {
+            if let Some(pingwaf_proto::managed_site::Handler::StaticRelease(spec)) = &envelope.handler {
+                if spec.directory_id.is_empty() {
+                    let target = pingwaf_agent::static_dirs::release_path(*id, &spec.digest)?;
+                    if !tokio::fs::try_exists(&target).await? {
+                        let agent = pingwaf_agent::agent_instance().ok_or_else(|| anyhow::anyhow!("agent unavailable"))?;
+                        let bytes = agent.client.download_site_archive(*id, &spec.digest).await.context(ContentFailure("content_download"))?;
+                        let digest = spec.digest.clone();
+                        tokio::task::spawn_blocking(move || pingwaf_agent::static_dirs::install_archive(&target, &digest, &bytes)).await?.context(ContentFailure("content_validation"))?;
+                    }
+                }
+            }
+        }
         let (pending, view) = tokio::task::spawn_blocking(move || {
             View::build(pending.candidate(), &dir)
                 .map(|view| (pending, Arc::new(view)))
@@ -164,7 +185,10 @@ impl pingwaf_agent::client::ManagedHost for HostCallbacks {
         }
         drop(previous);
         let task = tokio::spawn(async move {
+            let version = pending.candidate().version();
             if let Err(error) = host.apply(pending).await {
+                let code = error.downcast_ref::<ContentFailure>().map_or("config_apply", |failure| failure.0);
+                host.state.preparation_failed(version, code);
                 tracing::warn!(%error, "managed snapshot could not be applied");
             }
         });
@@ -325,13 +349,13 @@ fn build_site(
         Some(Handler::StaticRelease(spec)) => {
             anyhow::ensure!(spec.digest.len() == 64 && spec.digest.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "invalid static release digest");
             let site_id = uuid::Uuid::parse_str(&site.rules.site_id)?;
-            let content = std::env::var_os("PINGWAF_SITE_CONTENT_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| "/var/lib/pingwaf/site-content".into());
-            anyhow::ensure!(content.is_absolute(), "site content directory must be absolute");
-            let root = content.join(site_id.to_string()).join(&spec.digest);
-            if !spec.directory_id.is_empty() {
-                pingwaf_agent::static_dirs::prepare_registered(&spec.directory_id, &spec.digest, &root)?;
+            let mut root = pingwaf_agent::static_dirs::release_path(site_id, &spec.digest)?;
+            if spec.directory_id.is_empty() {
+                let fingerprint = std::fs::read_to_string(root.join("tree.sha256"))?;
+                root = root.join("public");
+                anyhow::ensure!(pingwaf_agent::static_dirs::digest(&root)? == fingerprint, "stored archive failed integrity check");
+            } else {
+                pingwaf_agent::static_dirs::prepare_registered(&spec.directory_id, &spec.digest, &root).context(ContentFailure("content_validation"))?;
             }
             anyhow::ensure!(root.join("index.html").is_file(), "static release is not prepared");
             let mut conf = pingap_config::PluginConf::new();
@@ -968,6 +992,7 @@ mod tests {
             }
             rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
                 supports_site_handlers: false,
+                supports_site_archives: false,
                 static_directories: Default::default(),
                 dynamic_bind: false,
                 listeners: endpoints

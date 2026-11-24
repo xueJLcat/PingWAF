@@ -102,6 +102,56 @@ pub fn digest(root: &Path) -> anyhow::Result<String> {
     scan_root(root, None)
 }
 
+pub fn release_path(
+    site: uuid::Uuid,
+    digest: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "invalid release digest"
+    );
+    let base = std::env::var_os("PINGWAF_SITE_CONTENT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/var/lib/pingwaf/site-content".into());
+    ensure!(
+        base.is_absolute(),
+        "site content directory must be absolute"
+    );
+    Ok(base.join(site.to_string()).join(digest))
+}
+
+/// The manifest stays outside the visitor-visible tree. Both are made visible
+/// by the same rename, after the archive digest and every entry have passed.
+pub fn install_archive(
+    target: &Path,
+    expected: &str,
+    archive: &[u8],
+) -> anyhow::Result<()> {
+    ensure!(
+        hex::encode(Sha256::digest(archive)) == expected,
+        "downloaded archive digest mismatch"
+    );
+    let parent = target.parent().context("invalid release path")?;
+    std::fs::create_dir_all(parent)?;
+    let stage = tempfile::Builder::new()
+        .prefix(".zip-")
+        .tempdir_in(parent)?;
+    let tree = stage.path().join("public");
+    std::fs::create_dir(&tree)?;
+    pingwaf_content::inspect(archive, Some(&tree))?;
+    let fingerprint = digest(&tree)?;
+    std::fs::write(stage.path().join("tree.sha256"), &fingerprint)?;
+    if let Err(err) = std::fs::rename(stage.path(), target) {
+        if !target.is_dir() || digest(&target.join("public"))? != fingerprint {
+            return Err(err.into());
+        }
+    }
+    Ok(())
+}
+
 fn scan_root(root: &Path, output: Option<&Path>) -> anyhow::Result<String> {
     ensure!(root.is_absolute(), "root must be absolute");
     let dir = File::from(open(

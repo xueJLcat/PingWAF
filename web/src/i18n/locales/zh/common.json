@@ -563,6 +563,10 @@
       "ingressPort": "站点监听端口",
       "siteMode": "站点类型",
       "modeProxy": "反向代理",
+      "modeZip": "静态文件（上传 ZIP）",
+      "uploadZip": "上传 ZIP",
+      "publishedVersions": "已发布版本",
+      "previewIndex": "预览 index.html",
       "modeDirectory": "静态文件（预置目录）",
       "handlerUpgrade": "请升级节点以支持该站点类型",
       "directoryMismatch": "所选节点的目录不可用或内容摘要不同",
@@ -594,6 +598,10 @@
     },
     "siteDetail": {
       "deployment": {
+        "failed": "失败",
+        "content_download": "内容下载失败",
+        "content_validation": "内容摘要或预置目录校验失败",
+        "config_apply": "节点配置应用失败",
         "title": "入口生效状态",
         "desired": "期望版本",
         "empty": "没有符合条件的已分派节点",

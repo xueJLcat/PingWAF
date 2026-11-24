@@ -14,6 +14,9 @@ fn found() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SiteHandler {
+    Zip {
+        digest: String,
+    },
     Static {
         directory_id: String,
         digest: String,
@@ -116,6 +119,21 @@ impl SiteHandler {
         &self,
     ) -> Result<pingwaf_proto::managed_site::Handler, String> {
         match self {
+            Self::Zip { digest } => {
+                if digest.len() != 64
+                    || !digest.bytes().all(|b| {
+                        b.is_ascii_hexdigit() && !b.is_ascii_uppercase()
+                    })
+                {
+                    return Err("invalid archive digest".into());
+                }
+                Ok(pingwaf_proto::managed_site::Handler::StaticRelease(
+                    pingwaf_proto::StaticRelease {
+                        directory_id: String::new(),
+                        digest: digest.clone(),
+                    },
+                ))
+            },
             Self::Static {
                 directory_id,
                 digest,

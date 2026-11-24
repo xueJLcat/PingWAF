@@ -1512,6 +1512,28 @@ impl ControlPlaneClient {
             })
     }
 
+    #[cfg(target_os = "linux")]
+    pub async fn download_site_archive(&self, site_id: uuid::Uuid, digest: &str) -> anyhow::Result<Vec<u8>> {
+        let token = self.require_agent_token()?;
+        let mut client = ProtoClient::new(self.create_channel().await?);
+        let mut archive = Vec::new();
+        let mut expected = None;
+        loop {
+            let request = proto::ReadSiteContentRequest {
+                agent_token: token.clone(), site_id: site_id.to_string(),
+                digest: digest.to_owned(), offset: archive.len() as u32,
+            };
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(8), client.read_site_content(request)).await??.into_inner();
+            let size = chunk.total_size as usize;
+            anyhow::ensure!(size <= pingwaf_content::MAX_UPLOAD && !chunk.data.is_empty() &&
+                chunk.data.len() <= 262144 && archive.len() + chunk.data.len() <= size &&
+                expected.is_none_or(|old| old == size), "invalid content chunk");
+            expected = Some(size);
+            archive.extend_from_slice(&chunk.data);
+            if archive.len() == size { return Ok(archive); }
+        }
+    }
+
     /// Asks for a proof-of-work challenge for a site's login form.
     pub async fn visitor_login_challenge(
         &self,

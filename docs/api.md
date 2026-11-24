@@ -562,8 +562,19 @@ contain up to 2,048 entries and 32 MiB expanded. A root `index.html` is required
 
 ### GET /static-drafts/{id}/preview/{*path}
 
-Authenticated sandboxed preview of a single entry. Scripts, forms and
-subresource loads are disabled.
+Authenticated sandboxed preview of a single entry. Scripts and form submission are disabled.
+
+### POST /static-drafts/{id}/preview-session
+
+Issue a ten-minute, read-only preview URL scoped to this draft. Its random ticket is hashed in storage and redacted in application access logs. Open the returned relative URL in a sandboxed iframe over HTTPS. Publishing or deleting the draft invalidates the preview.
+
+### GET /draft-preview/{id}/{ticket}/{*path}
+
+Read one draft entry using its preview ticket. Relative stylesheets and images can be loaded from the same draft. Scripts are disabled. The sandbox gives uploaded HTML an opaque origin.
+
+### GET /sites/{id}/static-versions
+
+Return the site's uploaded ZIP versions with digest and publication time. Use the existing site update operation with a previously published digest to roll back. The node only downloads content for explicitly assigned active sites, in chunks of up to 256 KiB.
 
 ### DELETE /static-drafts/{id}
 
@@ -571,7 +582,7 @@ Discard an owned draft. Returns 204.
 
 ### POST /sites
 
-Create a new site. `upstream_address` is required: a site without an origin cannot serve traffic. The site, its `default` origin pool and first origin, initial TLS settings, and built-in rules commit together. A failed creation does not leave a partial site.
+Create a new site. Reverse proxies require `upstream_address`. For a standalone redirect or static site, specify explicit listeners, eligible target nodes, and a `site_handler`. A ZIP publication supplies `{"kind":"zip","digest":"<sha256>"}` with the owner's `static_draft_id`. The publication and assignment commit together.
 
 **Request:**
 ```json

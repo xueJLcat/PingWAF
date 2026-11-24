@@ -311,6 +311,7 @@ members = [
     "pingwaf-server",
     "pingwaf-proto",
     "pingwaf-system",
+    "pingwaf-content",
     "pingwaf-profiler",
     "pingwaf-waf",
     "pingwaf-challenge",
@@ -320,6 +321,7 @@ members = [
 version = "0.32.48"
 
 [workspace.dependencies]
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 aes-gcm-siv = { version = "0.12.1", default-features = false, features = [
     "aes",
     "alloc",

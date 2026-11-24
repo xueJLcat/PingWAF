@@ -441,6 +441,7 @@ impl IngressFields {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSiteRequest {
+    pub static_draft_id: Option<Uuid>,
     pub site_handler: Option<crate::models::site_handler::SiteHandler>,
     pub certificate_id: Option<Uuid>,
     #[serde(default)]
@@ -470,6 +471,7 @@ pub struct CreateSiteRequest {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateSiteRequest {
+    pub static_draft_id: Option<Uuid>,
     pub site_handler: Option<crate::models::site_handler::SiteHandler>,
     #[serde(default)]
     pub ingress_agent_ids: Option<std::collections::BTreeSet<Uuid>>,
@@ -1590,6 +1592,7 @@ async fn create(
     .await
     .map_err(map_site_domain_conflict)?;
 
+    super::static_drafts::bind_version(&txn, id, current.id, model.site_handler.as_ref(), payload.static_draft_id).await?;
     if model.ingress_port.is_some() {
         write_ingress_assignments(
             &txn,
@@ -2031,6 +2034,12 @@ async fn clone_site(
         .map_err(map_site_domain_conflict)?;
 
     // Upstream pools first: nodes and routes reference them by id, so the
+    if let Some(digest) = model.site_handler.as_ref().filter(|h| h["kind"] == "zip").and_then(|h| h["digest"].as_str()) {
+        let copied = txn.execute(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+            "INSERT INTO static_releases(site_id,digest,archive) SELECT $1,digest,archive FROM static_releases WHERE site_id=$2 AND digest=$3",
+            [new_id.into(), source_id.into(), digest.into()])).await?;
+        if copied.rows_affected() != 1 { return Err(ApiError::BadRequest("source version missing".into())); }
+    }
     // clone needs its own pool ids and a mapping from the source's.
     let mut pool_ids: HashMap<Uuid, Uuid> = HashMap::new();
     let mut default_pool_id: Option<Uuid> = None;
@@ -2597,6 +2606,9 @@ async fn update(
         // Same backstop as create: the uniqueness check above is a pre-check,
         // the DB constraint decides under concurrency.
         .map_err(map_site_domain_conflict)?;
+    if handler_changed || payload.static_draft_id.is_some() {
+        super::static_drafts::bind_version(&txn, id, current.id, updated.site_handler.as_ref(), payload.static_draft_id).await?;
+    }
     if let Some(ids) = payload.ingress_agent_ids {
         require_write(&current)?;
         write_ingress_assignments(&txn, &state, &updated, ids).await?;

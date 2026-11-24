@@ -76,7 +76,7 @@ const WAF_BODY_LIMIT: usize = 128 * 1024;
 /// handler runs. They are inspected on metadata only and the body is passed
 /// through untouched (the route's own `DefaultBodyLimit` still applies).
 fn body_inspection_skipped(path: &str) -> bool {
-    path == "/api/v1/login-security/geoip"
+    path == "/api/v1/static-drafts" || path == "/api/v1/login-security/geoip"
         || (path.starts_with("/api/v1/config-backups/")
             && path.ends_with("/upload"))
 }
@@ -615,6 +615,10 @@ pub async fn purge_access_logs(
 
 /// `is_health_probe` decides exemption; shared so the middlewares agree with
 /// the redirect layer.
+pub(super) fn log_path(path: &str) -> &str {
+    if path.starts_with("/api/v1/draft-preview/") { "/api/v1/draft-preview/[redacted]" } else { path }
+}
+
 fn exempt(path: &str) -> bool {
     crate::api::is_health_probe(path)
 }
@@ -686,7 +690,7 @@ pub async fn access_log(
         (None, None)
     };
     let method = request.method().as_str().to_string();
-    let path = request.uri().path().to_string();
+    let path = log_path(request.uri().path()).to_string();
     let query = request.uri().query().map(redact_query);
     let host = header_text(request.headers(), HOST);
     let user_agent = header_text(request.headers(), USER_AGENT);
@@ -787,7 +791,7 @@ pub async fn ip_allowlist(
     let ip = addr.ip();
     tracing::warn!(
         client_ip = %ip,
-        path = %request.uri().path(),
+        path = %log_path(request.uri().path()),
         "control plane request refused by the IP allowlist"
     );
     let mut response = error_response(
@@ -970,7 +974,7 @@ pub async fn waf_guard(
     if blocking {
         tracing::warn!(
             client_ip = %request_data.client_ip,
-            path = %request_data.path,
+            path = %log_path(&request_data.path),
             score = verdict.score,
             rules = ?verdict.matched_rules,
             "control plane WAF blocked a request"
@@ -994,7 +998,7 @@ pub async fn waf_guard(
     if verdict.action != WafAction::Pass {
         tracing::info!(
             client_ip = %request_data.client_ip,
-            path = %request_data.path,
+            path = %log_path(&request_data.path),
             score = verdict.score,
             rules = ?verdict.matched_rules,
             "control plane WAF match (not enforced)"

@@ -563,6 +563,10 @@
       "ingressPort": "Site listening port",
       "siteMode": "Site type",
       "modeProxy": "Reverse proxy",
+      "modeZip": "Static files (ZIP upload)",
+      "uploadZip": "Upload ZIP",
+      "publishedVersions": "Published versions",
+      "previewIndex": "Preview index.html",
       "modeDirectory": "Static files (registered directory)",
       "handlerUpgrade": "Upgrade the node to serve this site type",
       "directoryMismatch": "Directory unavailable on the selected nodes",
@@ -594,6 +598,10 @@
     },
     "siteDetail": {
       "deployment": {
+        "failed": "Failed",
+        "content_download": "Content download failed",
+        "content_validation": "Content integrity or directory validation failed",
+        "config_apply": "Configuration could not be applied",
         "title": "Ingress deployment",
         "desired": "Desired revision",
         "empty": "No eligible assigned nodes",

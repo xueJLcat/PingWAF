@@ -114,6 +114,8 @@ export interface UpdateProfileRequest {
 export type SiteStatus = 'active' | 'paused' | 'pending'
 
 /** `api::sites::SiteResponse` */
+export interface ZipHandler { kind: 'zip'; digest: string }
+
 export interface RedirectHandler {
   kind: 'redirect'
   target: string
@@ -129,7 +131,7 @@ export interface StaticDirectoryHandler {
 }
 
 export interface Site {
-  site_handler?: RedirectHandler | StaticDirectoryHandler | null
+  site_handler?: RedirectHandler | StaticDirectoryHandler | ZipHandler | null
   additional_ingresses?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
@@ -306,7 +308,8 @@ export interface SiteDetail {
 }
 
 export interface CreateSiteRequest {
-  site_handler?: RedirectHandler | StaticDirectoryHandler
+  static_draft_id?: string
+  site_handler?: RedirectHandler | StaticDirectoryHandler | ZipHandler
   certificate_id?: string
   additional_ingresses?: string[]
   ingress_port?: number | null
@@ -342,7 +345,8 @@ export interface CloneSiteRequest {
 }
 
 export interface UpdateSiteRequest {
-  site_handler?: RedirectHandler | StaticDirectoryHandler
+  static_draft_id?: string
+  site_handler?: RedirectHandler | StaticDirectoryHandler | ZipHandler
   ingress_agent_ids?: string[]
   additional_ingresses?: string[]
   ingress_port?: number | null

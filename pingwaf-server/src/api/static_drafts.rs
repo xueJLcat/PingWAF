@@ -11,16 +11,11 @@ use axum::{
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeMap,
-    io::{Cursor, Read},
-};
+use std::io::{Cursor, Read};
 use uuid::Uuid;
 use zip::ZipArchive;
 
-const MAX_UPLOAD: usize = 8 * 1024 * 1024;
-const MAX_EXPANDED: u64 = 32 * 1024 * 1024;
-const MAX_FILES: usize = 2048;
+use pingwaf_content::{MAX_EXPANDED, MAX_UPLOAD};
 static ARCHIVE_WORKERS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(2);
 
@@ -31,7 +26,77 @@ pub(super) fn routes() -> Router<AppState> {
             post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD)),
         )
         .route("/static-drafts/{id}", delete(discard))
+        .route("/static-drafts/{id}/preview-session", post(preview_session))
+        .route("/draft-preview/{id}/{ticket}/{*path}", get(preview_asset))
+        .route("/sites/{id}/static-versions", get(versions))
         .route("/static-drafts/{id}/preview/{*path}", get(preview))
+}
+
+#[derive(Serialize)]
+struct Version {
+    digest: String,
+    published_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn versions(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Version>>, ApiError> {
+    super::common::load_site(&state.db, id, &current, false).await?;
+    let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT digest,published_at FROM static_releases WHERE site_id=$1 ORDER BY published_at DESC,digest", [id.into()])).await?;
+    let mut versions = Vec::with_capacity(rows.len());
+    for row in rows {
+        versions.push(Version {
+            digest: row.try_get("", "digest")?,
+            published_at: row.try_get("", "published_at")?,
+        });
+    }
+    Ok(Json(versions))
+}
+
+/// Bind an owner's unexpired upload to a site inside its configuration write.
+/// A rollback without a draft can reference only content already owned by this site.
+pub(super) async fn bind_version(
+    tx: &sea_orm::DatabaseTransaction,
+    site: Uuid,
+    owner: Uuid,
+    handler: Option<&serde_json::Value>,
+    draft: Option<Uuid>,
+) -> Result<(), ApiError> {
+    let digest = handler
+        .filter(|handler| handler["kind"] == "zip")
+        .and_then(|handler| handler["digest"].as_str());
+    let Some(digest) = digest else {
+        return if draft.is_none() {
+            Ok(())
+        } else {
+            Err(invalid("upload requires a ZIP site"))
+        };
+    };
+    if let Some(id) = draft {
+        let moved = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "WITH content AS (DELETE FROM static_drafts WHERE id=$1 AND owner_id=$2 AND digest=$3 AND expires_at>now()
+                RETURNING digest,archive)
+             INSERT INTO static_releases(site_id,digest,archive) SELECT $4,digest,archive FROM content
+             ON CONFLICT(site_id,digest) DO UPDATE SET published_at=now() RETURNING digest",
+            [id.into(), owner.into(), digest.into(), site.into()])).await?;
+        if moved.is_none() {
+            return Err(invalid("upload expired or inaccessible"));
+        }
+    } else if tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT 1 FROM static_releases WHERE site_id=$1 AND digest=$2",
+            [site.into(), digest.into()],
+        ))
+        .await?
+        .is_none()
+    {
+        return Err(invalid("unknown site version"));
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -46,95 +111,8 @@ fn invalid(message: &str) -> ApiError {
 }
 
 fn check_archive(input: &[u8]) -> Result<Vec<String>, ApiError> {
-    // Limit the central directory before the ZIP reader allocates its index.
-    // These small static bundles never need ZIP64 or multiple disks.
-    let search_start = input.len().saturating_sub(22 + u16::MAX as usize);
-    let end = input[search_start..]
-        .windows(22)
-        .enumerate()
-        .rev()
-        .find(|(offset, end)| {
-            end.starts_with(b"PK\x05\x06") && {
-                let comment =
-                    usize::from(u16::from_le_bytes([end[20], end[21]]));
-                search_start + offset + 22 + comment == input.len()
-            }
-        })
-        .map(|(_, end)| end)
-        .ok_or_else(|| invalid("invalid ZIP directory"))?;
-    let count = usize::from(u16::from_le_bytes([end[10], end[11]]));
-    if count > MAX_FILES || end[4..8] != [0; 4] || end[8..10] != end[10..12] {
-        return Err(invalid("unsupported ZIP directory"));
-    }
-    let mut archive = ZipArchive::new(Cursor::new(input))
-        .map_err(|_| invalid("invalid ZIP"))?;
-    if archive.len() != count
-        || archive.zip64_comment().is_some()
-        || archive.offset() != 0
-        || archive
-            .has_overlapping_files()
-            .map_err(|_| invalid("invalid archive layout"))?
-    {
-        return Err(invalid("ambiguous ZIP entries"));
-    }
-    let mut entries = BTreeMap::new();
-    let mut total = 0u64;
-    for index in 0..archive.len() {
-        let file = archive
-            .by_index(index)
-            .map_err(|_| invalid("unreadable ZIP entry"))?;
-        let directory = file.is_dir();
-        let name = file
-            .name()
-            .strip_suffix('/')
-            .unwrap_or(file.name())
-            .to_owned();
-        if name.len() > 512
-            || name.contains(['\\', ':'])
-            || name.chars().any(char::is_control)
-            || name
-                .split('/')
-                .any(|part| part.is_empty() || part.starts_with('.'))
-        {
-            return Err(invalid("invalid archive path"));
-        }
-        let kind = file.unix_mode().unwrap_or(0) & 0o170000;
-        if kind != 0 && kind != if directory { 0o040000 } else { 0o100000 } {
-            return Err(invalid(
-                "only regular files and directories are supported",
-            ));
-        }
-        if entries.insert(name, directory).is_some()
-            || directory && file.size() != 0
-        {
-            return Err(invalid("conflicting archive entry"));
-        }
-        let expected = file.size();
-        if expected > MAX_EXPANDED - total {
-            return Err(invalid("expanded archive exceeds size limit"));
-        }
-        let actual =
-            std::io::copy(&mut file.take(expected + 1), &mut std::io::sink())
-                .map_err(|_| invalid("invalid ZIP entry content"))?;
-        if actual != expected {
-            return Err(invalid("unexpected ZIP entry size"));
-        }
-        total += actual;
-    }
-    if entries.get("index.html") != Some(&false) {
-        return Err(invalid("archive requires an index.html at its root"));
-    }
-    for name in entries.keys() {
-        for (i, _) in name.match_indices('/') {
-            if entries.get(&name[..i]) == Some(&false) {
-                return Err(invalid("file used as a directory"));
-            }
-        }
-    }
-    Ok(entries
-        .into_iter()
-        .filter_map(|(name, directory)| (!directory).then_some(name))
-        .collect())
+    pingwaf_content::inspect(input, None)
+        .map_err(|err| invalid(&err.to_string()))
 }
 
 #[cfg(test)]
@@ -321,7 +299,65 @@ async fn preview(
         "SELECT archive FROM static_drafts WHERE id=$1 AND owner_id=$2 AND expires_at>now()", [id.into(), current.id.into()])).await?
         .ok_or_else(|| ApiError::NotFound("draft not found".into()))?;
     let bytes: Vec<u8> = row.try_get("", "archive")?;
-    let html = path.ends_with(".html");
+    render_asset(bytes, path, permit).await
+}
+
+async fn preview_session(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let ticket = Uuid::new_v4().simple().to_string();
+    let hash = hex::encode(Sha256::digest(ticket.as_bytes()));
+    let updated = state.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE static_drafts SET preview_hash=$3,preview_until=now()+interval '10 minutes'
+         WHERE id=$1 AND owner_id=$2 AND expires_at>now()", [id.into(), current.id.into(), hash.into()])).await?;
+    if updated.rows_affected() != 1 {
+        return Err(ApiError::NotFound("draft not found".into()));
+    }
+    let url = format!("/api/v1/draft-preview/{id}/{ticket}/index.html");
+    Ok((
+        [("cache-control", "private, no-store")],
+        Json(serde_json::json!({"url": url})),
+    )
+        .into_response())
+}
+
+async fn preview_asset(
+    State(state): State<AppState>,
+    Path((id, ticket, path)): Path<(Uuid, String, String)>,
+) -> Result<Response, ApiError> {
+    let missing = || ApiError::NotFound("preview unavailable".into());
+    if ticket.len() != 32 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(missing());
+    }
+    let permit = ARCHIVE_WORKERS.try_acquire().map_err(|_| {
+        ApiError::TooManyRequests("archive preview busy".into())
+    })?;
+    let hash = hex::encode(Sha256::digest(ticket.as_bytes()));
+    let row = state.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT archive FROM static_drafts WHERE id=$1 AND preview_hash=$2 AND expires_at>now() AND preview_until>now()",
+        [id.into(), hash.into()])).await?.ok_or_else(missing)?;
+    render_asset(row.try_get("", "archive")?, path, permit).await
+}
+
+async fn render_asset(
+    bytes: Vec<u8>,
+    path: String,
+    permit: tokio::sync::SemaphorePermit<'static>,
+) -> Result<Response, ApiError> {
+    let mime = match path.rsplit('.').next().unwrap_or("") {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        _ => "text/plain; charset=utf-8",
+    };
     let content = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut archive =
@@ -341,8 +377,9 @@ async fn preview(
     .await
     .map_err(ApiError::internal)??;
     Ok(([
-        ("content-type", if html { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" }),
-        ("content-security-policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"),
+        ("content-type", mime),
+        ("content-security-policy", "sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"),
+        ("x-frame-options", "SAMEORIGIN"),
         ("x-content-type-options", "nosniff"),
         ("cache-control", "private, no-store"),
         ("referrer-policy", "no-referrer"),

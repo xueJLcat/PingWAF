@@ -317,6 +317,7 @@ export function SiteDetailPage() {
             {deployment.data.nodes.map(node => <div key={node.id} className="flex flex-wrap gap-x-3">
               <strong>{node.name}</strong>
               <span>{t(`pages.siteDetail.deployment.${node.state}`)}</span>
+              {node.failure_code && <span>{t(`pages.siteDetail.deployment.${node.failure_code}`)}</span>}
               <span>{t(node.bound === null ? 'pages.siteDetail.deployment.bindUnknown' : node.bound ? 'pages.siteDetail.deployment.bound' : 'pages.siteDetail.deployment.unbound')}</span>
               {node.applied_revision && <code title={node.applied_revision}>{node.applied_revision.slice(0, 12)}</code>}
               {node.observed_at && <time dateTime={node.observed_at}>{new Date(node.observed_at).toLocaleString()}</time>}

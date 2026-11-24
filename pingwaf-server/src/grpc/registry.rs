@@ -74,6 +74,7 @@ pub struct ApplicationObservation {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SiteApplication {
+    pub failure_code: Option<String>,
     pub site_id: Uuid,
     pub site_revision: String,
     pub port: u16,
@@ -518,7 +519,13 @@ impl AgentRegistry {
                 } else {
                     &mut sites
                 };
+                let failure_code = match row.failure_code.as_str() {
+                    "" => None,
+                    "content_download" | "content_validation" | "config_apply" if receiving => Some(row.failure_code.clone()),
+                    _ => return None,
+                };
                 destination.push(SiteApplication {
+                    failure_code,
                     site_id,
                     site_revision: row.site_revision.clone(),
                     port: u16::try_from(ingress.port).ok()?,
@@ -565,7 +572,7 @@ impl AgentRegistry {
         epoch: Uuid,
     ) -> (
         Option<bool>,
-        Option<(DateTime<Utc>, Option<String>, Option<String>)>,
+        Option<(DateTime<Utc>, Option<String>, Option<String>, Option<String>)>,
     ) {
         let inner = self.inner.read().await;
         let Some(conn) = inner
@@ -612,6 +619,8 @@ impl AgentRegistry {
                     report.observed_at,
                     revision(&report.sites),
                     revision(&report.received_sites),
+                    report.received_sites.iter().find(|r| r.site_id == site && i32::from(r.port) == port && r.protocol == protocol)
+                        .and_then(|r| r.failure_code.clone()),
                 )
             });
         (bound, applied)
@@ -1420,6 +1429,7 @@ mod tests {
             registry.connect_session(agent, sender, Some(session)).await;
         let bound = IngressListeners {
             supports_site_handlers: false,
+                supports_site_archives: false,
             static_directories: Default::default(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
@@ -1434,6 +1444,7 @@ mod tests {
             authority_epoch: Uuid::new_v4().to_string(),
             generation: 3,
             sites: vec![ManagedSiteApplication {
+                    failure_code: String::new(),
                 site_id: site.to_string(),
                 site_revision: "af".repeat(32),
                 ingress: Some(SiteIngress {
@@ -1483,6 +1494,7 @@ mod tests {
         let (first, _) = registry.connect(agent, sender).await;
         let mut report = IngressListeners {
             supports_site_handlers: false,
+                supports_site_archives: false,
             static_directories: Default::default(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {

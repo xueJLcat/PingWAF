@@ -114,3 +114,5 @@ Webhook 通知通过 `PINGWAF_WEBHOOK_URL` 配置，通知路由可以从控制�
 创建站点时可设置 `site_handler`。已有反向代理使用空值。重定向示例为 `{"kind":"redirect","target":"https://www.example.org","status":302,"preserve_path":true,"preserve_query":true}`。预置目录站点使用 `{"kind":"static","directory_id":"public","digest":"<节点报告的 SHA-256>"}`。两种模式都需要显式配置监听端口，启用时须选择支持该类型的节点。站点管理端口保留规则继续生效。
 
 在节点的 `/etc/pingwaf/static-roots.json` 登记目录，例如 `{"public":"/srv/www/public"}`。目录需要包含 `index.html`。控制台显示目录标识和内容摘要，发布时节点验证并复制到 `/var/lib/pingwaf/site-content`。通过 `PINGWAF_STATIC_ROOTS_FILE` 和 `PINGWAF_SITE_CONTENT_DIR` 可指定其他位置。确保运行服务的账户能读取源目录、写入版本目录。
+
+上传 ZIP 时，控制台先建立仅上传者可访问的草稿，再取得十分钟有效、仅能读取该草稿的预览地址。预览页面使用独立的浏览器沙箱，允许站内样式和图片。发布时将 `static_draft_id` 和 `{"kind":"zip","digest":"<草稿 SHA-256>"}` 提交到站点接口。节点每次最多下载 256 KiB，在私有临时目录完成校验后原子发布。配置生效情况见站点详情。查询 `GET /sites/{id}/static-versions` 获取该站点的版本，使用站点更新接口提交此前的摘要即可回退。数据库全量备份包含发布包；配置快照引用对应摘要。

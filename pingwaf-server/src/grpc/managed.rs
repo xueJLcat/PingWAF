@@ -25,10 +25,11 @@ pub(super) async fn build_snapshot(
     agent_id: Uuid,
     session_id: Uuid,
     supports_site_handlers: bool,
+    supports_site_archives: bool,
 ) -> Result<ManagedSnapshot, Status> {
     const MAX_ATTEMPTS: usize = 3;
     for _ in 0..MAX_ATTEMPTS {
-        match build_once(db, agent_id, session_id, supports_site_handlers).await {
+        match build_once(db, agent_id, session_id, supports_site_handlers, supports_site_archives).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(BuildError::Forbidden) => {
                 return Err(Status::permission_denied(
@@ -163,6 +164,31 @@ pub(super) async fn visitor_site(
     )
 }
 
+pub(super) async fn content_chunk(
+    db: &DatabaseConnection, agent_id: Uuid, session: Uuid, site: Uuid, digest: String, offset: u32,
+) -> Result<pingwaf_proto::SiteContentChunk, Status> {
+    let read = async {
+        let tx = db.begin_with_config(Some(IsolationLevel::RepeatableRead), Some(AccessMode::ReadOnly)).await?;
+        require_session(&tx, agent_id, session).await?;
+        let (agent, owner) = authorize(&tx, agent_id).await?;
+        if agent.site_scope != "selected" { return Err(BuildError::Forbidden); }
+        let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT substring(r.archive FROM $5 FOR 262144) AS data, octet_length(r.archive) AS size
+             FROM static_releases r JOIN sites s ON s.id=r.site_id JOIN agent_sites a ON a.site_id=s.id
+             WHERE a.agent_id=$1 AND s.user_id=$2 AND s.id=$3 AND r.digest=$4 AND s.status='active'
+               AND s.site_handler->>'kind'='zip' AND s.site_handler->>'digest'=r.digest AND $5<=octet_length(r.archive)",
+            [agent_id.into(), owner.into(), site.into(), digest.into(), ((offset + 1) as i32).into()]
+        )).await?.ok_or(BuildError::Forbidden)?;
+        let chunk = pingwaf_proto::SiteContentChunk {
+            total_size: row.try_get::<i32>("", "size")? as u32,
+            data: row.try_get("", "data")?,
+        };
+        tx.commit().await?;
+        Ok(chunk)
+    }.await;
+    status_for_scope(agent_id, read)
+}
+
 fn status_for_scope<T>(
     agent_id: Uuid,
     result: Result<T, BuildError>,
@@ -209,11 +235,12 @@ async fn build_once(
     agent_id: Uuid,
     session_id: Uuid,
     supports_site_handlers: bool,
+    supports_site_archives: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     let tx = db
         .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
         .await?;
-    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers).await?;
+    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers, supports_site_archives).await?;
     tx.commit().await?;
     Ok(snapshot)
 }
@@ -223,10 +250,12 @@ async fn build_in_view(
     agent_id: Uuid,
     session_id: Uuid,
     supports_site_handlers: bool,
+    supports_site_archives: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     require_session(tx, agent_id, session_id).await?;
     let (agent, owner_id) = authorize(tx, agent_id).await?;
     let mut sites = visible_sites(tx, &agent, owner_id).await?;
+    if !supports_site_archives { sites.retain(|site| site.site_handler.as_ref().and_then(|v| v["kind"].as_str()) != Some("zip")); }
     if !supports_site_handlers { sites.retain(|site| site.site_handler.is_none()); }
     let config = assemble_managed_config(tx, &sites).await?;
     if config.encoded_len() > pingwaf_proto::MAX_MANAGED_CONFIG_BYTES {
@@ -332,6 +361,7 @@ pub(crate) async fn check_agent_ingress(
 #[derive(serde::Serialize)]
 pub(crate) struct IngressAgentOption {
     supports_site_handlers: bool,
+    supports_site_archives: bool,
     static_directories: std::collections::HashMap<String, String>,
     id: Uuid,
     name: String,
@@ -352,7 +382,7 @@ pub(crate) async fn check_agent_site(
     if let Some(value) = &site.site_handler {
         let session = current_session(tx, id).await?.ok_or_else(|| unavailable("node session has ended"))?;
         let report = agents.session_ingress(id, session).await.unwrap_or_default();
-        if !report.supports_site_handlers {
+        if !report.supports_site_handlers || (value["kind"] == "zip" && !report.supports_site_archives) {
             return Err(unavailable(&format!("node {id} does not support this site handler")));
         }
         if let Some(dir) = value.get("directory_id").and_then(|v| v.as_str()) {
@@ -396,6 +426,7 @@ pub(crate) async fn ingress_agent_options(
             {
                 options.push(IngressAgentOption {
                     supports_site_handlers: inventory.supports_site_handlers,
+                    supports_site_archives: inventory.supports_site_archives,
                     static_directories: inventory.static_directories,
                     id,
                     name: agent.display_name.unwrap_or(agent.hostname),
@@ -419,6 +450,7 @@ pub(crate) struct SiteDeployment {
 
 #[derive(serde::Serialize)]
 struct DeploymentNode {
+    failure_code: Option<String>,
     id: Uuid,
     name: String,
     bound: Option<bool>,
@@ -474,8 +506,8 @@ pub(crate) async fn site_deployment(
             },
             None => (None, None),
         };
-        let (observed_at, applied_revision, received_revision) = report
-            .map(|(at, rev, receipt)| (Some(at), rev, receipt))
+        let (observed_at, applied_revision, received_revision, failure_code) = report
+            .map(|(at, rev, receipt, failure)| (Some(at), rev, receipt, failure))
             .unwrap_or_default();
         let state = match (
             result.desired_revision.as_ref(),
@@ -491,12 +523,13 @@ pub(crate) async fn site_deployment(
             (Some(want), _, _, Some(_))
                 if received_revision.as_ref() == Some(want) =>
             {
-                "received"
+                if failure_code.is_some() { "failed" } else { "received" }
             },
             (_, _, None, _) | (_, _, _, None) => "unknown",
             _ => "pending",
         };
         result.nodes.push(DeploymentNode {
+            failure_code: failure_code.filter(|_| state == "failed"),
             id,
             name: agent.display_name.unwrap_or(agent.hostname),
             bound,
@@ -712,6 +745,7 @@ pub(super) async fn check_postgres(
         service
             .get_managed_snapshot(Request::new(GetManagedSnapshotRequest {
                 supports_site_handlers: false,
+                supports_site_archives: false,
                 agent_token: token,
             }))
             .await
@@ -882,6 +916,7 @@ pub(super) async fn check_postgres(
     );
     let bound = pingwaf_proto::IngressListeners {
         supports_site_handlers: false,
+                supports_site_archives: false,
         static_directories: Default::default(),
         dynamic_bind: false,
         listeners: vec![pingwaf_proto::IngressListenerStatus {
@@ -930,6 +965,7 @@ pub(super) async fn check_postgres(
         authority_epoch: first.authority_epoch.clone(),
         generation: 1,
         sites: vec![pingwaf_proto::ManagedSiteApplication {
+                    failure_code: String::new(),
             site_id: custom.id.to_string(),
             site_revision: wanted.clone(),
             ingress: Some(pingwaf_proto::SiteIngress {
@@ -1016,7 +1052,7 @@ pub(super) async fn check_postgres(
     )
     .await;
     let Err(BuildError::Storage(stale)) =
-        build_in_view(&ready, id, session, false).await
+        build_in_view(&ready, id, session, false, false).await
     else {
         panic!("a stale view must not get a generation after newer content");
     };

@@ -332,7 +332,7 @@ pub fn build_router(state: AppState) -> Router {
             tracing::info_span!(
                 "http_request",
                 method = %request.method(),
-                path = %request.uri().path(),
+                path = %self_protection::log_path(request.uri().path()),
             )
         },
     ))

@@ -134,7 +134,7 @@ impl<T> AppliedState<T> {
             if scoped
                 .0
                 .policy
-                .same_listener_policy(&received.candidate, *listener)
+                .can_prepare_content(&received.candidate, *listener)
             {
                 match renew_authorization(&scoped.1, &received.lease) {
                     Ok(true) => return true,
@@ -175,6 +175,7 @@ impl<T> AppliedState<T> {
                 .iter()
                 .filter_map(|(id, site)| {
                     Some(pingwaf_proto::ManagedSiteApplication {
+                    failure_code: String::new(),
                         site_id: id.to_string(),
                         site_revision: site.site_revision.clone(),
                         ingress: Some(site.ingress.clone()?),
@@ -193,6 +194,17 @@ impl<T> AppliedState<T> {
             ));
         }
         Ok(pending)
+    }
+
+    pub fn preparation_failed(&self, version: Version, code: &'static str) {
+        let mut state = self.lock();
+        if state.latest == Some(version) {
+            if let Some((_, report)) = &mut state.receipt {
+                for site in &mut report.received_sites {
+                    site.failure_code = code.into();
+                }
+            }
+        }
     }
 
     /// A timer must be armed before publishing; a timer error is fail-closed.
@@ -220,7 +232,12 @@ impl<T> AppliedState<T> {
             .filter(|l| **l != Listener::Default)
         {
             let auth = match state.listeners.get(listener) {
-                Some(scoped) if scoped.is_live() => scoped.1.clone(),
+                Some(scoped) if scoped.is_live() && scoped.0.policy.same_listener_policy(&active.policy, *listener) => scoped.1.clone(),
+                Some(scoped) => {
+                    let replacement = new_authorization(&lease)?;
+                    scoped.1.send_modify(|authorization| authorization.revoked = true);
+                    replacement
+                },
                 _ => new_authorization(&lease)?,
             };
             listeners.insert(*listener, Forwarding(active.clone(), auth));
@@ -268,6 +285,7 @@ impl<T> AppliedState<T> {
                                     == pingwaf_proto::IngressBindState::Bound
                         })
                 });
+            for site in &mut report.sites { site.failure_code.clear(); }
             return Some(report);
         }
         let active = state.active.as_ref()?;
@@ -293,6 +311,7 @@ impl<T> AppliedState<T> {
                     return None;
                 }
                 Some(pingwaf_proto::ManagedSiteApplication {
+                    failure_code: String::new(),
                     site_id: id.to_string(),
                     site_revision: site.site_revision.clone(),
                     ingress: Some(ingress.clone()),

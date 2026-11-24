@@ -563,6 +563,10 @@
       "ingressPort": "サイトの待受ポート",
       "siteMode": "サイト種別",
       "modeProxy": "リバースプロキシ",
+      "modeZip": "静的ファイル（ZIP アップロード）",
+      "uploadZip": "ZIP をアップロード",
+      "publishedVersions": "公開済みバージョン",
+      "previewIndex": "index.html のプレビュー",
       "modeDirectory": "静的ファイル（登録ディレクトリ）",
       "handlerUpgrade": "このサイト種別を利用するにはノードを更新してください",
       "directoryMismatch": "選択したノードでディレクトリを利用できないか内容が一致しません",
@@ -594,6 +598,10 @@
     },
     "siteDetail": {
       "deployment": {
+        "failed": "失敗",
+        "content_download": "コンテンツのダウンロードに失敗",
+        "content_validation": "コンテンツまたはディレクトリの検証に失敗",
+        "config_apply": "ノードの設定適用に失敗",
         "title": "リスナーの適用状態",
         "desired": "期待するリビジョン",
         "empty": "対象の割り当て済みノードはありません",

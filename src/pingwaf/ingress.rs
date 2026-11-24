@@ -318,7 +318,7 @@ pub(super) async fn run(
                 tasks.shutdown().await;
             }
         }
-        let mut report = IngressListeners { dynamic_bind: host.is_some(), supports_site_handlers: host.is_some(), listeners: Vec::new(), static_directories: directories.borrow().clone() };
+        let mut report = IngressListeners { dynamic_bind: host.is_some(), supports_site_handlers: host.is_some(), supports_site_archives: host.is_some(), listeners: Vec::new(), static_directories: directories.borrow().clone() };
         for (port, endpoint) in desired {
             let assigned_standard = (!fixed.contains_key(&port) || shared_ports.contains(&port)) && matches!(
                 (port, endpoint.protocol),

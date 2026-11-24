@@ -12,13 +12,15 @@ interface Props {
   loadError: boolean
   clone?: boolean
   canPause: boolean
+  archive?: boolean
   terminal?: boolean
 }
 
-export function SiteIngressFields({ value, onChange, inventory, loadError, clone, canPause, terminal }: Props) {
+export function SiteIngressFields({ value, onChange, inventory, loadError, clone, canPause, terminal, archive }: Props) {
   const { t } = useTranslation()
   const rows = value.listener ? [value.listener, ...(value.additional ?? [])] : ['http:80', 'https:443']
-  const candidates = (rows: string[]) => (inventory?.agents ?? []).filter(agent => (!terminal || agent.supports_site_handlers) && rows.every(listener => {
+  const supports = (node: NonNullable<Props['inventory']>['agents'][number]) => (!terminal || node.supports_site_handlers) && (!archive || node.supports_site_archives)
+  const candidates = (rows: string[]) => (inventory?.agents ?? []).filter(agent => supports(agent) && rows.every(listener => {
     const [scheme, port] = listener.split(':')
     const bound = agent.listeners.find(([number]) => number === Number(port))
     return bound ? bound[1] === scheme : agent.dynamic_bind
@@ -59,7 +61,7 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
     {value.listener.startsWith('http:') && <p className="text-xs text-fg-subtle">{t('pages.sites.ingressHsts')}</p>}
     {value.listener && !clone && <fieldset className="space-y-1.5 text-sm">
       <legend className="mb-1 text-fg-subtle">{t('pages.sites.ingressAgents')}</legend>
-      {terminal && inventory?.agents.filter(agent => !agent.supports_site_handlers).map(agent =>
+      {terminal && inventory?.agents.filter(agent => !supports(agent)).map(agent =>
         <p key={agent.id} className="text-xs text-fg-subtle">{agent.name} · {t('pages.sites.handlerUpgrade')}</p>)}
       {eligible.map(agent => <label key={agent.id} className="flex items-center gap-2">
         <input type="checkbox" checked={selected.includes(agent.id)} onChange={() => toggle(agent.id)} />{agent.name}

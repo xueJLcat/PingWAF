@@ -682,6 +682,22 @@ impl ControlPlaneTrait for ControlPlaneService {
         }))
     }
 
+    async fn read_site_content(
+        &self,
+        request: Request<pingwaf_proto::ReadSiteContentRequest>,
+    ) -> Result<Response<pingwaf_proto::SiteContentChunk>, Status> {
+        let request = request.into_inner();
+        let claims = self.agent_claims(&request.agent_token)?;
+        let agent = claims.subject_id().map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        let session = managed_session_id(&claims)?.ok_or_else(|| Status::permission_denied("managed session required"))?;
+        let site = Uuid::parse_str(&request.site_id).map_err(|_| Status::invalid_argument("invalid site id"))?;
+        if request.offset >= pingwaf_content::MAX_UPLOAD as u32 || request.digest.len() != 64 {
+            return Err(Status::invalid_argument("invalid content range or digest"));
+        }
+        managed::content_chunk(&self.db, agent, session, site, request.digest, request.offset)
+            .await.map(Response::new)
+    }
+
     async fn get_managed_snapshot(
         &self,
         request: Request<GetManagedSnapshotRequest>,
@@ -695,7 +711,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             Status::permission_denied("managed protocol was not negotiated")
         })?;
         let mut snapshot =
-            managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers).await?;
+            managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers, request.supports_site_archives).await?;
         // Never grant a lease beyond the issuing credential's expiry. Client
         // time spent in transit is charged against, not added to, this bound.
         let remaining = claims
