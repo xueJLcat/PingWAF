@@ -3237,7 +3237,11 @@ impl RuleCache {
     ) -> SiteCacheSettings {
         SiteCacheSettings {
             max_file_size_mb: s.max_file_size_mb,
-            type_max_file_size_mb: s.type_max_file_size_mb.clone(),
+            type_max_file_size_mb: s
+                .type_max_file_size_mb
+                .clone()
+                .into_iter()
+                .collect(),
             type_policy: s.type_policy.as_ref().map(Self::convert_type_policy),
         }
     }
@@ -3564,7 +3568,7 @@ impl RuleCache {
                     .unwrap_or(proto::AcmeChallengeType::AcmeHttp01)
             ),
             acme_dns_provider: s.acme_dns_provider.clone(),
-            acme_dns_config: s.acme_dns_config.clone(),
+            acme_dns_config: s.acme_dns_config.clone().into_iter().collect(),
             min_tls_version: s.min_tls_version.clone(),
             hsts_enabled: s.hsts_enabled,
             hsts_max_age: s.hsts_max_age,

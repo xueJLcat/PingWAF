@@ -5899,6 +5899,15 @@ The fleet view in one request: the control-plane process's own counters plus
 one row per registered agent. It is the only endpoint that answers "how loaded
 is the fleet" in one call.
 
+Each agent can include `managed_application`, its most recent custom-site
+observation on the current authenticated stream. The object contains
+`observed_at`, `authority_epoch`, `generation` and a `sites` array. Each row
+contains the site UUID (`site_id`), its SHA-256 `site_revision`, `port`, and
+`protocol`. The agent samples a live published snapshot and includes only
+bound listeners. An empty list means the agent reported no matching sites.
+A disconnected stream or an observation at least 60 seconds old yields
+`null`. Use the timestamp and revision when comparing against desired state.
+
 **Response (200):**
 
 ```json

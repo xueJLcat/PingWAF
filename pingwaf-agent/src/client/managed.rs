@@ -19,13 +19,16 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(8);
 /// the old assignment before attempting to build any replacement and must
 /// honor the candidate's lease only for the exact applied version.
 pub trait ManagedHost: Send + Sync {
+    fn application_report(&self) -> Option<proto::ManagedApplyReport> {
+        None
+    }
     fn session_started(&self, session: Uuid);
     fn candidate_received(&self, candidate: Received);
     fn session_ended(&self, session: Uuid);
 }
 
 pub(super) struct Transport {
-    host: Arc<dyn ManagedHost>,
+    pub(super) host: Arc<dyn ManagedHost>,
     // Keep the received generation across connections, not across process
     // restarts. Only this loop writes it; the lock never spans an RPC.
     receiver: Mutex<Receiver>,

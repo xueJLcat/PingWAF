@@ -200,6 +200,13 @@ export interface SystemControlNode {
 
 /** `GET /api/v1/system/nodes` 单个 agent 节点 — 未知值一律为 null，禁止当 0 渲染。 */
 export interface SystemAgentNode {
+  /** Latest custom site observations on the current stream; older servers omit this field. */
+  managed_application?: {
+    observed_at: string
+    authority_epoch: string
+    generation: number
+    sites: { site_id: string; site_revision: string; port: number; protocol: 'http' | 'https' }[]
+  } | null
   id: string
   /** 显示名（节点的 hostname）。 */
   name: string

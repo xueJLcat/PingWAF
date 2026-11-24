@@ -797,6 +797,15 @@ impl ControlPlaneTrait for ControlPlaneService {
                 first.ingress_listeners.as_ref(),
             )
             .await;
+        registry
+            .record_application(
+                agent_id,
+                generation,
+                session_id,
+                &visible,
+                first.managed_apply.as_ref(),
+            )
+            .await;
         tokio::spawn(async move {
             if let Some(peer) = peer_ip {
                 persist_peer_ip(&db, agent_id, &peer).await;
@@ -857,6 +866,15 @@ impl ControlPlaneTrait for ControlPlaneService {
                         agent_id,
                         generation,
                         message.ingress_listeners.as_ref(),
+                    )
+                    .await;
+                registry
+                    .record_application(
+                        agent_id,
+                        generation,
+                        session_id,
+                        &visible,
+                        message.managed_apply.as_ref(),
                     )
                     .await;
                 persist_heartbeat(&db, agent_id, &message, &registry).await;

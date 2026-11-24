@@ -608,6 +608,12 @@ pub(super) async fn check_postgres(
     assert!(assigned.generation > latest.generation);
     assert_eq!(assigned.authority_epoch, first.authority_epoch);
     let config = decode(&assigned);
+    let repeated = fetch(token.clone()).await.unwrap();
+    assert_eq!(config.sites[0].site_revision.len(), 64);
+    assert_eq!(
+        config.sites[0].site_revision,
+        decode(&repeated).sites[0].site_revision
+    );
     assert_eq!(config.sites.len(), 1);
     assert_eq!(config.sites[0].ingress.as_ref().unwrap().port, 81);
     let site = config.sites[0].site.as_ref().unwrap();
@@ -646,7 +652,7 @@ pub(super) async fn check_postgres(
     .await;
     let revoked = fetch(token.clone()).await.unwrap();
     assert!(heartbeat_scope(db, id, session).await.unwrap().is_empty());
-    assert_eq!(revoked.generation, assigned.generation + 1);
+    assert_eq!(revoked.generation, repeated.generation + 1);
     assert!(decode(&revoked).sites.is_empty());
     exec(
         "UPDATE api_keys SET expires_at = now() WHERE id = $1",

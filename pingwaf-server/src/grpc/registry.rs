@@ -60,6 +60,23 @@ struct Connection {
     /// Only observations from this stream are retained. Not an authorization
     /// or an acknowledgement of applied site configuration.
     ingress: Option<(Instant, IngressListeners)>,
+    application: Option<(Instant, ApplicationObservation)>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ApplicationObservation {
+    pub observed_at: DateTime<Utc>,
+    pub authority_epoch: Uuid,
+    pub generation: i64,
+    pub sites: Vec<SiteApplication>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SiteApplication {
+    pub site_id: Uuid,
+    pub site_revision: String,
+    pub port: u16,
+    pub protocol: &'static str,
 }
 
 #[derive(Default)]
@@ -238,6 +255,7 @@ impl AgentRegistry {
                 connected_at: Utc::now(),
                 generation,
                 ingress: None,
+                application: None,
             },
         );
         // Counters belong to the stream that reported them: a reconnect starts
@@ -403,6 +421,96 @@ impl AgentRegistry {
             tracing::info!(%agent_id, ?report, "agent TCP ingress inventory changed");
         }
         connection.ingress = report.map(|report| (Instant::now(), report));
+    }
+
+    pub(crate) async fn record_application(
+        &self,
+        agent: Uuid,
+        stream: u64,
+        session: Option<Uuid>,
+        visible: &[Uuid],
+        report: Option<&pingwaf_proto::ManagedApplyReport>,
+    ) {
+        let mut inner = self.inner.write().await;
+        let Some(conn) = inner
+            .connected
+            .get_mut(&agent)
+            .filter(|c| c.generation == stream)
+        else {
+            return;
+        };
+        conn.application = (|| {
+            let report = report?;
+            if !conn.managed
+                || Uuid::parse_str(&report.session_id).ok()? != session?
+                || report.generation <= 0
+                || report.sites.len() > visible.len()
+            {
+                return None;
+            }
+            let authority_epoch = Uuid::parse_str(&report.authority_epoch)
+                .ok()
+                .filter(|id| !id.is_nil())?;
+            let bound = &conn.ingress.as_ref()?.1.listeners;
+            let permitted: std::collections::HashSet<_> =
+                visible.iter().copied().collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut sites = Vec::with_capacity(report.sites.len());
+            for row in &report.sites {
+                let site_id = Uuid::parse_str(&row.site_id).ok()?;
+                let ingress = row.ingress.as_ref()?;
+                if !permitted.contains(&site_id)
+                    || !seen.insert(site_id)
+                    || row.site_revision.len() != 64
+                    || !row.site_revision.bytes().all(|c| {
+                        c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+                    })
+                    || !bound.iter().any(|s| {
+                        s.port == ingress.port
+                            && s.protocol == ingress.protocol
+                            && s.state() == IngressBindState::Bound
+                    })
+                {
+                    return None;
+                }
+                let protocol = match ingress.protocol() {
+                    IngressProtocol::Http => "http",
+                    IngressProtocol::Https => "https",
+                    _ => return None,
+                };
+                sites.push(SiteApplication {
+                    site_id,
+                    site_revision: row.site_revision.clone(),
+                    port: u16::try_from(ingress.port).ok()?,
+                    protocol,
+                });
+            }
+            Some((
+                Instant::now(),
+                ApplicationObservation {
+                    observed_at: Utc::now(),
+                    authority_epoch,
+                    generation: report.generation,
+                    sites,
+                },
+            ))
+        })();
+    }
+
+    pub async fn application_observations(
+        &self,
+        freshness: Duration,
+    ) -> HashMap<Uuid, ApplicationObservation> {
+        self.inner
+            .read()
+            .await
+            .connected
+            .iter()
+            .filter_map(|(id, c)| {
+                let (at, report) = c.application.as_ref()?;
+                (at.elapsed() < freshness).then(|| (*id, report.clone()))
+            })
+            .collect()
     }
 
     /// Latest validated TCP inventory on this stream. Callers must supply a
@@ -1138,6 +1246,68 @@ mod tests {
 
         registry.disconnect(&agent, generation).await;
         assert!(!registry.metrics().await.contains_key(&agent));
+    }
+
+    #[tokio::test]
+    async fn application_observations_require_current_session_grant_and_socket()
+    {
+        use pingwaf_proto::{
+            IngressListenerStatus, ManagedApplyReport, ManagedSiteApplication,
+            SiteIngress,
+        };
+        let registry = AgentRegistry::new();
+        let (agent, session, site) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (sender, _) = mpsc::channel(1);
+        let (stream, _) = registry.connect_session(agent, sender, true).await;
+        let bound = IngressListeners {
+            listeners: vec![IngressListenerStatus {
+                port: 81,
+                protocol: IngressProtocol::Http as i32,
+                state: IngressBindState::Bound as i32,
+            }],
+        };
+        let report = ManagedApplyReport {
+            session_id: session.to_string(),
+            authority_epoch: Uuid::new_v4().to_string(),
+            generation: 3,
+            sites: vec![ManagedSiteApplication {
+                site_id: site.to_string(),
+                site_revision: "af".repeat(32),
+                ingress: Some(SiteIngress {
+                    port: 81,
+                    protocol: IngressProtocol::Http as i32,
+                }),
+            }],
+        };
+        for (s, visible, bound, accepted) in [
+            (session, vec![site], None, false),
+            (session, vec![site], Some(&bound), true),
+            (Uuid::new_v4(), vec![site], Some(&bound), false),
+            (session, Vec::new(), Some(&bound), false),
+        ] {
+            registry.record_ingress(agent, stream, bound).await;
+            registry
+                .record_application(
+                    agent,
+                    stream,
+                    Some(s),
+                    &visible,
+                    Some(&report),
+                )
+                .await;
+            assert_eq!(
+                registry
+                    .application_observations(Duration::from_secs(60))
+                    .await
+                    .contains_key(&agent),
+                accepted
+            );
+            assert!(registry
+                .application_observations(Duration::ZERO)
+                .await
+                .is_empty());
+        }
     }
 
     #[tokio::test]

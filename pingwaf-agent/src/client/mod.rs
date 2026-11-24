@@ -840,6 +840,11 @@ impl ControlPlaneClient {
         let probe = Arc::clone(&self.probe);
 
         let managed = managed_hint.is_some();
+        #[cfg(target_os = "linux")]
+        let managed_host = self
+            .managed
+            .as_ref()
+            .map(|transport| transport.host.clone());
         let sender_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_interval);
             interval.set_missed_tick_behavior(
@@ -929,6 +934,12 @@ impl ControlPlaneClient {
                     ),
                     process_rss_bytes: system_metrics.process_rss_bytes,
                     ingress_listeners: rule_cache.ingress_listeners(),
+                    #[cfg(target_os = "linux")]
+                    managed_apply: managed_host
+                        .as_ref()
+                        .and_then(|host| host.application_report()),
+                    #[cfg(not(target_os = "linux"))]
+                    managed_apply: None,
                 };
                 if managed {
                     hb.config_hash.clear();

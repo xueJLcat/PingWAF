@@ -192,6 +192,7 @@ message AgentHeartbeat {
   // TCP listener inventory only. This does not authorize any site or
   // acknowledge that a site or its TLS configuration is applied.
   IngressListeners ingress_listeners = 25;
+  ManagedApplyReport managed_apply = 26;
 }
 
 enum IngressProtocol {
@@ -1131,6 +1132,8 @@ message ManagedSite {
   Site site = 1;
   SiteIngress ingress = 2;
   FailoverMode failover_mode = 3;
+  // Digest of this site's full envelope with fingerprint fields cleared.
+  string site_revision = 4;
 }
 
 message SiteIngress {
@@ -1140,6 +1143,19 @@ message SiteIngress {
 
 message ManagedSiteConfig {
   repeated ManagedSite sites = 1;
+}
+
+message ManagedApplyReport {
+  string session_id = 1;
+  string authority_epoch = 2;
+  int64 generation = 3;
+  repeated ManagedSiteApplication sites = 4;
+}
+
+message ManagedSiteApplication {
+  string site_id = 1;
+  string site_revision = 2;
+  SiteIngress ingress = 3;
 }
 
 message GetManagedSnapshotRequest {

@@ -12,6 +12,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Managed agents report the individual revisions served on bound custom
+  listeners. The admin node API exposes the latest session-scoped observation
+  with its timestamp and discards it on reconnect or expiry.
+
 - Linux agents with configured custom listeners now consume managed snapshots,
   refresh isolated upstreams and revoke custom forwarding on session loss.
   Default listeners receive only the default sites in the snapshot.

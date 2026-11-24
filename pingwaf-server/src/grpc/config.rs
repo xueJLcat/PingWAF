@@ -600,7 +600,7 @@ fn cache_rule_to_proto(
 fn site_cache_settings_to_proto(
     site: &site::Model,
 ) -> Option<SiteCacheSettings> {
-    let type_limits: Option<std::collections::HashMap<String, u32>> = site
+    let type_limits: Option<std::collections::BTreeMap<String, u32>> = site
         .cache_type_limits_mb
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok())
@@ -834,7 +834,7 @@ fn ssl_to_proto(
         acme_email,
         acme_challenge_type,
         acme_dns_provider,
-        acme_dns_config,
+        acme_dns_config: acme_dns_config.into_iter().collect(),
         min_tls_version: row.min_tls_version.clone(),
         hsts_enabled: row.hsts_enabled,
         hsts_max_age: row.hsts_max_age.max(0) as u32,
@@ -2235,11 +2235,6 @@ pub(super) async fn assemble_managed_config(
         origin: Some(crate::api::origin_settings::read_or_default(db).await?),
         log: Some(crate::api::log_retention::read_or_default(db).await?),
     };
-    let policies: Vec<_> = rows
-        .iter()
-        .filter(|row| row.ingress_port.is_none())
-        .map(site_policy)
-        .collect();
     let ranges = load_trusted_proxy_group_ranges(db, rows).await?;
     let mut sites = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2264,18 +2259,27 @@ pub(super) async fn assemble_managed_config(
                     )))
                 },
             };
-        let bundle = build_rule_bundle_with_settings(
-            db,
-            row,
-            &settings,
-            Some(&policies),
-        )
-        .await?;
-        sites.push(ManagedSite {
+        let bundle =
+            build_rule_bundle_with_settings(db, row, &settings, Some(&[]))
+                .await?;
+        let mut envelope = ManagedSite {
             site: Some(site_to_proto(row, bundle, &ranges)),
             ingress,
             failover_mode: failover_mode_of(&row.failover_policy) as i32,
-        });
+            site_revision: String::new(),
+        };
+        // The legacy bundle hash is for a different protocol. Exclude it
+        // from the revision of this ordered, deterministic site envelope.
+        if let Some(bundle) =
+            envelope.site.as_mut().and_then(|site| site.rules.as_mut())
+        {
+            bundle.config_hash.clear();
+        }
+        use sha2::Digest as _;
+        envelope.site_revision = hex::encode(sha2::Sha256::digest(
+            prost::Message::encode_to_vec(&envelope),
+        ));
+        sites.push(envelope);
     }
     Ok(ManagedSiteConfig { sites })
 }

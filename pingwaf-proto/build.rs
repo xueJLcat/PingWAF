@@ -67,6 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = vec![proto_dir.join("control_plane.proto")];
 
     tonic_prost_build::configure()
+        .btree_map(".pingwaf.SiteCacheSettings.type_max_file_size_mb")
+        .btree_map(".pingwaf.SslConfig.acme_dns_config")
         .build_server(true)
         .build_client(true)
         .compile_protos(&protos, &includes)?;

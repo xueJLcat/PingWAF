@@ -156,6 +156,50 @@ impl<T> AppliedState<T> {
         Ok(true)
     }
 
+    /// Sample only the live, published policy under the same lock as revoke.
+    pub fn application_report(
+        &self,
+        bound: &pingwaf_proto::IngressListeners,
+    ) -> Option<pingwaf_proto::ManagedApplyReport> {
+        let state = self.lock();
+        let active = state.active.as_ref()?;
+        let auth = active.authorization.borrow();
+        if !auth.is_live() {
+            return None;
+        }
+        let version = auth.lease.version();
+        let mut sites: Vec<_> = active
+            .policy
+            .sites()
+            .iter()
+            .filter_map(|(id, site)| {
+                let ingress = site.ingress.as_ref()?;
+                if site.site_revision.is_empty()
+                    || !bound.listeners.iter().any(|socket| {
+                        socket.port == ingress.port
+                            && socket.protocol == ingress.protocol
+                            && socket.state()
+                                == pingwaf_proto::IngressBindState::Bound
+                    })
+                {
+                    return None;
+                }
+                Some(pingwaf_proto::ManagedSiteApplication {
+                    site_id: id.to_string(),
+                    site_revision: site.site_revision.clone(),
+                    ingress: Some(ingress.clone()),
+                })
+            })
+            .collect();
+        sites.sort_unstable_by(|a, b| a.site_id.cmp(&b.site_id));
+        Some(pingwaf_proto::ManagedApplyReport {
+            session_id: version.session.to_string(),
+            authority_epoch: version.authority.to_string(),
+            generation: version.generation,
+            sites,
+        })
+    }
+
     pub fn forwarding(&self) -> Option<Forwarding<T>> {
         let state = self.lock();
         let active = state.active.as_ref()?;

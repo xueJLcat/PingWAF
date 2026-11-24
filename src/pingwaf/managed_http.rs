@@ -90,6 +90,12 @@ impl Host {
 }
 
 impl pingwaf_agent::client::ManagedHost for HostCallbacks {
+    fn application_report(&self) -> Option<pingwaf_proto::ManagedApplyReport> {
+        self.0
+            .state
+            .application_report(&self.0.cache.ingress_listeners()?)
+    }
+
     fn session_started(&self, session: Uuid) {
         self.0.state.start_session(session);
     }
@@ -873,6 +879,20 @@ mod tests {
             .unwrap();
             let host = Host::new(rules.clone());
             let callbacks = host.callbacks();
+            for site in &mut sites {
+                site.site_revision = "ab".repeat(32);
+            }
+            rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
+                listeners: endpoints
+                    .iter()
+                    .map(|(addr, _, _)| pingwaf_proto::IngressListenerStatus {
+                        port: addr.port().into(),
+                        protocol: IngressProtocol::Http as i32,
+                        state: pingwaf_proto::IngressBindState::Bound as i32,
+                    })
+                    .collect(),
+            });
+            assert!(callbacks.application_report().is_none());
             let (session, received) = receive(sites);
             let defaults = received.candidate.default_config();
             assert_eq!(defaults.sites.len(), 1);
@@ -895,6 +915,17 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
 
+            let report = callbacks.application_report().unwrap();
+            assert_eq!(report.sites.len(), 2);
+            assert_eq!(report.session_id, session.to_string());
+            assert!(
+                report
+                    .sites
+                    .iter()
+                    .all(|row| row.site_revision == "ab".repeat(32))
+            );
+            rules.set_ingress_listeners(Default::default());
+            assert!(callbacks.application_report().unwrap().sites.is_empty());
             let mut clients = Vec::new();
             for (addr, proxy, marker) in endpoints {
                 let host = host.clone();
@@ -926,6 +957,7 @@ mod tests {
                 }
             }
             callbacks.session_ended(session);
+            assert!(callbacks.application_report().is_none());
             assert!(host.state.forwarding().is_none());
             while let Some(result) = tasks.join_next().await {
                 result.unwrap();

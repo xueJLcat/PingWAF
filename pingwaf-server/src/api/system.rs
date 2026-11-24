@@ -182,6 +182,8 @@ pub struct ControlNode {
 /// "0 %" would read as an idle node instead of an unknown one.
 #[derive(Debug, Serialize)]
 pub struct AgentNode {
+    pub managed_application:
+        Option<crate::grpc::registry::ApplicationObservation>,
     pub id: Uuid,
     /// Display name. The inventory keeps one identity per node — its
     /// `hostname` — so that is what this carries.
@@ -382,6 +384,9 @@ async fn agent_nodes(
     // place RPS survives. Cloned once per poll — one flat entry per connected
     // agent, not per stored sample.
     let live = registry.metrics().await;
+    let mut applications = registry
+        .application_observations(std::time::Duration::from_secs(60))
+        .await;
     let sites = agent_site_counts(db, &rows).await?;
 
     let unknown = NodeCounters::default();
@@ -390,7 +395,13 @@ async fn agent_nodes(
         .map(|row| {
             let stored = counters.get(&row.id).unwrap_or(&unknown);
             let merged = merge_counters(stored, live.get(&row.id).copied());
-            agent_node(row, &merged, sites.get(&row.id).copied().unwrap_or(0))
+            let mut node = agent_node(
+                row,
+                &merged,
+                sites.get(&row.id).copied().unwrap_or(0),
+            );
+            node.managed_application = applications.remove(&row.id);
+            node
         })
         .collect())
 }
@@ -495,6 +506,7 @@ fn agent_node(
         CPU_SOURCE_NONE
     };
     AgentNode {
+        managed_application: None,
         id: row.id,
         // Same label as `GET /agents`: the operator's display name when one
         // is set, the reported hostname otherwise.
@@ -1336,7 +1348,9 @@ mod tests {
         let agent =
             serde_json::to_value(agent_node(&row, &NodeCounters::default(), 1))
                 .expect("serialises");
+        assert!(agent["managed_application"].is_null());
         let agent_fields = [
+            "managed_application",
             "id",
             "name",
             "status",

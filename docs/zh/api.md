@@ -290,6 +290,8 @@ warn 日志（见 [CHANGELOG Unreleased](../../CHANGELOG.md) 的 `site_hosts` �
 
 ### GET /system/nodes
 
+节点的 `managed_application` 给出当前心跳连接最近一次自定义站点应用观测，包括接收时间、快照代号、站点 UUID、逐站版本及入口协议和端口。断开或超过 60 秒时返回 null。空列表表示此次未观察到已应用且已绑定的自定义站点。
+
 一次请求的机队视图：控制面进程自身的计数器，加上每个已注册 agent 一行。是唯一
 一次调用回答「整个机队负载如何」的端点。
 
