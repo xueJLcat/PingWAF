@@ -841,14 +841,18 @@ async fn check_restore_ingress<C: ConnectionTrait>(
     plan: &RestorePlan,
     agents: &crate::grpc::AgentRegistry,
 ) -> Result<(), RestoreError> {
-    let Some(sites) =
-        plan.tables.iter().find(|table| table.spec.name == "sites")
-    else {
+    let sites = plan.tables.iter().find(|table| table.spec.name == "sites");
+    if sites.is_none()
+        && !plan
+            .tables
+            .iter()
+            .any(|table| table.spec.name == "site_ssl")
+    {
         return Ok(());
-    };
-    let mut claims = Vec::with_capacity(sites.rows.len());
+    }
+    let mut claims = Vec::new();
     let mut assignments = Vec::new();
-    for row in &sites.rows {
+    for row in sites.into_iter().flat_map(|table| &table.rows) {
         let fields: crate::api::sites::IngressFields =
             serde::Deserialize::deserialize(row)
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
@@ -872,9 +876,13 @@ async fn check_restore_ingress<C: ConnectionTrait>(
         claims.push(json!({"id":row["id"], "domain":row["domain"], "aliases":row["alternate_domains"],
             "port":port, "protocol":protocol}));
     }
-    if claims.is_empty() {
-        return Ok(());
-    }
+    let tls = plan
+        .tables
+        .iter()
+        .find(|table| table.spec.name == "site_ssl");
+    let tls_rows: Vec<_> = tls.into_iter().flat_map(|table| &table.rows).map(|row| json!({
+        "site_id":row["site_id"], "hsts_enabled":row["hsts_enabled"], "always_use_https":row["always_use_https"]
+    })).collect();
     // Compare the post-restore namespace in one read, including live sites outside the snapshot.
     // Generate suffixes so the hostname join need not compare every pair of sites.
     let sql = r#"
@@ -886,12 +894,22 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             SELECT id, domain, alternate_domains, ingress_port, ingress_protocol FROM sites s
             WHERE NOT EXISTS (SELECT FROM proposed p WHERE p.id = s.id)
               AND NOT EXISTS (SELECT FROM jsonb_array_elements_text($2) removed WHERE removed.value::uuid = s.id)
+        ), final_tls AS (
+            SELECT * FROM jsonb_to_recordset($3) AS x(site_id uuid, hsts_enabled boolean, always_use_https boolean)
+            UNION ALL
+            SELECT site_id, hsts_enabled, always_use_https FROM site_ssl
+            WHERE NOT $4::boolean OR ($5::uuid IS NOT NULL AND site_id <> $5)
         ), hosts AS (
             SELECT id, coalesce(port,0) AS port, unnest(array_prepend(domain, aliases)) COLLATE "C" AS host FROM final_sites
         ), labels AS (
             SELECT id, port, host, string_to_array(host,'.') AS parts FROM hosts
         )
         SELECT CASE
+            WHEN EXISTS (SELECT FROM final_sites s JOIN final_tls t ON s.id=t.site_id
+                         WHERE s.protocol='http' AND t.always_use_https) THEN 'redirect'
+            WHEN EXISTS (SELECT FROM final_sites plain JOIN hosts p ON p.id=plain.id
+                         CROSS JOIN hosts h JOIN final_tls t ON t.site_id=h.id
+                         WHERE plain.protocol='http' AND t.hsts_enabled AND site_ingress_hosts_overlap(p.host,h.host)) THEN 'hsts'
             WHEN EXISTS (SELECT FROM hosts WHERE site_ingress_hostname_valid(host) IS NOT TRUE) THEN 'hostname'
             WHEN EXISTS (SELECT FROM final_sites WHERE port IS NOT NULL GROUP BY port HAVING count(DISTINCT protocol) > 1) THEN 'protocol'
             WHEN EXISTS (SELECT FROM hosts GROUP BY port,host HAVING count(*) > 1) THEN 'domain'
@@ -906,6 +924,9 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             vec![
                 Value::Array(claims).into(),
                 json!(plan.prune_site_ids).into(),
+                Value::Array(tls_rows).into(),
+                tls.is_some().into(),
+                plan.scope.column_value().into(),
             ],
         ))
         .await?
@@ -915,6 +936,14 @@ async fn check_restore_ingress<C: ConnectionTrait>(
     let conflict: Option<String> = result.try_get_by_index(0)?;
     if let Some(kind) = conflict {
         let (message, code) = match kind.as_str() {
+            "hsts" => (
+                "restored HSTS overlaps a custom HTTP ingress hostname",
+                "site.ingress_invalid",
+            ),
+            "redirect" => (
+                "restored custom HTTP ingress cannot redirect to HTTPS",
+                "site.ingress_invalid",
+            ),
             "domain" => (
                 "restored hostname or alias is already served on this ingress",
                 "site.domain_conflict",

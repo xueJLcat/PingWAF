@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Reject HSTS overlaps and HTTPS redirects that conflict with a custom HTTP listener. Restrict custom ACME orders to DNS-01 and keep DNS credentials out of shared certificate views, custom clones and recipient agent bundles.
+
 - Check the final hostname and listener assignments during backup preview, transactional restore and configuration history rollback, including older site snapshots and sites retained outside the snapshot.
 
 - Validate paired site ingress fields, explicit agent assignments and current listener sessions in site writes. Custom listener clones require independent TLS credentials. Production custom writes remain gated by the database migration.

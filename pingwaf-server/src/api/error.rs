@@ -202,6 +202,27 @@ impl IntoResponse for ApiError {
 
 impl From<DbErr> for ApiError {
     fn from(err: DbErr) -> Self {
+        if let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
+            sea_orm::sqlx::Error::Database(db),
+        ))
+        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(
+            sea_orm::sqlx::Error::Database(db),
+        )) = &err
+        {
+            let message = match db.constraint() {
+                Some("sites_ingress_hsts_conflict") => {
+                    Some("HSTS overlaps a custom HTTP ingress hostname")
+                },
+                Some("sites_ingress_https_redirect") => {
+                    Some("custom HTTP ingress cannot redirect to HTTPS")
+                },
+                _ => None,
+            };
+            if let Some(message) = message {
+                return Self::BadRequest(message.into())
+                    .with_code("site.ingress_invalid");
+            }
+        }
         match &err {
             // The lookup text can name the table the row was searched in; the
             // 404 body says only that it is gone.

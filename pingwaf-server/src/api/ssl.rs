@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    ensure_acme_wildcard_supported, load_site_read, load_site_write, non_empty,
+    ensure_site_acme_supported, load_site_read, load_site_write, non_empty,
     parse_uuid, scope_site, Page, Pagination,
 };
 use crate::api::error::ApiError;
@@ -185,6 +185,17 @@ pub struct CertificateResponse {
     pub warnings: Option<Vec<String>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl CertificateResponse {
+    /// A sharing grant exposes serving and expiry information. DNS provider
+    /// credentials belong to the owner that performs renewal.
+    fn set_relation(&mut self, relation: &str) {
+        self.relation = relation.into();
+        if relation != "owner" {
+            self.acme_dns_config = None;
+        }
+    }
 }
 
 fn owner_relation() -> String {
@@ -1016,9 +1027,9 @@ async fn list_certificates(
             // (backfilled for the selected certificate), but it is still the
             // owner — only genuinely foreign rows are `linked`.
             if owner == Some(id) {
-                response.relation = "owner".to_string();
+                response.set_relation("owner");
             } else {
-                response.relation = "linked".to_string();
+                response.set_relation("linked");
             }
             response.warnings = Some(certificate_warnings_for(
                 &served,
@@ -1110,8 +1121,7 @@ async fn link_certificate(
         // list applies. Ownership returned `409` above, so this branch only
         // ever reports `linked`; the rule stays explicit so the field cannot
         // drift if that check is ever relaxed.
-        response.relation =
-            if owned_here { "owner" } else { "linked" }.to_string();
+        response.set_relation(if owned_here { "owner" } else { "linked" });
         return Ok(Json(response).into_response());
     }
 
@@ -1133,7 +1143,7 @@ async fn link_certificate(
     // Same decorated shape as the idempotent branch and as every other
     // certificate response, so a caller cannot tell the two paths apart.
     let mut response = decorate_certificate(&state, certificate).await;
-    response.relation = "linked".to_string();
+    response.set_relation("linked");
     Ok((StatusCode::CREATED, Json(response)).into_response())
 }
 
@@ -1269,7 +1279,7 @@ async fn list_available_certificates(
         .into_iter()
         .map(|row| {
             let mut response = CertificateResponse::from(row);
-            response.relation = "available".to_string();
+            response.set_relation("available");
             response.warnings = Some(certificate_warnings_for(
                 &served,
                 response.site_id.unwrap_or_default(),
@@ -1326,9 +1336,16 @@ async fn insert_certificate<C: ConnectionTrait>(
     // hostname set, which a wildcard may not contain under http-01. Without a
     // site the whole request is refused further down instead: an order no site
     // carries can never be picked up by the edge.
-    if payload.cert_pem.is_none() && payload.acme_email.is_some() {
+    if (payload
+        .cert_pem
+        .as_deref()
+        .is_none_or(|pem| pem.trim().is_empty())
+        || (site.is_some_and(|s| s.ingress_port.is_some())
+            && payload.auto_renew))
+        && payload.acme_email.is_some()
+    {
         if let Some(site) = site {
-            ensure_acme_wildcard_supported(
+            ensure_site_acme_supported(
                 site,
                 &split_domains(&domain),
                 Some(&payload.acme_challenge_type),
@@ -1620,11 +1637,15 @@ async fn apply_certificate_update(
         Some(email) => non_empty(&Some(email.clone())),
         None => non_empty(&row.acme_email),
     };
-    if cert_missing && acme_email.is_some() {
+    if (cert_missing
+        || (site.is_some_and(|s| s.ingress_port.is_some())
+            && payload.auto_renew.unwrap_or(row.auto_renew)))
+        && acme_email.is_some()
+    {
         if let Some(site) = site {
             let challenge = non_empty(&payload.acme_challenge_type)
                 .unwrap_or_else(|| row.acme_challenge_type.clone());
-            ensure_acme_wildcard_supported(
+            ensure_site_acme_supported(
                 site,
                 &split_domains(effective_domain),
                 Some(&challenge),
@@ -1857,7 +1878,7 @@ async fn renew_certificate(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let target = parse_uuid(&cert_id, "certificate id")?;
-    load_site_write(&state.db, id, &current).await?;
+    let site = load_site_write(&state.db, id, &current).await?;
 
     let row = find_certificate(&state, id, target).await?;
     if row.acme_email.is_none() {
@@ -1866,6 +1887,11 @@ async fn renew_certificate(
         ));
     }
 
+    ensure_site_acme_supported(
+        &site,
+        &split_domains(&row.domain),
+        Some(&row.acme_challenge_type),
+    )?;
     let domain = row.domain.clone();
     // Mark as pending renewal; the previous failure (if any) is superseded
     // by this retry.
@@ -2955,7 +2981,7 @@ mod tests {
 
     /// R-03 (High): the column holds the whole hostname list — `a.com,b.com`
     /// is an existing, accepted input (`split_domains`,
-    /// `ensure_acme_wildcard_supported`) — so the validator must split on `,`
+    /// `ensure_site_acme_supported`) — so the validator must split on `,`
     /// instead of treating the row as one hostname.
     #[test]
     fn a_certhostname_list_domain_is_accepted() {
@@ -3286,6 +3312,18 @@ mod tests {
 
     /// A certificate model carrying no material beyond what these assertions
     /// read; `owner` is `site_certificates.site_id`.
+    #[test]
+    fn shared_and_available_certificate_views_omit_dns_credentials() {
+        for relation in ["linked", "available", "owner"] {
+            let mut model = cert_model(Uuid::new_v4(), Some(Uuid::new_v4()));
+            model.acme_dns_config =
+                Some(serde_json::json!({"token":"fixture"}));
+            let mut response = CertificateResponse::from(model);
+            response.set_relation(relation);
+            assert_eq!(response.acme_dns_config.is_some(), relation == "owner");
+        }
+    }
+
     fn cert_model(id: Uuid, owner: Option<Uuid>) -> site_certificates::Model {
         site_certificates::Model {
             id,

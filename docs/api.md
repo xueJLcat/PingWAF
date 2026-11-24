@@ -479,6 +479,8 @@ When custom writes are enabled in an isolated validation database, an active cre
 
 Backup upload, restore preview, restore execution and history rollback validate the final site addresses together. A site-scoped restore includes claims made by other live sites. A full restore releases claims belonging to sites selected for pruning. Older site snapshots without ingress fields restore the default listener. Conflicting names, aliases, wildcard coverage or protocols reject the restore before any changes commit. Active custom sites require a current assigned listener; paused custom sites can be staged unassigned. An offline CLI rollback has no live agent inventory and rejects a restore that requires it.
 
+Custom HTTP ingress rejects HTTPS redirection and HSTS on any overlapping primary hostname or alias, including wildcard matches. Changes to site addresses and TLS posture are checked together at commit. HSTS already cached by a browser can still upgrade requests until it expires. HTTP-01 validates through port 80 and cannot be initiated for custom listeners. Use an issued certificate or a DNS-01 certificate. Certificate sharing grants access to serving material; the owner retains DNS renewal credentials.
+
 A site is one protected domain plus its origin pools, rules and TLS posture. A
 site may serve several hostnames: `domain` is the primary one and
 `alternate_domains` lists the rest, all sharing the same routing, WAF and cache

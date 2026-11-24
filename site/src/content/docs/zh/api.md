@@ -37,6 +37,8 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 
 ## 证书共享
 
+站点的共享证书和可选证书列表不会返回签发方的 DNS 凭据。选择共享证书后可用其 PEM 提供 TLS，续期由签发方负责。自定义入口不支持 HTTP-01；HSTS 与域名重叠的自定义 HTTP 入口互斥，自定义 HTTP 站点也不能强制跳转到 HTTPS。
+
 一张证书（例如泛域名证书）可以服务多个站点。站点能看到自己拥有的证书以及共享给它的证书——每项带 `relation` 字段（`owner`、`linked` 或 `available`）。证书的归属站点仍然负责续期与 ACME 记账。
 
 | 端点 | 用途 |

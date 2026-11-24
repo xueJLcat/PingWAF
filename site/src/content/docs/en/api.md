@@ -37,6 +37,8 @@ Site-scoped calls read and write through the tenant boundary (`load_site_read` /
 
 ## Certificate sharing
 
+A linked or available certificate omits its DNS provider credentials from site-scoped responses. Selecting a shared certificate serves its PEM pair; only the owner can issue or renew it. For custom listeners, HTTP-01 is unavailable. HSTS conflicts with overlapping custom HTTP hostnames, and a custom HTTP site cannot force an HTTPS redirect.
+
 One certificate (e.g. a wildcard) can serve several sites. A site sees its owned certificates plus the ones shared with it — each with a `relation` field (`owner`, `linked`, or `available`). The certificate's owning site keeps driving renewals and ACME bookkeeping.
 
 | Endpoint | Purpose |

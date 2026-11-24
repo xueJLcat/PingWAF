@@ -220,6 +220,59 @@ async fn site_ingress_migration_postgres() {
         crate::config::ServerConfig::default(),
         crate::grpc::AgentRegistry::new(),
     );
+    let hsts = "INSERT INTO site_ssl(id,site_id,domain,hsts_enabled,created_at) SELECT gen_random_uuid(),id,domain,true,now() FROM sites WHERE ingress_port IS NULL";
+    let conflict = db.execute_unprepared(hsts).await.unwrap_err();
+    assert_db_error(&conflict, "23514", Some("sites_ingress_hsts_conflict"));
+    assert_eq!(
+        crate::api::error::ApiError::from(conflict).code(),
+        "site.ingress_invalid"
+    );
+    let tls_tx = db.begin().await.unwrap();
+    tls_tx.execute_unprepared("UPDATE sites SET domain='secure.example.test' WHERE ingress_port IS NULL").await.unwrap();
+    tls_tx.execute_unprepared(hsts).await.unwrap();
+    tls_tx
+        .execute_unprepared("SET CONSTRAINTS ALL IMMEDIATE")
+        .await
+        .unwrap();
+    let overlap = tls_tx.execute_unprepared("UPDATE sites SET alternate_domains=ARRAY['*.example.test'] WHERE ingress_port=82").await.unwrap_err();
+    assert_db_error(&overlap, "23514", Some("sites_ingress_hsts_conflict"));
+    tls_tx.rollback().await.unwrap();
+    // Concurrent updates to separate tables must serialize before either
+    // transaction checks the shared hostname. The loser cannot commit both.
+    db.execute_unprepared(&legacy_insert("race-tls.test"))
+        .await
+        .unwrap();
+    let issuer = db.begin().await.unwrap();
+    issuer.execute_unprepared("INSERT INTO site_ssl(id,site_id,domain,hsts_enabled,created_at) SELECT gen_random_uuid(),id,domain,true,now() FROM sites WHERE domain='race-tls.test'").await.unwrap();
+    let plain = db.begin().await.unwrap();
+    let pid: i32 = scalar(&plain, "SELECT pg_backend_pid()").await;
+    let pending = tokio::spawn(contender(
+        plain,
+        insert("race-tls.test", "{}", 81, "http"),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !scalar::<bool>(
+            &db,
+            &format!("SELECT cardinality(pg_blocking_pids({pid})) > 0"),
+        )
+        .await
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    issuer.commit().await.unwrap();
+    let (inserted, result) = pending.await.unwrap();
+    assert!(inserted);
+    assert_db_error(
+        &result.unwrap_err(),
+        "23514",
+        Some("sites_ingress_hsts_conflict"),
+    );
+    db.execute_unprepared("DELETE FROM sites WHERE domain='race-tls.test'")
+        .await
+        .unwrap();
     crate::api::sites::check_ingress_writes(&state, USER.parse().unwrap())
         .await;
     let owner = crate::mcp::tools::ToolContext {
@@ -490,7 +543,7 @@ async fn site_ingress_migration_postgres() {
         82
     );
 
-    Migrator::down(&db, Some(1)).await.unwrap();
+    Migrator::down(&db, Some(2)).await.unwrap();
     assert!(Migrator::down(&db, Some(1))
         .await
         .unwrap_err()

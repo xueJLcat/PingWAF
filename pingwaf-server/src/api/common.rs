@@ -591,18 +591,24 @@ pub fn ensure_no_domain_conflict(
     Ok(())
 }
 
-/// Refuses an ACME order a wildcard hostname can never satisfy.
+/// Rejects HTTP-01 for custom listeners and wildcard hostnames.
 ///
 /// `http-01` proves control of one hostname at a time, so a certificate for
 /// `*.example.com` can only come from `dns-01`. Rejecting the combination at
 /// the API keeps the agent from retrying an order that can never succeed;
 /// the data plane keeps its own copy of this guard for rows written before
 /// the check existed.
-pub fn ensure_acme_wildcard_supported(
+pub fn ensure_site_acme_supported(
     site: &site::Model,
     extra_domains: &[String],
     challenge: Option<&str>,
 ) -> Result<(), ApiError> {
+    if site.ingress_port.is_some() && challenge != Some(acme_challenge::DNS_01)
+    {
+        return Err(ApiError::BadRequest(
+            "custom ingress cannot receive HTTP-01 validation on port 80; configure DNS-01 or bind an issued certificate".into()
+        ).with_code("site.ingress_invalid"));
+    }
     let wildcard = site.domain.starts_with("*.")
         || site.alternate_domains.iter().any(|d| d.starts_with("*."))
         || extra_domains.iter().any(|d| d.starts_with("*."));
@@ -887,21 +893,21 @@ mod tests {
             updated_at: timestamp,
         };
         // The default challenge is http-01, which a wildcard cannot pass.
-        assert!(ensure_acme_wildcard_supported(&site, &[], None).is_err());
-        assert!(ensure_acme_wildcard_supported(&site, &[], Some("http-01"))
-            .is_err());
+        assert!(ensure_site_acme_supported(&site, &[], None).is_err());
         assert!(
-            ensure_acme_wildcard_supported(&site, &[], Some("dns-01")).is_ok()
+            ensure_site_acme_supported(&site, &[], Some("http-01")).is_err()
         );
+        assert!(ensure_site_acme_supported(&site, &[], Some("dns-01")).is_ok());
 
         // A wildcard among the alternates (or in the certificate's own
         // hostname list) counts too.
         site.domain = "example.com".to_string();
         site.alternate_domains = vec!["*.shop.example.com".to_string()];
-        assert!(ensure_acme_wildcard_supported(&site, &[], Some("http-01"))
-            .is_err());
+        assert!(
+            ensure_site_acme_supported(&site, &[], Some("http-01")).is_err()
+        );
         site.alternate_domains.clear();
-        assert!(ensure_acme_wildcard_supported(
+        assert!(ensure_site_acme_supported(
             &site,
             &["*.other.com".to_string()],
             Some("http-01")
@@ -909,9 +915,16 @@ mod tests {
         .is_err());
 
         // Plain hostnames are unaffected.
-        assert!(
-            ensure_acme_wildcard_supported(&site, &[], Some("http-01")).is_ok()
+        assert!(ensure_site_acme_supported(&site, &[], Some("http-01")).is_ok());
+        site.ingress_port = Some(8443);
+        site.ingress_protocol = Some("https".into());
+        assert_eq!(
+            ensure_site_acme_supported(&site, &[], None)
+                .unwrap_err()
+                .code(),
+            "site.ingress_invalid"
         );
+        assert!(ensure_site_acme_supported(&site, &[], Some("dns-01")).is_ok());
     }
 
     #[test]

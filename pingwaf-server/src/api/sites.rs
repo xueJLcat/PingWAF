@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::api::capabilities;
 use crate::api::common::{
-    ensure_acme_wildcard_supported, ensure_domains_available, load_site_read,
+    ensure_domains_available, ensure_site_acme_supported, load_site_read,
     load_site_write, map_domain_conflict, non_empty, normalise_domain,
     normalise_domain_list, parse_uuid, require_write, AppJson, Page,
     Pagination,
@@ -1987,6 +1987,13 @@ async fn clone_site(
         node.site_id = Set(new_id);
         node.domain = Set(domain.clone());
         node.certificate_id = Set(selected);
+        if !copy_tls_material {
+            node.auto_renew = Set(false);
+            node.acme_email = Set(None);
+            node.acme_challenge_type = Set(None);
+            node.acme_dns_provider = Set(None);
+            node.acme_dns_config = Set(None);
+        }
         node.cert_pem = Set(None);
         node.key_pem = Set(None);
         node.issuer = Set(None);
@@ -3106,8 +3113,10 @@ async fn upsert_ssl(
         .cert_pem
         .as_deref()
         .is_some_and(|pem| !pem.trim().is_empty());
-    if !uploaded_cert && non_empty(&payload.acme_email).is_some() {
-        ensure_acme_wildcard_supported(
+    if (!uploaded_cert || (site.ingress_port.is_some() && payload.auto_renew))
+        && non_empty(&payload.acme_email).is_some()
+    {
+        ensure_site_acme_supported(
             &site,
             &[],
             payload.acme_challenge_type.as_deref(),
@@ -4013,6 +4022,32 @@ pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
         .unwrap()
         .unwrap();
     assert_eq!(row.ingress_port, Some(81));
+    for field in ["hsts_enabled", "always_use_https"] {
+        let req = serde_json::from_value(json!({field:true})).unwrap();
+        let error = save_tls_posture(&state.db, &row, &req).await.unwrap_err();
+        assert_eq!(error.code(), "site.ingress_invalid");
+    }
+    let site_scope = crate::config_catalog::VersionScope::Site(row.id);
+    let mut snapshot =
+        crate::config_catalog::capture(&state.db, site_scope, true)
+            .await
+            .unwrap();
+    snapshot["tables"]["site_ssl"][0]["always_use_https"] = true.into();
+    let error = crate::config_restore::prepare_restore_with_agents(
+        &state.db,
+        &state.agents,
+        site_scope,
+        &snapshot,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ApiError::from(error).code(), "site.ingress_invalid");
+    state.db.execute(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DbBackend::Postgres,
+        "UPDATE site_ssl SET acme_challenge_type = 'dns-01', acme_email='regression@example.test', acme_dns_config='{}' WHERE site_id=$1",
+        [row.id.into()],
+    )).await.unwrap();
     let args = |value| AppJson(serde_json::from_value(value).unwrap());
     let path = || Path(row.id.to_string());
     let updated =
@@ -4077,6 +4112,17 @@ pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
         .await
         .unwrap()
         .is_some());
+    let copied_tls = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(destination.id))
+        .one(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !copied_tls.auto_renew
+            && copied_tls.acme_dns_config.is_none()
+            && copied_tls.acme_email.is_none()
+    );
     let denied = update(
         state_arg(),
         AuthUser::new(owner, "owner@example.test", "viewer"),

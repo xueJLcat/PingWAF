@@ -662,6 +662,7 @@ fn cache_type_policy_to_proto(
 /// and the coverage check runs once per site.
 #[derive(Clone, Copy)]
 struct SiteHosts<'a> {
+    custom_ingress: bool,
     domain: &'a str,
     alternate: &'a [String],
 }
@@ -773,7 +774,6 @@ fn ssl_to_proto(
         .unwrap_or_default();
     let auto_renew =
         row.auto_renew || selected.is_some_and(|cert| cert.auto_renew);
-    let acme_enabled = auto_renew && !acme_email.is_empty();
     let acme_challenge_type = acme_challenge_proto(
         row.acme_challenge_type.as_deref().or_else(|| {
             selected
@@ -790,6 +790,21 @@ fn ssl_to_proto(
         json_to_string_map(&row.acme_dns_config.clone().or_else(|| {
             selected.and_then(|cert| cert.acme_dns_config.clone())
         }));
+    // A certificate grant conveys the serving PEM pair, never the owner's
+    // DNS credentials or authority to order a replacement. Old stored rows
+    // must respect the same boundary as new REST writes.
+    let owns_order = row.certificate_id.is_none()
+        || selected.is_some_and(|cert| cert.site_id == Some(row.site_id));
+    let can_order = owns_order
+        && (!site.custom_ingress
+            || acme_challenge_type
+                == acme_challenge_proto(Some(acme_challenge::DNS_01)));
+    let (acme_email, acme_dns_provider, acme_dns_config) = if can_order {
+        (acme_email, acme_dns_provider, acme_dns_config)
+    } else {
+        Default::default()
+    };
+    let acme_enabled = auto_renew && !acme_email.is_empty();
     let mut certificate_id = row
         .certificate_id
         .or(selected.map(|cert| cert.id))
@@ -1862,6 +1877,7 @@ async fn build_rule_bundle_with_settings(
                 row,
                 &certificates,
                 SiteHosts {
+                    custom_ingress: site_row.ingress_port.is_some(),
                     domain: &site_row.domain,
                     alternate: &site_row.alternate_domains,
                 },
@@ -3416,7 +3432,11 @@ mod tests {
     }
 
     fn hosts<'a>(domain: &'a str, alternate: &'a [String]) -> SiteHosts<'a> {
-        SiteHosts { domain, alternate }
+        SiteHosts {
+            custom_ingress: false,
+            domain,
+            alternate,
+        }
     }
 
     /// The gap this closes: sharing a certificate only granted *selection*, so a
@@ -3564,6 +3584,49 @@ mod tests {
 
         assert!(ssl.cert_pem.is_empty());
         assert!(ssl.acme_enabled);
+    }
+
+    #[test]
+    fn custom_ingress_orders_require_dns_and_shared_pem_never_grants_renewal() {
+        let mut row = bare_ssl_row(Uuid::new_v4());
+        row.acme_email = Some("operator@example.test".into());
+        row.acme_dns_config =
+            Some(serde_json::json!({"token":"test-sentinel"}));
+        let custom = SiteHosts {
+            custom_ingress: true,
+            ..hosts("a.example.com", &[])
+        };
+        let empty = certs(Vec::new(), Vec::new());
+        let http_order =
+            ssl_to_proto(&row, &empty, custom, &MtlsPush::default());
+        assert!(!http_order.acme_enabled);
+        assert!(http_order.acme_dns_config.is_empty());
+        row.acme_challenge_type = Some(acme_challenge::DNS_01.into());
+        let dns_order =
+            ssl_to_proto(&row, &empty, custom, &MtlsPush::default());
+        assert!(dns_order.acme_enabled);
+        assert_eq!(
+            dns_order.acme_dns_config.get("token").map(String::as_str),
+            Some("test-sentinel")
+        );
+        let mut shared = linked_cert("a.example.com", Some("shared"));
+        shared.acme_email = Some("owner@example.test".into());
+        shared.acme_dns_config =
+            Some(serde_json::json!({"token":"owner-sentinel"}));
+        shared.acme_challenge_type = acme_challenge::DNS_01.into();
+        row.certificate_id = Some(shared.id);
+        let grants = certs(Vec::new(), vec![shared]);
+        for site in [custom, hosts("a.example.com", &[])] {
+            let ssl = ssl_to_proto(&row, &grants, site, &MtlsPush::default());
+            assert_eq!(ssl.cert_pem, "shared-CERT");
+            assert_eq!(ssl.key_pem, "shared-KEY");
+            assert!(!ssl.acme_enabled);
+            assert!(
+                ssl.acme_email.is_empty()
+                    && ssl.acme_dns_config.is_empty()
+                    && ssl.acme_dns_provider.is_empty()
+            );
+        }
     }
 
     /// Same for a self-signed site: the posture asks the edge to generate a
