@@ -7,6 +7,8 @@ pub mod config;
 pub mod heartbeat;
 pub mod managed;
 pub mod probe;
+#[cfg(target_os = "linux")]
+pub mod static_dirs;
 pub mod upgrade;
 pub mod upstream_health;
 

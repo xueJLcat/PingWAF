@@ -12,6 +12,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Added owner-scoped static ZIP drafts, sandboxed single-file preview and Linux
+  node inventory of registered static roots. Fixed-destination redirect plugins
+  can independently preserve paths and query strings. Site-mode publication is pending.
+
 - Sites support multiple HTTP and HTTPS listener rows, certificate assignment at creation and dynamic IPv4 wildcard binding on capable Linux nodes. Legacy and managed sites can share standard wildcard listeners.
 
 - Dashboard and site listener defaults use the IPv4 wildcard. The operator-configured dashboard port is excluded from site assignments and restores.

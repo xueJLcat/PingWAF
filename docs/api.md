@@ -551,6 +551,24 @@ List sites (paginated).
 }
 ```
 
+### POST /static-drafts
+
+Static content can first be staged independently of a site. Drafts are private to
+their owner and expire after 24 hours. These endpoints do not activate a listener.
+
+Send a ZIP as the raw body, up to 8 MiB. Returns the draft UUID, SHA-256
+and file list. Each owner can keep four active drafts. Each archive may
+contain up to 2,048 entries and 32 MiB expanded. A root `index.html` is required.
+
+### GET /static-drafts/{id}/preview/{*path}
+
+Authenticated sandboxed preview of a single entry. Scripts, forms and
+subresource loads are disabled.
+
+### DELETE /static-drafts/{id}
+
+Discard an owned draft. Returns 204.
+
 ### POST /sites
 
 Create a new site. `upstream_address` is required: a site without an origin cannot serve traffic. The site, its `default` origin pool and first origin, initial TLS settings, and built-in rules commit together. A failed creation does not leave a partial site.

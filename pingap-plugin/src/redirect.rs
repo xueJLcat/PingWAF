@@ -36,9 +36,16 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 /// # Configuration
 /// - `http_to_https`: Boolean flag to control redirect direction
 /// - `prefix`: Optional path prefix to add to redirected URLs
+/// - `target`: Fixed HTTP(S) destination. With a target, status defaults to 302.
+/// - `preserve_path` and `preserve_query`: Append the incoming path and
+///   query to a fixed destination (both enabled by default).
 /// - `status`: HTTP status code for the redirect (301, 302, 307, 308). Defaults to 307.
 /// - `step`: Must be set to "request" as redirects are pre-processing only
 pub struct Redirect {
+    // Fixed destination mode, independent of the incoming Host header.
+    target: Option<url::Url>,
+    preserve_path: bool,
+    preserve_query: bool,
     // Path prefix to add to redirected URLs (e.g., "/api")
     // Will be normalized to start with "/" if not empty
     prefix: String,
@@ -82,13 +89,54 @@ impl Redirect {
         } else if !prefix.starts_with("/") {
             prefix = format!("/{prefix}");
         }
-        let status = match get_int_conf(params, "status") as u16 {
+        let invalid = |message: &str| Error::Invalid {
+            category: "redirect".to_string(),
+            message: message.to_string(),
+        };
+        let target = params
+            .get("target")
+            .map(|value| {
+                let raw = value
+                    .as_str()
+                    .ok_or_else(|| invalid("target must be a URL"))?;
+                let url = url::Url::parse(raw)
+                    .map_err(|_| invalid("invalid redirect URL"))?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || raw.chars().any(char::is_control)
+                {
+                    return Err(invalid(
+                        "target must be an HTTP(S) URL without credentials",
+                    ));
+                }
+                Ok(url)
+            })
+            .transpose()?;
+        let status = match get_int_conf(params, "status") {
             301 => StatusCode::MOVED_PERMANENTLY,
             302 => StatusCode::FOUND,
             308 => StatusCode::PERMANENT_REDIRECT,
+            307 => StatusCode::TEMPORARY_REDIRECT,
+            _ if target.is_some() && !params.contains_key("status") => {
+                StatusCode::FOUND
+            },
+            _ if target.is_some() => {
+                return Err(invalid("unsupported redirect status"));
+            },
             _ => StatusCode::TEMPORARY_REDIRECT,
         };
         Ok(Self {
+            target,
+            preserve_path: params
+                .get("preserve_path")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            preserve_query: params
+                .get("preserve_query")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             hash_value,
             prefix,
             http_to_https: get_bool_conf(params, "http_to_https"),
@@ -137,6 +185,38 @@ impl Plugin for Redirect {
         // Early return if not in request phase
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
+        }
+
+        if let Some(target) = &self.target {
+            let uri = &session.req_header().uri;
+            let mut location = target.clone();
+            if self.preserve_path {
+                let path = format!(
+                    "{}/{}",
+                    target.path().trim_end_matches('/'),
+                    uri.path().trim_start_matches('/')
+                );
+                location.set_path(&path);
+            }
+            if self.preserve_query
+                && let Some(query) = uri.query()
+            {
+                let query = match target.query() {
+                    Some(fixed) if !fixed.is_empty() => {
+                        format!("{fixed}&{query}")
+                    },
+                    _ => query.to_owned(),
+                };
+                location.set_query(Some(&query));
+            }
+            return Ok(RequestPluginResult::Respond(HttpResponse {
+                status: self.status,
+                headers: Some(
+                    convert_headers(&[format!("Location: {location}")])
+                        .unwrap_or_default(),
+                ),
+                ..Default::default()
+            }));
         }
 
         // Check current request state:
@@ -204,6 +284,46 @@ mod tests {
     use pingora::proxy::Session;
     use pretty_assertions::assert_eq;
     use tokio_test::io::Builder;
+
+    #[tokio::test]
+    async fn fixed_target_keeps_authority_and_encoded_components() {
+        let input = b"GET //other.test/a%2Fb?q=1%262 HTTP/1.1\r\nHost: client.test\r\n\r\n";
+        for (options, expected) in [
+            (
+                "",
+                "https://dest.test/base/other.test/a%2Fb?fixed=1&q=1%262#top",
+            ),
+            (
+                "preserve_path=false\npreserve_query=false",
+                "https://dest.test/base?fixed=1#top",
+            ),
+        ] {
+            let config = format!(
+                "target='https://dest.test/base?fixed=1#top'\n{options}"
+            );
+            let redirect =
+                Redirect::new(&toml::from_str(&config).unwrap()).unwrap();
+            let mut session =
+                Session::new_h1(Box::new(Builder::new().read(input).build()));
+            session.read_request().await.unwrap();
+            let RequestPluginResult::Respond(response) = redirect
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected redirect")
+            };
+            assert_eq!(response.status, StatusCode::FOUND);
+            assert_eq!(
+                response.headers.unwrap()[0].1.to_str().unwrap(),
+                expected
+            );
+        }
+    }
 
     /// Tests the redirect plugin functionality.
     ///

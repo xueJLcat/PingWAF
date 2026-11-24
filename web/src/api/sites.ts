@@ -35,7 +35,7 @@ interface SiteDeployment {
 export interface IngressOptions {
   admin_port: number
   writes_enabled: boolean
-  agents: { id: string; name: string; dynamic_bind: boolean; listeners: [number, 'http' | 'https'][] }[]
+  agents: { id: string; name: string; dynamic_bind: boolean; static_directories?: Record<string, string>; listeners: [number, 'http' | 'https'][] }[]
   assigned_agent_ids: string[]
 }
 

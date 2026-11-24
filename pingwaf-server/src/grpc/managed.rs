@@ -327,6 +327,7 @@ pub(crate) async fn check_agent_ingress(
 
 #[derive(serde::Serialize)]
 pub(crate) struct IngressAgentOption {
+    static_directories: std::collections::HashMap<String, String>,
     id: Uuid,
     name: String,
     dynamic_bind: bool,
@@ -367,7 +368,8 @@ pub(crate) async fn ingress_agent_options(
             continue;
         };
         let listeners = registry.bound_ingresses(id, session).await;
-        let dynamic_bind = registry.session_ingress(id, session).await.is_some_and(|report| report.dynamic_bind);
+        let inventory = registry.session_ingress(id, session).await.unwrap_or_default();
+        let dynamic_bind = inventory.dynamic_bind;
         if listeners.is_empty() && !dynamic_bind {
             continue;
         }
@@ -376,6 +378,7 @@ pub(crate) async fn ingress_agent_options(
                 if key_owner == owner && agent.site_scope == "selected" =>
             {
                 options.push(IngressAgentOption {
+                    static_directories: inventory.static_directories,
                     id,
                     name: agent.display_name.unwrap_or(agent.hostname),
                     dynamic_bind,
@@ -859,6 +862,7 @@ pub(super) async fn check_postgres(
         "site.ingress_unavailable"
     );
     let bound = pingwaf_proto::IngressListeners {
+        static_directories: Default::default(),
         dynamic_bind: false,
         listeners: vec![pingwaf_proto::IngressListenerStatus {
             port: 81,

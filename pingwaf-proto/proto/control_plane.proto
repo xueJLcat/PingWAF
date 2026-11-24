@@ -218,6 +218,8 @@ message IngressListeners {
   repeated IngressListenerStatus listeners = 1;
   // The agent can bind new IPv4 ports requested by assigned sites.
   bool dynamic_bind = 2;
+  // Registered static roots. An empty digest means unreadable or invalid.
+  map<string, string> static_directories = 3;
 }
 
 // Backend health of one upstream, reported per heartbeat.

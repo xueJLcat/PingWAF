@@ -499,6 +499,17 @@ restore that backup together with the previous binaries when rolling back.
 
 ## Deployment Modes
 
+### Inventory of preconfigured static directories on Linux
+
+To report local static content to the control plane, create
+`/etc/pingwaf/static-roots.json` as an operator-managed JSON object, for
+example `{"company-home":"/srv/www/company"}`. Give the service account
+read access. Managed nodes scan the registry every 60 seconds and report
+identifiers and SHA-256 content digests in the site ingress options. An
+empty digest means the content could not be validated. Registration alone
+does not publish a site. Use absolute roots with a regular `index.html`,
+up to 2,048 entries and 32 MiB per root; links and special files are rejected.
+
 ### All-in-One Mode
 
 Runs both control plane and data plane in a single process. Best for single-server setups.

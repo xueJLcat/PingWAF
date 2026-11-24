@@ -929,6 +929,7 @@ mod tests {
                 site.site_revision = "ab".repeat(32);
             }
             rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
+                static_directories: Default::default(),
                 dynamic_bind: false,
                 listeners: endpoints
                     .iter()

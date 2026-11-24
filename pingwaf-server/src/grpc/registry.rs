@@ -165,7 +165,11 @@ fn repush_cooldown(repushes: u32) -> Duration {
 }
 
 fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
-    if report.listeners.len() > MAX_INGRESS_LISTENERS {
+    if report.listeners.len() > MAX_INGRESS_LISTENERS || report.static_directories.len() > 16
+        || report.static_directories.iter().any(|(id, digest)| {
+            id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || !(digest.is_empty() || digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        }) {
         return None;
     }
     let mut report = report.clone();
@@ -1415,6 +1419,7 @@ mod tests {
         let (stream, _) =
             registry.connect_session(agent, sender, Some(session)).await;
         let bound = IngressListeners {
+            static_directories: Default::default(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,
@@ -1476,6 +1481,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let (first, _) = registry.connect(agent, sender).await;
         let mut report = IngressListeners {
+            static_directories: Default::default(),
             dynamic_bind: false,
             listeners: vec![IngressListenerStatus {
                 port: 81,

@@ -263,6 +263,24 @@ pub(super) async fn run(
     let (_shutdown, watch) = watch::channel(false);
     let mut running = BTreeMap::<u16, (Endpoint, JoinSet<()>)>::new();
     let mut previous = None;
+    let (directory_updates, directories) = watch::channel(std::collections::HashMap::new());
+    #[cfg(target_os = "linux")]
+    if host.is_some() {
+        tokio::spawn(async move {
+            loop {
+                let inventory = tokio::task::spawn_blocking(pingwaf_agent::static_dirs::inventory).await;
+                let report = match inventory {
+                    Ok(Ok(report)) => report,
+                    error => {
+                        warn!(target: LOG_TARGET, ?error, "static directory inventory unavailable");
+                        Default::default()
+                    }
+                };
+                if directory_updates.send(report).is_err() { break; }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+    }
     loop {
         let mut desired = fixed.clone();
         let shared_ports: Vec<u16>;
@@ -300,7 +318,7 @@ pub(super) async fn run(
                 tasks.shutdown().await;
             }
         }
-        let mut report = IngressListeners { dynamic_bind: host.is_some(), listeners: Vec::new() };
+        let mut report = IngressListeners { dynamic_bind: host.is_some(), listeners: Vec::new(), static_directories: directories.borrow().clone() };
         for (port, endpoint) in desired {
             let assigned_standard = (!fixed.contains_key(&port) || shared_ports.contains(&port)) && matches!(
                 (port, endpoint.protocol),
