@@ -14,6 +14,9 @@
 # PostgreSQL connection string
 db_url = "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 # REST API + dashboard listen address (served over HTTPS when tls_enabled).
+# Every interface by default so the console is reachable right after install;
+# restrict it with a firewall or a reverse proxy, and change the admin password
+# at the first sign-in.
 # Operators may change this endpoint. Site ingress cannot use its port.
 admin_addr = "0.0.0.0:9080"
 # Serve the REST API and dashboard over TLS (required by passkeys).

@@ -44,6 +44,7 @@ use crate::models::{
     trusted_header, visitor_site_grant, waf_settings, ResponseReplaceConfig,
     ResponseReplaceRule,
 };
+use crate::site_cert::{self, CertAction, StoredCert};
 
 /// Specific machine-readable code for a hostname another site already serves.
 ///
@@ -1085,6 +1086,12 @@ impl TlsPosture {
             next.mtls_require_client_cert = false;
             next.mtls_organization = None;
         }
+        // An explicit selection outranks the self-signed switch: the console
+        // sets both when the operator picks a certificate, and clearing
+        // `certificate_id` here afterwards made that selection look ignored.
+        if req.certificate_id.is_some() {
+            next.self_signed = false;
+        }
         if next.self_signed {
             next.certificate_id = None;
             next.https_enabled = true;
@@ -1127,6 +1134,66 @@ impl TlsPosture {
     }
 }
 
+/// Certificate fields a request is about to write.
+///
+/// Validation has to see the state the row will have, not the one it has now:
+/// a single request can upload a PEM and enable HTTPS together.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CertSource<'a> {
+    /// The request carries a complete PEM pair.
+    pub uploaded: bool,
+    /// The ACME address the request sets. `Some("")` clears it.
+    pub acme_email: Option<&'a str>,
+}
+
+/// Writes the certificate columns a posture write resolved to.
+fn apply_cert_action(active: &mut site_ssl::ActiveModel, action: &CertAction) {
+    match action {
+        CertAction::Keep => {},
+        CertAction::Clear => {
+            active.cert_pem = Set(None);
+            active.key_pem = Set(None);
+            active.issuer = Set(None);
+            active.expires_at = Set(None);
+        },
+        CertAction::Set(cert) => {
+            active.cert_pem = Set(Some(cert.cert_pem.clone()));
+            active.key_pem = Set(Some(cert.key_pem.clone()));
+            active.issuer =
+                Set(Some(site_cert::SELF_SIGNED_ISSUER.to_string()));
+            active.expires_at = Set(Some(cert.expires_at));
+        },
+    }
+}
+
+/// Rejects a posture that would push a TLS listener with nothing to serve.
+///
+/// This is the state that shipped silently broken: 443 bound, no certificate
+/// in the bundle, and only a startup log line saying why every handshake
+/// failed. An explicit source is required instead.
+fn require_cert_source(
+    https_enabled: bool,
+    self_signed: bool,
+    inline: bool,
+    selected: bool,
+    acme_email: Option<&str>,
+) -> Result<(), ApiError> {
+    if https_enabled
+        && !self_signed
+        && !inline
+        && !selected
+        && acme_email.is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "HTTPS is enabled but the site has no certificate: choose \
+             self-signed, select or upload a certificate, or configure an \
+             ACME e-mail"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Applies a TLS posture request to the site's `site_ssl` row, creating the row
 /// when the site has none. Returns the stored posture.
 ///
@@ -1136,6 +1203,7 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
     db: &C,
     site: &site::Model,
     req: &TlsPostureRequest,
+    source: CertSource<'_>,
 ) -> Result<TlsPosture, ApiError> {
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(site.id))
@@ -1172,12 +1240,73 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
         Some(row) => TlsPosture::from_model(row),
         None => TlsPosture::unset(),
     };
-    let next = current.merged(req)?;
+    let mut next = current.merged(req)?;
+
+    // A concrete certificate source outranks the generated leaf: an upload, a
+    // selected row (`merged` already cleared the switch for one) or an ACME
+    // order all mean "stop serving the self-signed certificate". The data
+    // plane prefers an inline PEM over an ACME order, so leaving the generated
+    // material in place would silently disable issuance.
+    let acme_email = match source.acme_email {
+        // An explicit value wins, including `""` (clearing the address).
+        Some(raw) => {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        },
+        None => existing
+            .as_ref()
+            .and_then(|row| row.acme_email.clone())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    };
+    if source.uploaded || acme_email.is_some() {
+        next.self_signed = false;
+    }
+
+    let stored = match &existing {
+        Some(row) => StoredCert {
+            issuer: row.issuer.as_deref(),
+            cert_pem: row.cert_pem.as_deref(),
+            expires_at: row.expires_at,
+        },
+        None => StoredCert::default(),
+    };
+    let action = site_cert::resolve(
+        next.self_signed,
+        &site.domain,
+        &site.alternate_domains,
+        stored,
+        Utc::now(),
+    )
+    .map_err(|err| {
+        ApiError::Internal(format!("cannot issue the site certificate: {err}"))
+    })?;
+
+    // HTTPS with no source at all is the state that silently broke every
+    // handshake: 443 was bound, no certificate was ever pushed, and only a log
+    // line said why. Refuse the save instead of pushing a listener that cannot
+    // complete a handshake.
+    let inline = match &action {
+        CertAction::Set(_) => true,
+        CertAction::Clear => false,
+        CertAction::Keep => {
+            stored.cert_pem.is_some_and(|pem| !pem.trim().is_empty())
+        },
+    };
+    let selected = next.certificate_id.is_some() || source.uploaded;
+    require_cert_source(
+        next.https_enabled,
+        next.self_signed,
+        inline,
+        selected,
+        acme_email.as_deref(),
+    )?;
 
     match existing {
         Some(row) => {
             let mut active: site_ssl::ActiveModel = row.into();
             next.apply_to(&mut active);
+            apply_cert_action(&mut active, &action);
             active.update(db).await?;
         },
         None => {
@@ -1211,6 +1340,7 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
                 created_at: Set(Utc::now()),
             };
             next.apply_to(&mut active);
+            apply_cert_action(&mut active, &action);
             active.insert(db).await?;
         },
     }
@@ -1672,41 +1802,23 @@ async fn create(
             .insert(&txn).await?;
     }
 
-    // Every new site gets an SSL row with https enabled: without it the data
-    // plane's `ssl.enabled` gate stays closed and a later ACME request would
-    // sit pending forever - the user would have to know to flip a hidden
-    // switch before certificate issuance can even start.
-    site_ssl::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        site_id: Set(id),
-        cert_pem: Set(None),
-        key_pem: Set(None),
-        issuer: Set(None),
-        domain: Set(domain.clone()),
-        expires_at: Set(None),
-        auto_renew: Set(true),
-        acme_email: Set(None),
-        acme_challenge_type: Set(None),
-        acme_dns_provider: Set(None),
-        acme_dns_config: Set(None),
-        https_enabled: Set(true),
-        min_tls_version: Set(tls_version::TLS_12.to_string()),
-        max_tls_version: Set(None),
-        self_signed: Set(false),
-        certificate_id: Set(payload.certificate_id),
-        mtls_enabled: Set(false),
-        mtls_client_ca: Set(None),
-        mtls_organization: Set(None),
-        mtls_require_client_cert: Set(false),
-        hsts_enabled: Set(false),
-        hsts_max_age: Set(0),
-        always_use_https: Set(false),
-        // New sites serve both protocols; HTTP/2 is what makes them faster.
-        http1_enabled: Set(true),
-        http2_enabled: Set(true),
-        created_at: Set(timestamp),
-    }
-    .insert(&txn)
+    // Every new site starts with HTTPS on and a generated certificate. The
+    // `ssl.enabled` gate has to be open for a later ACME order to run at all,
+    // and a listener without a certificate fails every handshake with an
+    // OpenSSL signature-algorithm error - so the default has to be a site that
+    // can complete one. An uploaded certificate or an ACME order replaces the
+    // generated leaf (see `save_tls_posture`).
+    save_tls_posture(
+        &txn,
+        &model,
+        &TlsPostureRequest {
+            https_enabled: Some(true),
+            self_signed: Some(payload.certificate_id.is_none()),
+            certificate_id: payload.certificate_id,
+            ..Default::default()
+        },
+        CertSource::default(),
+    )
     .await?;
     crate::models::site_handler::check_redirects(&txn).await.map_err(|e| match e {
         DbErr::Custom(message) => ApiError::BadRequest(message),
@@ -2201,6 +2313,21 @@ async fn clone_site(
         node.expires_at = Set(None);
         node.created_at = Set(timestamp);
         node.insert(&txn).await?;
+
+        // A self-signed clone needs its own leaf: the source's certificate is
+        // not copied (it does not cover the new hostname), and a TLS listener
+        // without one fails every handshake.
+        if let Some(clone) = site::Entity::find_by_id(new_id).one(&txn).await? {
+            if let Err(err) =
+                crate::site_cert_renewal::issue_if_needed(&txn, &clone).await
+            {
+                tracing::warn!(
+                    site_id = %new_id,
+                    error = %err,
+                    "cannot issue the clone's self-signed certificate"
+                );
+            }
+        }
     }
 
     clone_site_rows!(&txn, waf_settings, source_id, new_id);
@@ -3348,6 +3475,19 @@ async fn upsert_ssl(
         .cert_pem
         .as_deref()
         .is_some_and(|pem| !pem.trim().is_empty());
+    // A PEM pair is a certificate source in its own right. Half a pair is
+    // not: mixing an uploaded certificate with the generated key (or the
+    // reverse) produces material the edge cannot load, so reject it here.
+    let uploaded_key = payload
+        .key_pem
+        .as_deref()
+        .is_some_and(|pem| !pem.trim().is_empty());
+    if uploaded_cert != uploaded_key {
+        return Err(ApiError::BadRequest(
+            "cert_pem and key_pem must be provided together".to_string(),
+        ));
+    }
+    let uploaded_pair = uploaded_cert;
     if (!uploaded_cert || (site.ingress_port.is_some() && payload.auto_renew))
         && non_empty(&payload.acme_email).is_some()
     {
@@ -3377,7 +3517,16 @@ async fn upsert_ssl(
     // `site_ssl` row twice; a failure between the two writes must not leave a
     // half-applied posture behind, so both go through one transaction.
     let txn = state.db.begin().await?;
-    let posture = save_tls_posture(&txn, &site, &tls).await?;
+    let posture = save_tls_posture(
+        &txn,
+        &site,
+        &tls,
+        CertSource {
+            uploaded: uploaded_pair,
+            acme_email: payload.acme_email.as_deref(),
+        },
+    )
+    .await?;
 
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(id))
@@ -3395,8 +3544,13 @@ async fn upsert_ssl(
             if let Some(key) = payload.key_pem {
                 active.key_pem = Set(non_empty(&Some(key)));
             }
-            active.issuer = Set(payload.issuer);
-            active.expires_at = Set(expires_at);
+            // The posture writer issued the leaf when self-signed is on; a
+            // request that only edits switches must not blank its issuer and
+            // expiry, which is what marks it as ours.
+            if !posture.self_signed {
+                active.issuer = Set(payload.issuer);
+                active.expires_at = Set(expires_at);
+            }
             active.auto_renew = Set(payload.auto_renew);
             active.acme_email = Set(non_empty(&payload.acme_email));
             active.acme_challenge_type =
@@ -4259,7 +4413,7 @@ pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
     assert_eq!(row.ingress_port, Some(81));
     for field in ["hsts_enabled", "always_use_https"] {
         let req = serde_json::from_value(json!({field:true})).unwrap();
-        let error = save_tls_posture(&state.db, &row, &req).await.unwrap_err();
+        let error = save_tls_posture(&state.db, &row, &req, CertSource::default()).await.unwrap_err();
         assert_eq!(error.code(), "site.ingress_invalid");
     }
     let site_scope = crate::config_catalog::VersionScope::Site(row.id);
@@ -4973,6 +5127,58 @@ mod tests {
         );
         let orphan = orphan.try_into_model().expect("all fields are set");
         assert!(orphan.group_id.is_none());
+    }
+
+    #[test]
+    fn self_signed_forces_https_on() {
+        let merged = TlsPosture::unset()
+            .merged(&TlsPostureRequest {
+                self_signed: Some(true),
+                ..Default::default()
+            })
+            .expect("self-signed is a complete posture");
+        assert!(merged.self_signed);
+        assert!(
+            merged.https_enabled,
+            "self-signed without HTTPS serves nothing"
+        );
+        assert!(merged.certificate_id.is_none());
+    }
+
+    #[test]
+    fn an_explicit_certificate_selection_outranks_the_self_signed_switch() {
+        let cert_id = Uuid::new_v4();
+        // The console sends both when the operator picks a certificate; the
+        // selection must win instead of being cleared as "self-signed".
+        let merged = TlsPosture::unset()
+            .merged(&TlsPostureRequest {
+                self_signed: Some(true),
+                certificate_id: Some(cert_id),
+                ..Default::default()
+            })
+            .expect("a selection is a valid posture");
+        assert!(!merged.self_signed);
+        assert_eq!(merged.certificate_id, Some(cert_id));
+    }
+
+    #[test]
+    fn https_without_any_certificate_source_is_rejected() {
+        // The shipped-broken state: listener up, nothing to serve, silent 443
+        // failures. Every source has to be accepted instead.
+        let err = require_cert_source(true, false, false, false, None)
+            .expect_err("HTTPS with no source must be refused");
+        assert!(err.to_string().contains("no certificate"));
+
+        require_cert_source(true, true, false, false, None)
+            .expect("self-signed is a source");
+        require_cert_source(true, false, true, false, None)
+            .expect("an inline PEM is a source");
+        require_cert_source(true, false, false, true, None)
+            .expect("a selected certificate is a source");
+        require_cert_source(true, false, false, false, Some("ops@example.com"))
+            .expect("an ACME order is a source");
+        require_cert_source(false, false, false, false, None)
+            .expect("HTTP-only sites need no certificate");
     }
 
     #[test]

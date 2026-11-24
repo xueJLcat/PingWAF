@@ -61,13 +61,17 @@ services:
       # without touching the compose file; container-side ports stay fixed.
       - "${PINGWAF_HTTP_PORT:-80}:80"       # HTTP traffic (proxied)
       - "${PINGWAF_HTTPS_PORT:-443}:443"    # HTTPS traffic (proxied)
-      # The admin API and the agent gRPC endpoint publish on loopback only: a
-      # fresh install still has the seeded administrator account, so exposing
-      # 9080/9090 to the network before the password is changed would hand the
-      # control plane to whoever connects first. Publish them on 0.0.0.0 (or a
-      # private interface) explicitly when a reverse proxy / remote agents
-      # need it — and restrict them with a firewall.
-      - "${PINGWAF_ADMIN_BIND:-127.0.0.1}:${PINGWAF_ADMIN_PORT:-9080}:9080"  # Admin dashboard + REST API
+      # The console publishes on every interface: bound to loopback it was
+      # unreachable from the operator's browser, so a fresh install looked
+      # broken before the first login could happen. The installer generates a
+      # random administrator password and a fresh database refuses every write
+      # until it is changed — still, restrict 9080 to your admin network
+      # (PINGWAF_ADMIN_BIND=<admin-ip>, a firewall, or a reverse proxy).
+      #
+      # The agent gRPC endpoint stays on loopback; only remote agents need it
+      # opened (PINGWAF_GRPC_BIND=0.0.0.0), and those deployments must firewall
+      # 9090.
+      - "${PINGWAF_ADMIN_BIND:-0.0.0.0}:${PINGWAF_ADMIN_PORT:-9080}:9080"  # Admin dashboard + REST API
       - "${PINGWAF_GRPC_BIND:-127.0.0.1}:${PINGWAF_GRPC_PORT:-9090}:9090"    # gRPC control plane (agents connect here)
     environment:
       - PINGWAF_DB_URL=postgres://pingwaf:${POSTGRES_PASSWORD:-pingwaf}@postgres:5432/pingwaf

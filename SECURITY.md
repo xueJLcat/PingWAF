@@ -183,11 +183,12 @@ control.**
 
 ### Network exposure
 
-- [ ] Bind the dashboard/REST API to `127.0.0.1:9080` or a private interface and
-      reach it through a VPN/SSH tunnel or a reverse proxy. Do not publish
-      `0.0.0.0:9080` on the public internet: it is the administrative origin and
-      is continuously scanned. If remote access is unavoidable, restrict the
-      cloud security group/host firewall to known administrator addresses.
+- [ ] The console listens on `0.0.0.0:9080` by default so a fresh install is
+      reachable. Narrow it: set `admin_addr` to a private interface, or keep the
+      bind and restrict the cloud security group / host firewall to known
+      administrator addresses (or front it with a VPN, SSH tunnel or reverse
+      proxy). Do not leave it reachable from the public internet: it is the
+      administrative origin and is continuously scanned.
       The port serves HTTPS by default with a self-signed certificate — upload a
       real one (**Settings → Control plane HTTPS**) or set
       `PINGWAF_TLS_ENABLED=false` behind a proxy that terminates TLS.

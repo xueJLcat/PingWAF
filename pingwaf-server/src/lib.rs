@@ -30,6 +30,7 @@ pub mod models;
 pub mod monitoring;
 pub mod notify;
 pub mod pki;
+pub mod site_cert;
 pub mod subscription;
 pub mod tls;
 
@@ -48,6 +49,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use crate::api::state::AppState;
 
 mod acme_state_sync;
+mod site_cert_renewal;
 use crate::es::{ensure_index_template, ElasticsearchClient};
 use crate::grpc::{AgentRegistry, ControlPlaneService};
 use crate::migration::Migrator;
@@ -456,6 +458,22 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
 
     // ── 9d. Start the certificate expiry scanner ────────────────────────────
     let _cert_expiry_handle = notify::cert_expiry::start(db.clone());
+
+    // ── 9e. Issue and renew self-signed site certificates ───────────────────
+    // A site that enables HTTPS with the self-signed mode used to push a TLS
+    // listener with no certificate, so every handshake failed. Issue the leaf
+    // now (before the first config push) and keep it renewed from here on.
+    match site_cert_renewal::reconcile(&state).await {
+        Ok(0) => {},
+        Ok(count) => {
+            tracing::info!(count, "issued self-signed site certificates")
+        },
+        Err(err) => tracing::warn!(
+            error = %err,
+            "self-signed certificate reconcile failed"
+        ),
+    }
+    let _site_cert_handle = site_cert_renewal::spawn(state.clone());
 
     // ── 10. Spawn and wait for shutdown ─────────────────────────────────────
     tokio::select! {

@@ -28,10 +28,12 @@ are kept). The installer:
 - **generates `PINGWAF_SECRET_KEY`** into `.env` and reuses it on `--force`;
   rotating it silently would make every sealed notification/AI/backup credential
   unreadable;
-- **publishes the console (9080) and gRPC (9090) on `127.0.0.1` only.** Set
-  `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` to `0.0.0.0` (or a private
-  interface) only when a reverse proxy or remote agents need them, and change
-  the administrator password first;
+- **publishes the console (9080) on `0.0.0.0` and gRPC (9090) on
+  `127.0.0.1`.** The console has to be reachable for a fresh install to be
+  usable; restrict it with `PINGWAF_ADMIN_BIND` (an admin interface), a
+  firewall, or a reverse proxy, and change the administrator password at the
+  first sign-in. Set `PINGWAF_GRPC_BIND=0.0.0.0` only when remote agents need
+  it;
 - **never deletes data volumes.** `--force` rewrites `.env` but keeps
   `postgres-data` / `pingwaf-data` / `pingwaf-certs`; volume pruning is a
   separate, explicit action (see [Upgrade Procedure](#upgrade-procedure)).
@@ -146,7 +148,7 @@ The systemd path solves the same problem a different way — the unit grants
 | `PINGWAF_TAG` | `latest` | PingWAF image tag — pin a release (or a digest) in production |
 | `PINGWAF_HTTP_PORT` / `PINGWAF_HTTPS_PORT` | `80` / `443` | Host ports for proxied traffic |
 | `PINGWAF_ADMIN_PORT` / `PINGWAF_GRPC_PORT` | `9080` / `9090` | Host ports for the console/API and the agent gRPC endpoint |
-| `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` | `127.0.0.1` | Host address the console/API and the agent gRPC endpoint publish on. **Loopback by default** — a fresh install still has a just-generated administrator password. Set `0.0.0.0` (or a private interface) only behind a reverse proxy / for remote agents, and restrict it with a firewall |
+| `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` | `0.0.0.0` / `127.0.0.1` | Host address the console/API and the agent gRPC endpoint publish on. The console is published on every interface so a fresh install is reachable — set it to a specific admin interface (or firewall the port / front it with a reverse proxy) and change the administrator password at the first sign-in. gRPC stays loopback unless remote agents need it |
 | `PINGWAF_TLS_SANS` | empty | Comma-separated SANs for the self-signed console certificate |
 | `TLS_ENABLED` | `true` | Serve the console over HTTPS |
 | `POSTGRES_PASSWORD` | `pingwaf` (development fallback) | PostgreSQL password. **Set a random value in `.env`** (`openssl rand -hex 16`) for any real deployment: the compose file still falls back to `pingwaf` when unset, and the compose installer does not generate this one |
@@ -208,7 +210,7 @@ and `--no-systemd`:
 | --- | --- | --- |
 | `--admin-email` | `PINGWAF_ADMIN_EMAIL` | Seed administrator e-mail (server / all-in-one) |
 | `--admin-password` | `PINGWAF_ADMIN_PASSWORD` | Seed administrator password (server / all-in-one); when empty a random password is generated and printed once |
-| `--listen-public` | `PINGWAF_LISTEN_PUBLIC` | Bind the dashboard (9080) and gRPC (9090) on `0.0.0.0` instead of the default `127.0.0.1`. Use it only behind a reverse proxy or for remote agents, and change the administrator password first |
+| `--listen-public` | `PINGWAF_LISTEN_PUBLIC` | Also bind the agent gRPC endpoint (9090) on `0.0.0.0`; it stays on `127.0.0.1` by default and only remote agents need it opened. The dashboard/REST API (9080) already listens on every interface — restrict it to your admin network |
 | `--tls-sans` | `PINGWAF_TLS_SANS` | Comma-separated SANs of the dashboard certificate |
 | `--server-ca-cert` | `PINGWAF_SERVER_CA_CERT` | PEM file with the CA that signed the control plane's gRPC certificate (agent mode, https); readability is verified before installing |
 | `--server-tls-name` | `PINGWAF_SERVER_TLS_NAME` | Name used for SNI and certificate verification when the certificate has no SAN for the URL host (agent mode; requires a release that knows the flag) |
@@ -244,10 +246,13 @@ the script resolved from your options.
   `allocator_tune::apply()` can set the option, and an existing arena cannot
   be shrunk. Override the values with `systemctl edit pingwaf` when the host
   has a non-standard memory layout.
-- **Listen addresses** — `127.0.0.1:9080` (console) and `127.0.0.1:9090`
-  (gRPC) by default. `--listen-public` (or `PINGWAF_LISTEN_PUBLIC=1`) publishes
-  them on `0.0.0.0` and prints a reminder to change the administrator password
-  first; prefer a TLS reverse proxy over exposing the console directly.
+- **Listen addresses** — the console listens on `0.0.0.0:9080` and the agent
+  gRPC endpoint on `127.0.0.1:9090`. The console binds every interface so a
+  fresh install is reachable from the operator's browser; restrict 9080 to your
+  admin network (firewall or `admin_addr`) or front it with a TLS reverse proxy,
+  and change the administrator password at the first sign-in — a fresh database
+  refuses every write until you do. `--listen-public` (or
+  `PINGWAF_LISTEN_PUBLIC=1`) opens gRPC too, which only remote agents need.
 
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
 > macOS, [build from source](./quick-start.md#path-2-build-from-source).
@@ -352,8 +357,8 @@ file and in the environment is taken from the environment.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `db_url` | string | `postgres://pingwaf:pingwaf@localhost:5432/pingwaf` | PostgreSQL DSN |
-| `admin_addr` | string | `0.0.0.0:9080` (CLI default; the example config and installer use `127.0.0.1:9080`) | REST API + dashboard address |
-| `grpc_addr` | string | `0.0.0.0:9090` (CLI default; the example config and installer use `127.0.0.1:9090`) | gRPC control plane address |
+| `admin_addr` | string | `0.0.0.0:9080` (CLI, installer and example config alike) | REST API + dashboard address; restrict it with a firewall or a reverse proxy |
+| `grpc_addr` | string | `0.0.0.0:9090` (CLI default; the installer and example config use `127.0.0.1:9090` until `--listen-public`) | gRPC control plane address |
 | `grpc_tls_mode` | string | `tls` | `tls` (default) or `off`. With `tls` and no certificate configured, a self-signed CA + server certificate is generated on first boot and reused after |
 | `grpc_tls_cert` | string | — | PEM certificate for the gRPC listener; takes priority over the self-signed pair (requires `grpc_tls_key`) |
 | `grpc_tls_key` | string | — | PEM private key for `grpc_tls_cert` |
@@ -1171,6 +1176,14 @@ change has to reach the fleet immediately.
 Take a backup before every upgrade, and pin the exact version you deploy —
 `:latest` makes an upgrade an unauditable drift and leaves you without a known
 rollback target.
+
+> **Console listen address.** New installs bind the console on `0.0.0.0:9080`.
+> An upgrade never rewrites an existing configuration, so an installation
+> created before that change keeps `admin_addr = "127.0.0.1:9080"` (and compose
+> keeps the old `.env` value) and stays reachable only from the host itself.
+> Set `admin_addr = "0.0.0.0:9080"` — or `PINGWAF_ADMIN_BIND=0.0.0.0` in
+> `.env` — when you want the new behavior, then restrict the port with a
+> firewall or a reverse proxy.
 
 ### Docker
 

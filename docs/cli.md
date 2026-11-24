@@ -175,10 +175,11 @@ the instance secrets. Its security-relevant behaviour:
   reads it via `EnvironmentFile=-/etc/pingwaf/pingwaf.env`. An existing key is
   kept on upgrade — rotating it silently would make sealed channel/AI/backup
   credentials unreadable.
-- **Listen addresses** — `--listen-public` (`PINGWAF_LISTEN_PUBLIC=1`) binds the
-  dashboard (`9080`) and gRPC (`9090`) on `0.0.0.0`; **without it both bind
-  `127.0.0.1` only**. Expose them through a TLS reverse proxy (or a private
-  interface plus firewall) and change the administrator password first.
+- **Listen addresses** — the dashboard (`9080`) binds **`0.0.0.0`** so a fresh
+  install is reachable; restrict it with a firewall or a TLS reverse proxy and
+  change the administrator password at the first sign-in. gRPC (`9090`) binds
+  **`127.0.0.1`**; `--listen-public` (`PINGWAF_LISTEN_PUBLIC=1`) opens it on
+  `0.0.0.0`, which only remote agents need.
 
 See [deployment.md → Manual Installation](./deployment.md#manual-installation-binary--systemd)
 for the full option table.

@@ -348,10 +348,11 @@ cat <<EOF
 
 PingWAF is starting.
 
-  Console : https://localhost:${ADMIN_PORT}  (self-signed certificate)
-            the admin/gRPC ports are published on 127.0.0.1 by default; set
-            PINGWAF_ADMIN_BIND/PINGWAF_GRPC_BIND to 0.0.0.0 only when a proxy or
-            remote agents need them, and only after changing the password
+  Console : https://<this-host>:${ADMIN_PORT}  (self-signed certificate)
+            published on every interface so a fresh install is reachable —
+            restrict ${ADMIN_PORT} to your admin network (PINGWAF_ADMIN_BIND, a
+            firewall, or a reverse proxy). gRPC stays on 127.0.0.1 unless
+            PINGWAF_GRPC_BIND=0.0.0.0 is set for remote agents
   Account : ${ADMIN_EMAIL}
   Password: $([[ "$ADMIN_PASSWORD_GENERATED" == "true" ]] && echo "${ADMIN_PASSWORD} (generated — shown once, store it now)" || echo "stored in $(pwd)/.env")
 

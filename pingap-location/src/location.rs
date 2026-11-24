@@ -1014,7 +1014,7 @@ impl Location {
             )
         }) && self.cookie_conditions.iter().all(|(name, expected)| {
             condition_met(
-                pingap_core::get_cookie_value(req_header, name),
+                pingap_core::get_cookie_value(req_header, name).as_deref(),
                 expected,
             )
         })

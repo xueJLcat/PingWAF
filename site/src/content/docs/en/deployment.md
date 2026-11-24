@@ -17,7 +17,7 @@ minutes: 10
 | `9080` | REST API + dashboard | HTTPS with a self-signed certificate until you replace it; keep it private |
 | `9090` | gRPC control plane | Agents connect here; TLS by default, `grpc_tls_mode = "off"` downgrades to plaintext |
 | `80` | Proxied traffic | Bound once the first site exists |
-| `443` | Proxied traffic | Opens only after a certificate is issued or uploaded |
+| `443` | Proxied traffic | Bound once the first site exists; a new site is issued a self-signed certificate automatically |
 
 `GET /healthz` answers on both HTTP and HTTPS, which is what the compose health check and most load balancers should probe. Everything else redirects to HTTPS.
 

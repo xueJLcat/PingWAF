@@ -4543,6 +4543,61 @@ mod tests {
     }
 
     #[test]
+    fn a_generated_self_signed_certificate_is_served_for_the_site() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.alternate_domains = vec!["www.a.example.com".into()];
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        // Exactly the shape the control plane stores for a self-signed site:
+        // the issued leaf lands in `cert_pem`, not in an ACME order.
+        let alternates: Vec<String> = site
+            .alternate_domains
+            .iter()
+            .map(|domain| domain.to_string())
+            .collect();
+        let issued = pingwaf_server::site_cert::issue(
+            &site.domain,
+            &alternates,
+            pingwaf_server::site_cert::SITE_CERT_DAYS,
+        )
+        .expect("a site certificate must be issuable");
+        let mut ssl = acme_ssl();
+        ssl.cert_pem = issued.cert_pem;
+        ssl.key_pem = issued.key_pem;
+        ssl.acme_enabled = false;
+        ssl.self_signed = true;
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let cert = config
+            .certificates
+            .get("site1_cert")
+            .expect("the generated leaf is served");
+        assert_eq!(
+            cert.domains.as_deref(),
+            Some("a.example.com,www.a.example.com")
+        );
+        assert_eq!(cert.acme, None, "a self-signed site must not order ACME");
+        assert!(
+            cert.tls_cert
+                .as_deref()
+                .is_some_and(|pem| pem.contains("BEGIN CERTIFICATE"))
+        );
+        assert!(
+            config
+                .servers
+                .get("pingwaf_tls")
+                .is_some_and(|server| server.global_certificates == Some(true))
+        );
+    }
+
+    #[test]
     fn mtls_sites_contribute_their_ca_to_the_tls_listener() {
         let mut site = site_rules("site1", "a.example.com");
         let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);

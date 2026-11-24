@@ -2224,18 +2224,19 @@ impl ExpressionState {
     }
 }
 
-/// Parses the `Cookie` header into name/value pairs.
+/// Parses the `Cookie` header(s) into name/value pairs.
+///
+/// HTTP/2 clients may split the cookie jar across several `Cookie` fields
+/// (RFC 9113 §8.2.3) and Chromium does so once the jar grows. Reading only the
+/// first field hid every cookie after the split — including the clearance
+/// cookie, which made the challenge re-issue forever (2026-11-24, issue #108).
 fn parse_cookies(
     headers: &[(String, String)],
 ) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
-    let Some(raw) = headers
+    headers
         .iter()
-        .find(|(k, _)| k == "cookie")
-        .map(|(_, v)| v.as_str())
-    else {
-        return Vec::new();
-    };
-    raw.split(';')
+        .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, v)| v.split(';'))
         .filter_map(|pair| {
             let (name, value) = pair.trim().split_once('=')?;
             Some((
@@ -2257,20 +2258,19 @@ fn request_user_agent(headers: &[(String, String)]) -> &str {
 }
 
 /// Extracts the clearance cookie value, if the client carries one.
-fn clearance_cookie(
-    headers: &[(String, String)],
-    name: &str,
-) -> Option<String> {
+///
+/// Every `Cookie` field is searched, in wire order: an HTTP/2 client may split
+/// the jar over several fields, and the clearance one can land in any of them.
+fn clearance_cookie(headers: &[(String, String)], expected_name: &str) -> Option<String> {
     headers
         .iter()
-        .find(|(k, _)| k == "cookie")
-        .and_then(|(_, v)| {
-            v.split(';').find_map(|pair| {
-                let (key, value) = pair.trim().split_once('=')?;
-                key.trim()
-                    .eq_ignore_ascii_case(name)
-                    .then(|| value.trim().to_string())
-            })
+        .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, v)| v.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case(expected_name)
+                .then(|| value.trim().to_string())
         })
 }
 
@@ -10966,6 +10966,59 @@ inspect_body = true"###,
         assert_eq!(key(&full), key(&respelled));
         assert_ne!(key(&full), key(&mixed));
         assert_ne!(key(&mixed), key(&empty));
+    }
+
+    /// HTTP/2 clients may split the cookie jar over several `Cookie` fields
+    /// (RFC 9113 §8.2.3, exercised by Chromium). Both the cookie map and the
+    /// clearance extractor used to read only the first field, so a valid
+    /// clearance placed after the split point was invisible and every request
+    /// was challenged again (2026-11-24, issue #108).
+    #[test]
+    fn cookies_are_read_from_every_cookie_field() {
+        let headers = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<(String, String)>>()
+        };
+
+        let split = headers(&[
+            ("cookie", "app_id=12345; preferences=A=1|B=1"),
+            ("cookie", "session_id=98765"),
+            ("cookie", "__pingwaf_clearance=signed-token"),
+        ]);
+        let names: Vec<String> = parse_cookies(&split)
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "app_id",
+                "preferences",
+                "session_id",
+                "__pingwaf_clearance"
+            ]
+        );
+        assert_eq!(
+            clearance_cookie(&split, CLEARANCE_COOKIE_NAME).as_deref(),
+            Some("signed-token")
+        );
+
+        // The layout must not matter: one joined field and a clearance in the
+        // first field both resolve to the same value.
+        let joined =
+            headers(&[("Cookie", "app_id=1; __pingwaf_clearance=t; b=2")]);
+        assert_eq!(clearance_cookie(&joined, CLEARANCE_COOKIE_NAME).as_deref(), Some("t"));
+        let first = headers(&[
+            ("Cookie", "__pingwaf_clearance=t2"),
+            ("cookie", "app_id=1"),
+        ]);
+        assert_eq!(clearance_cookie(&first, CLEARANCE_COOKIE_NAME).as_deref(), Some("t2"));
+
+        // No clearance anywhere stays None instead of matching something else.
+        let none = headers(&[("cookie", "app_id=1"), ("cookie", "b=2")]);
+        assert_eq!(clearance_cookie(&none, CLEARANCE_COOKIE_NAME), None);
     }
 
     /// The key is a digest, so what it must not lose is the boundary between

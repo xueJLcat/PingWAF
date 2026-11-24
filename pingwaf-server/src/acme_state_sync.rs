@@ -32,7 +32,8 @@ use uuid::Uuid;
 
 use crate::api::ssl::cert_status;
 use crate::api::state::AppState;
-use crate::models::site_certificates;
+use crate::models::{site_certificates, site_ssl};
+use crate::site_cert;
 
 /// How often the file is checked. Issuance is rare; a 30 s delay only means
 /// the other agents stop retrying a little later.
@@ -203,12 +204,42 @@ async fn sync_certificate(
     active.status = Set(cert_status::ACTIVE.to_string());
     active.failure_reason = Set(None);
     active.updated_at = Set(Utc::now());
-    if let Some(meta) = parse_certificate_meta(cert_pem) {
-        active.issuer = Set(Some(meta.issuer));
+    let meta = parse_certificate_meta(cert_pem);
+    if let Some(meta) = &meta {
+        active.issuer = Set(Some(meta.issuer.clone()));
         active.not_before = Set(Some(meta.not_before));
         active.expires_at = Set(Some(meta.expires_at));
     }
+    let certificate_id = row.id;
     active.update(&state.db).await?;
+
+    // The issued PEM is the site's certificate now. A generated self-signed
+    // leaf would otherwise keep winning — the data plane prefers an inline PEM
+    // over an ACME order — so the site would serve the wrong certificate
+    // forever. Point the posture at this row and drop our generated material.
+    let posture_row = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(site_id))
+        .one(&state.db)
+        .await?;
+    if let Some(ssl) = posture_row {
+        if ssl.self_signed || site_cert::is_generated(ssl.issuer.as_deref()) {
+            let mut posture: site_ssl::ActiveModel = ssl.into();
+            posture.self_signed = Set(false);
+            posture.certificate_id = Set(Some(certificate_id));
+            posture.cert_pem = Set(None);
+            posture.key_pem = Set(None);
+            if let Some(meta) = &meta {
+                posture.issuer = Set(Some(meta.issuer.clone()));
+                posture.expires_at = Set(Some(meta.expires_at));
+            }
+            posture.update(&state.db).await?;
+            info!(
+                site_id = %site_id,
+                cert_id = %certificate_id,
+                "ACME certificate took over from the self-signed leaf"
+            );
+        }
+    }
 
     info!(
         site_id = %site_id,

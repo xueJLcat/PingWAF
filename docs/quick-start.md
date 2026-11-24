@@ -168,10 +168,11 @@ postgres://pingwaf:pingwaf@localhost:5432/pingwaf
 >
 > The installer generates a random administrator password (printed **once**, at
 > the end) and a `PINGWAF_SECRET_KEY` in `.env` (mode `0600`), keeps the data
-> volumes on `--force`, and publishes the console (9080) / gRPC (9090) on
-> **`127.0.0.1` only** — set `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` to
-> `0.0.0.0` only behind a reverse proxy or for remote agents, after changing the
-> administrator password.
+> volumes on `--force`, and publishes the console (9080) on **`0.0.0.0`** so it
+> is reachable right after install — restrict it with `PINGWAF_ADMIN_BIND`, a
+> firewall or a reverse proxy, and change the administrator password at the
+> first sign-in. gRPC (9090) stays on **`127.0.0.1`**; set
+> `PINGWAF_GRPC_BIND=0.0.0.0` only for remote agents.
 >
 > Use the steps below when you want to inspect or edit the compose file first.
 > The command generator on the [install page](https://www.pingwaf.com/install/) writes the same flags.
@@ -232,7 +233,7 @@ Compose variables you can set:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `POSTGRES_PASSWORD` | `pingwaf` (development fallback) | PostgreSQL password (also used to build the DSN). Set a random value for any real deployment |
-| `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` | `127.0.0.1` | Host address the console (9080) / gRPC (9090) publish on; loopback by default |
+| `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` | `0.0.0.0` / `127.0.0.1` | Host address the console (9080) / gRPC (9090) publish on. The console is reachable from the network so a fresh install is usable — restrict it, or set a specific admin IP. gRPC stays loopback until remote agents need it |
 | `JWT_SECRET` | `change-me-in-production-use-32-chars` | JWT signing secret, **32 random bytes** (`openssl rand -hex 32`; server floor 16 chars) |
 | `PINGWAF_SECRET_KEY` | unset (required for sealing) | Instance key for sealed secrets (channels, AI key, backup targets); **set 32 random bytes**, unset = clear text. The installer generates it into `.env` |
 | `ADMIN_EMAIL` | `admin@pingwaf.local` | Seeded administrator email |
@@ -575,11 +576,12 @@ also ships a hardened unit file, [`pingwaf.service`](../pingwaf.service).
 > The installer is fail-closed: it **verifies the release `.sha256`** and aborts
 > on a missing/mismatched checksum; it **generates `PINGWAF_SECRET_KEY`** and
 > writes it to `/etc/pingwaf/pingwaf.env` (mode `0600`, read by the systemd
-> unit), keeping an existing key on upgrade. The dashboard (9080) and gRPC
-> (9090) bind to **`127.0.0.1`** by default; `--listen-public` (or
-> `PINGWAF_LISTEN_PUBLIC=1`) publishes them on `0.0.0.0` — use that only behind
-> a reverse proxy or for remote agents, and change the administrator password
-> first.
+> unit), keeping an existing key on upgrade. The dashboard (9080) binds
+> **`0.0.0.0`** so the console is reachable right after install — restrict the
+> port to your admin network (firewall or a reverse proxy) and change the
+> administrator password at the first sign-in. gRPC (9090) stays on
+> **`127.0.0.1`**; `--listen-public` (or `PINGWAF_LISTEN_PUBLIC=1`) opens it for
+> remote agents.
 >
 > On macOS there are no release binaries — build via
 > [Path 2](#path-2-build-from-source), then follow the steps below.
@@ -1008,8 +1010,9 @@ privileges. Migrations run automatically on startup and need `CREATE TABLE`.
 1. Check the health endpoint first — if `/healthz` fails, the server is not up:
    `curl -sf http://localhost:9080/healthz` (the health endpoint answers on both
    schemes, so this works even with TLS on).
-2. Confirm the bind address. `--admin-addr 127.0.0.1:9080` is unreachable from
-   another machine; use `0.0.0.0:9080` and open the firewall port.
+2. Confirm the bind address. The installer writes `admin_addr = "0.0.0.0:9080"`;
+   if the file was edited to `127.0.0.1:9080`, the console is unreachable from
+   another machine — set `0.0.0.0:9080` back and open the firewall port.
 3. Building from source? The dashboard is embedded from `web/dist` **at compile
    time**. If you skipped `cd web && npm ci && npm run build`, or rebuilt the
    frontend after compiling Rust, rebuild the binary.

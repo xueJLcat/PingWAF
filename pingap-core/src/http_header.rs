@@ -794,32 +794,63 @@ pub fn sets_managed_cookie(value: &HeaderValue) -> bool {
         .any(managed_cookie_name)
 }
 
-/// Parses the "Cookie" header to find the value of a specific cookie.
+/// Parses the `Cookie` header(s) to find the value of a specific cookie.
+///
+/// HTTP/2 lets a client split its cookie jar across several `Cookie` header
+/// fields (RFC 9113 §8.2.3), and Chromium does exactly that once the jar grows
+/// past its per-field budget. Reading only the first field therefore hides
+/// every cookie the client sent after the split point — that is how a valid
+/// `__pingwaf_clearance` cookie became invisible and the JS challenge was
+/// re-issued on every request (2026-11-24, issue #108). Every field is parsed
+/// here, in wire order, so a caller never has to know how many arrived.
+///
+/// A single field borrows (the common case allocates nothing); two or more are
+/// joined with `"; "`, the separator RFC 9113 requires a recipient to assume.
 pub fn get_cookie_value<'a>(
     req_header: &'a RequestHeader,
     cookie_name: &str,
-) -> Option<&'a str> {
-    // First, get the entire "Cookie" header string. The '?' operator will short-circuit if it's not present.
-    get_req_header_value(req_header, "cookie")?
-        // Split the string into individual cookies.
-        .split(';')
-        // `find_map` is an efficient way to find the first cookie that matches our criteria.
-        .find_map(|item| {
-            // This chained logic attempts to quickly find a match.
-            // It's more complex to handle cases like "key=value" vs "key=" correctly.
-            item.trim()
-                .strip_prefix(cookie_name)?
-                .strip_prefix('=')
-                .or_else(|| {
-                    // Fallback logic to ensure the cookie name is an exact match.
-                    let (k, v) = item.split_once('=')?;
-                    if k.trim() == cookie_name {
-                        Some(v.trim())
-                    } else {
-                        None
-                    }
-                })
-        })
+) -> Option<Cow<'a, str>> {
+    let mut values = req_header
+        .headers
+        .get_all("cookie")
+        .iter()
+        // A non-UTF-8 field is skipped rather than failing the whole jar: the
+        // cookie the caller wants may well live in another field.
+        .filter_map(|value| value.to_str().ok());
+    let first = values.next()?;
+    let Some(second) = values.next() else {
+        return find_cookie(first, cookie_name).map(Cow::Borrowed);
+    };
+
+    let mut joined = String::with_capacity(first.len() + second.len() + 2);
+    joined.push_str(first);
+    joined.push_str("; ");
+    joined.push_str(second);
+    for value in values {
+        joined.push_str("; ");
+        joined.push_str(value);
+    }
+    find_cookie(&joined, cookie_name).map(|value| Cow::Owned(value.to_string()))
+}
+
+/// First `name=value` pair in one `Cookie` field whose name is `cookie_name`.
+fn find_cookie<'a>(field: &'a str, cookie_name: &str) -> Option<&'a str> {
+    field.split(';').find_map(|item| {
+        // This chained logic attempts to quickly find a match.
+        // It's more complex to handle cases like "key=value" vs "key=" correctly.
+        item.trim()
+            .strip_prefix(cookie_name)?
+            .strip_prefix('=')
+            .or_else(|| {
+                // Fallback logic to ensure the cookie name is an exact match.
+                let (k, v) = item.split_once('=')?;
+                if k.trim() == cookie_name {
+                    Some(v.trim())
+                } else {
+                    None
+                }
+            })
+    })
 }
 
 /// Gets the value of a specific query parameter from the request URI.
@@ -1700,7 +1731,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            get_cookie_value(session.req_header(), "name"),
+            get_cookie_value(session.req_header(), "name").as_deref(),
             Some("pingap")
         );
     }
@@ -1837,13 +1868,49 @@ mod tests {
         req.insert_header("Cookie", "id=123; session=abc; theme=dark")
             .unwrap();
 
-        assert_eq!(get_cookie_value(&req, "session"), Some("abc"));
-        assert_eq!(get_cookie_value(&req, "id"), Some("123"));
-        assert_eq!(get_cookie_value(&req, "theme"), Some("dark"));
+        assert_eq!(get_cookie_value(&req, "session").as_deref(), Some("abc"));
+        assert_eq!(get_cookie_value(&req, "id").as_deref(), Some("123"));
+        assert_eq!(get_cookie_value(&req, "theme").as_deref(), Some("dark"));
         // Test for a non-existent cookie.
         assert_eq!(get_cookie_value(&req, "lang"), None);
         // Test for a cookie name that is a prefix of another.
         assert_eq!(get_cookie_value(&req, "the"), None);
+    }
+
+    /// HTTP/2 lets a client split its cookie jar across several `Cookie`
+    /// fields (RFC 9113 §8.2.3, which Chromium exercises). A cookie in the
+    /// second field used to be invisible, so a clearance cookie sent that way
+    /// was never found and the challenge looped (issue #108).
+    #[test]
+    fn test_get_cookie_value_across_multiple_cookie_fields() {
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("Cookie", "app_id=12345; preferences=A=1|B=1")
+            .unwrap();
+        req.append_header("Cookie", "session_id=98765").unwrap();
+        req.append_header("Cookie", "__pingwaf_clearance=signed-token")
+            .unwrap();
+
+        // The first field still resolves, and so does the last one.
+        assert_eq!(get_cookie_value(&req, "app_id").as_deref(), Some("12345"));
+        assert_eq!(
+            get_cookie_value(&req, "__pingwaf_clearance").as_deref(),
+            Some("signed-token")
+        );
+        assert_eq!(get_cookie_value(&req, "session_id").as_deref(), Some("98765"));
+        // A cookie name spanning a field boundary must not be stitched
+        // together: the join separator is `; `, not nothing.
+        assert_eq!(get_cookie_value(&req, "preferencesA"), None);
+        assert_eq!(get_cookie_value(&req, "missing"), None);
+    }
+
+    /// Order is preserved and the first occurrence wins, matching what a
+    /// single joined field would have produced.
+    #[test]
+    fn test_get_cookie_value_duplicate_across_fields_keeps_first() {
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("Cookie", "k=first").unwrap();
+        req.append_header("Cookie", "k=second").unwrap();
+        assert_eq!(get_cookie_value(&req, "k").as_deref(), Some("first"));
     }
 
     #[test]

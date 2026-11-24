@@ -637,6 +637,8 @@ Discard an owned draft. Returns 204.
 
 Create a new site. Reverse proxies require `upstream_address`. For a standalone redirect or static site, specify explicit listeners, eligible target nodes, and a `site_handler`. A ZIP publication supplies `{"kind":"zip","digest":"<sha256>"}` with the owner's `static_draft_id`. The publication and assignment commit together.
 
+A new site starts with HTTPS enabled and a **self-signed certificate** the control plane issues for its `domain` and `alternate_domains` (see [PUT /sites/{site_id}/ssl](#put-sitessite_idssl)); upload a certificate, select one, or configure ACME to replace it.
+
 **Request:**
 ```json
 {
@@ -1156,6 +1158,24 @@ Create or update SSL settings. `domain` is required; TLS switches (https, HSTS, 
   "hsts_max_age": 31536000
 }
 ```
+
+A site is served over TLS by exactly one certificate source, in this order of
+precedence:
+
+1. a selected `certificate_id` (an uploaded or shared certificate),
+2. an uploaded `cert_pem` / `key_pem` pair,
+3. an ACME order (`acme_email`),
+4. `self_signed: true` — the control plane issues a leaf covering the site's
+   `domain` and `alternate_domains`, records `issuer: "PingWAF Self-Signed"` and
+   renews it before expiry. New sites start in this mode.
+
+Setting `self_signed` clears `certificate_id` and turns HTTPS on; selecting a
+certificate, uploading a pair or configuring ACME turns `self_signed` off, and
+the generated material is removed so the new source is what the edge serves. A
+certificate delivered by ACME takes the site over the same way. `https_enabled:
+true` with none of the four sources is rejected with `400` (`HTTPS is enabled
+but the site has no certificate: ...`) instead of pushing a listener that cannot
+complete a handshake.
 
 ### DELETE /sites/{site_id}/ssl
 

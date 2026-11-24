@@ -43,9 +43,10 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9080/healthz   # 期
 
 两个官方安装器都已按安全默认值加固：
 
-- **默认只监听环回**：二进制安装器默认把控制台 `127.0.0.1:9080`、gRPC `127.0.0.1:9090` 绑定；compose 通过
-  `PINGWAF_ADMIN_BIND`/`PINGWAF_GRPC_BIND` 也默认发布在 `127.0.0.1`。只有需要反向代理或远程 agent 时才显式改为
-  `0.0.0.0`（或私网地址），并且**先修改管理员口令**；更推荐用 TLS 反向代理暴露，而不是直接公网。
+- **控制台对外开放、gRPC 只监听环回**：二进制安装器把控制台绑在 `0.0.0.0:9080`（装完即可从浏览器访问，避免"装完打不开"），
+  gRPC 仍是 `127.0.0.1:9090`；compose 通过 `PINGWAF_ADMIN_BIND` 默认发布在 `0.0.0.0`、`PINGWAF_GRPC_BIND` 默认在 `127.0.0.1`。
+  管理员口令由安装器随机生成，且全新数据库在改密前拒绝一切写操作；仍建议用防火墙把 9080 限制在管理网，或用 TLS 反向代理暴露。
+  `--listen-public` 只用于远程 agent 场景开放 9090。
 - **校验 release 校验和**：每个发布资产都有 `.sha256`；缺失、格式错误或不匹配时安装器直接退出，不会安装被篡改/截断的包。
 - **Agent 模式下载专用构建**：`--mode agent` 优先下载 `pingwaf-agent-<os>-<arch>.tar.xz`
   （仅数据面，不含 PostgreSQL / REST API / 控制台），并以 `/usr/local/bin/pingwaf`
@@ -92,7 +93,7 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9080/healthz   # 期
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` | `127.0.0.1` | 控制台（9080）/gRPC（9090）发布地址；默认仅环回。需要反代或远程 agent 时才改 `0.0.0.0`，并先改管理员口令 |
+| `PINGWAF_ADMIN_BIND` / `PINGWAF_GRPC_BIND` | `0.0.0.0` / `127.0.0.1` | 控制台（9080）/gRPC（9090）发布地址。控制台默认发布到所有网卡，装完即可访问；请改为指定管理网地址，或用防火墙/反向代理限制，并在首次登录时改管理员口令。gRPC 默认仅环回，远程 agent 才需放开 |
 | `ADMIN_PASSWORD` | **无默认值（新库必填）** | 初始管理员口令；为空会让首次启动失败，而不是播种已知口令。安装器会生成随机口令并只打印一次；首次登录强制改密 |
 | `POSTGRES_PASSWORD` | `pingwaf`（开发回退） | PostgreSQL 口令；正式部署务必在 `.env` 设置随机值（compose 仍会回退到 `pingwaf`，安装器不生成该项） |
 | `PINGWAF_SECRET_KEY` | 未设置（密封功能必需） | 静态加密主密钥：加密通知渠道口令、AI Provider Key、备份目标凭据。**必须设为 32 字节随机值**；不设置则这些字段明文入库。安装器会生成（compose → `.env`；二进制 → `/etc/pingwaf/pingwaf.env` 0600）。无在线轮换，备份与轮换步骤见 [SECURITY.md](../../SECURITY.md#credentials-and-secrets) |
@@ -156,6 +157,8 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9080/healthz
 ```
 
 **回滚**：把 `PINGWAF_TAG` 改回旧版本并 `docker compose up -d pingwaf`。数据库迁移**只向前**——若旧版本拒绝启动，需用 `pre-upgrade.dump` 恢复数据库后再启动旧版本。生产环境请固定版本 tag，不要使用 `:latest`。
+
+> **控制台监听地址**：新装默认把控制台绑在 `0.0.0.0:9080`。升级不会改写已有配置，因此本次改动之前装的实例仍保留 `admin_addr = "127.0.0.1:9080"`（compose 沿用 `.env` 里的旧值），只能从本机访问。想改成新默认值就显式设置 `admin_addr = "0.0.0.0:9080"`（或 `.env` 里 `PINGWAF_ADMIN_BIND=0.0.0.0`），并用防火墙/反向代理限制该端口。
 
 > 安装器升级会保留密钥与数据卷：compose 安装器 `--force` 复用已有管理员口令与 `PINGWAF_SECRET_KEY`，二进制安装器保留
 > `/etc/pingwaf/pingwaf.env`；两者都不会删除 `postgres-data`/`pingwaf-data`/`pingwaf-certs`。需要清理主机磁盘时只能显式运行

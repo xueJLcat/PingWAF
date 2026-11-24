@@ -708,6 +708,13 @@ Sites → [site] → SSL Settings
   [Sharing certificates between sites](#sharing-certificates-between-sites).
   Choosing a certificate the site neither owns nor has linked fails with
   `does not belong to this site and is not linked to it`.
+- Self-signed certificate — PingWAF issues and renews a leaf covering the
+  site's domain and alternate hostnames, and browsers warn because it is not
+  publicly trusted. New sites start in this mode; uploading a certificate,
+  selecting one, or configuring ACME replaces it automatically. Enabling HTTPS
+  with no certificate source at all is refused (`HTTPS is enabled but the site
+  has no certificate`) rather than serving a listener that cannot complete a
+  handshake.
 - Minimum TLS version (1.2 or 1.3)
 - Force HTTPS redirect
 - HSTS configuration

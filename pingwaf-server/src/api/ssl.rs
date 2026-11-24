@@ -24,7 +24,7 @@ use crate::api::common::{
 };
 use crate::api::error::ApiError;
 use crate::api::sites::{
-    load_tls_posture, save_tls_posture, touch_site, TlsPosture,
+    load_tls_posture, save_tls_posture, touch_site, CertSource, TlsPosture,
     TlsPostureRequest,
 };
 use crate::api::state::AppState;
@@ -1952,7 +1952,9 @@ async fn update_ssl_settings(
     let id = parse_uuid(&site_id, "site id")?;
     let site = load_site_write(&state.db, id, &current).await?;
 
-    let posture = save_tls_posture(&state.db, &site, &payload).await?;
+    let posture =
+        save_tls_posture(&state.db, &site, &payload, CertSource::default())
+            .await?;
     tracing::info!(site_id = %id, "SSL settings updated");
     touch_site(&state, id).await?;
     notify_config_changed(&state, id, Some(&current.email)).await;
@@ -2181,7 +2183,7 @@ async fn create_global_certificate(
             certificate_id: Some(model.id),
             ..Default::default()
         };
-        save_tls_posture(&txn, &site, &posture).await?;
+        save_tls_posture(&txn, &site, &posture, CertSource::default()).await?;
     }
     txn.commit().await?;
 
