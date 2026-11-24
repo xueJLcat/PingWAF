@@ -101,7 +101,7 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9080/healthz   # 期
 | `PINGWAF_INGRESS_LISTENERS` | 未设置 | Linux 受管入口，要求控制面支持受管快照。详见[英文部署指南](../deployment.md#experimental-tcp-listener-diagnostics) |
 
 旧版 Agent 协议仅下发默认入口的站点。TCP 绑定上报不表示节点获得自定义入口的转发授权。
-Linux 节点配置有效监听后消费受管全量快照，按会话和租约转发。控制面仍保留自定义入口建站门禁。
+Linux 节点配置有效监听后消费受管全量快照，按会话和租约转发。迁移 000107 开放自定义入口写入。库中有自定义站点时降级会被拒绝；回到旧版须恢复事先验证的升级前备份。
 | `PINGWAF_CORS_ORIGINS` | 空（仅同源） | 允许的跨域来源；为空时**不下发 CORS 头**，只有同源调用可用 |
 | `PINGWAF_TLS_ENABLED` | `true` | 控制台/API 使用 HTTPS（自签证书，可上传正式证书）；反代终止 TLS 时可设 `false` |
 | `PINGWAF_PASSKEY_ENABLED` | `true` | 启用 Passkey 登录。Passkey 需要安全上下文：HTTPS 主机名或 `localhost`；反代后需设 `PINGWAF_PASSKEY_ORIGIN` |

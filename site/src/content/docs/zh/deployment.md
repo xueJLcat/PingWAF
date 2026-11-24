@@ -26,7 +26,7 @@ minutes: 10
 Linux 的 Agent 和 all-in-one 配置有效的 `PINGWAF_INGRESS_LISTENERS` 后使用受管快照，自定义 HTTP/HTTPS 入口仅在已应用快照的租约有效时转发分派站点。默认未设置。
 
 旧版 Agent 协议只下发默认入口站点。TCP 绑定上报不代表节点获准转发自定义入口流量。
-控制面仍保留自定义入口建站门禁。
+迁移 000107 开放自定义入口写入。库中有自定义站点时降级会被拒绝；回到旧版须恢复事先验证的升级前备份。
 
 ## Docker Compose
 

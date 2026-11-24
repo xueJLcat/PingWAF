@@ -164,7 +164,7 @@ async fn site_ingress_migration_postgres() {
     db.execute_unprepared(&legacy_insert("app.test"))
         .await
         .unwrap();
-    Migrator::up(&db, None).await.unwrap();
+    Migrator::up(&db, Some(3)).await.unwrap();
     assert_eq!(scalar::<i64>(&db, "SELECT count(*) FROM sites WHERE ingress_port IS NULL AND ingress_protocol IS NULL").await, 1);
     let scope = config_catalog::VersionScope::Deployment;
     let legacy_snapshot =
@@ -196,11 +196,7 @@ async fn site_ingress_migration_postgres() {
         "23514",
         Some("sites_custom_ingress_disabled"),
     );
-    db.execute_unprepared(
-        "ALTER TABLE sites DROP CONSTRAINT sites_custom_ingress_disabled",
-    )
-    .await
-    .unwrap();
+    Migrator::up(&db, Some(1)).await.unwrap();
 
     for port in [81, 82, 83] {
         db.execute_unprepared(&insert("app.test", "{}", port, "http"))
@@ -543,12 +539,9 @@ async fn site_ingress_migration_postgres() {
         82
     );
 
-    Migrator::down(&db, Some(2)).await.unwrap();
-    assert!(Migrator::down(&db, Some(1))
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("custom ingress sites"));
+    let error = Migrator::down(&db, Some(1)).await.unwrap_err();
+    assert_db_error(&error, "23514", Some("sites_custom_ingress_disabled"));
+    assert!(scalar::<bool>(&db, "SELECT NOT EXISTS (SELECT FROM pg_constraint WHERE conrelid='sites'::regclass AND conname='sites_custom_ingress_disabled')").await);
     assert_eq!(
         scalar::<i64>(
             &db,
@@ -605,6 +598,14 @@ async fn site_ingress_migration_postgres() {
         .await
         .unwrap();
     Migrator::down(&db, Some(1)).await.unwrap();
+    assert_db_error(
+        &db.execute_unprepared(&insert("app.test", "{}", 81, "http"))
+            .await
+            .unwrap_err(),
+        "23514",
+        Some("sites_custom_ingress_disabled"),
+    );
+    Migrator::down(&db, Some(3)).await.unwrap();
     assert!(scalar::<bool>(&db, "SELECT to_regclass('sites_domain_key') IS NOT NULL AND to_regclass('uq_sites_domain') IS NOT NULL").await);
     let error = db
         .execute_unprepared(&legacy_insert("app.test"))

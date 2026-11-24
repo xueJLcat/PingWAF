@@ -4,7 +4,7 @@ description: REST groups, authentication, the gRPC control-plane contract, API k
 minutes: 7
 ---
 
-Explicit ingress sites are identified by UUID. Site writes accept `ingress_port` and `ingress_protocol` together. Enabling an assigned listener requires current agent session and bind evidence. Production custom writes remain disabled by the database migration.
+Explicit ingress sites are identified by UUID. Site writes accept `ingress_port` and `ingress_protocol` together. Enabling an assigned listener requires current agent session and bind evidence. Migration 000107 enables custom ingress writes.
 
 ## REST
 

@@ -4,7 +4,7 @@ description: REST 分组、认证、gRPC 控制面契约、API Key 与自动化�
 minutes: 7
 ---
 
-同一主域名的自定义入口站点用 UUID 区分。站点写接口成对接收 `ingress_port` 和 `ingress_protocol`，启用时检查分派节点的当前受管会话和监听回报。当前数据库迁移仍禁止正式写入自定义入口。
+同一主域名的自定义入口站点用 UUID 区分。站点写接口成对接收 `ingress_port` 和 `ingress_protocol`，启用时检查分派节点的当前受管会话和监听回报。迁移 000107 完成后开放自定义入口写入。
 
 ## REST
 

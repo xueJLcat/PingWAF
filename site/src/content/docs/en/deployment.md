@@ -24,7 +24,7 @@ minutes: 10
 On Linux, a valid `PINGWAF_INGRESS_LISTENERS` configuration enables managed snapshots for the agent and all-in-one process. A custom HTTP or HTTPS listener serves an assigned site only while its applied snapshot has a live lease. The default is unset.
 
 The legacy agent protocol delivers default-ingress sites only. A TCP bind report does not authorize custom-ingress traffic.
-Custom site creation remains gated in the control plane.
+Migration 000107 enables custom site creation. To return to the previous binary and schema after using custom sites, restore a pre-upgrade backup.
 
 ## Docker Compose
 

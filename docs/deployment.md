@@ -506,8 +506,7 @@ Linux agents configured with these listeners negotiate the managed protocol. Use
 a control plane that supports ordered snapshots. Default-ingress sites continue
 through the default proxy. An assigned custom site uses its own HTTP or TLS
 configuration after initial upstream checks. Session loss or lease expiry
-withdraws its view and cancels in-flight forwarding. The control plane still
-gates custom site creation while end-to-end deployment acceptance is pending.
+withdraws its view and cancels in-flight forwarding. Migration 000107 enables custom site creation. Rolling back this migration requires a database with no custom sites. Restore a pre-upgrade backup to revert a deployment that already serves custom sites.
 
 ## Deployment Modes
 
