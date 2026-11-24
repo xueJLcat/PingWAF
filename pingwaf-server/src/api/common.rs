@@ -862,6 +862,8 @@ mod tests {
             name: "shop".to_string(),
             domain: "*.example.com".to_string(),
             alternate_domains: Vec::new(),
+            ingress_port: None,
+            ingress_protocol: None,
             status: "active".to_string(),
             plan: "free".to_string(),
             cache_quota_mb: 1024,

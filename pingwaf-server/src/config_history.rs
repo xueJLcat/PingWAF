@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::config_catalog::{self, rows_for};
 use crate::config_restore::{self, RestoreOptions};
-use crate::models::{config_version, site};
+use crate::models::config_version;
 
 pub use crate::config_catalog::VersionScope;
 
@@ -311,15 +311,9 @@ async fn config_hash_after(
     let VersionScope::Site(site_id) = scope else {
         return None;
     };
-    let site_row = site::Entity::find_by_id(site_id)
-        .one(db)
+    crate::grpc::config::history_config_hash(db, &[site_id])
         .await
         .ok()
-        .flatten()?;
-    let bundle = crate::grpc::config::build_rule_bundle(db, &site_row)
-        .await
-        .ok()?;
-    Some(bundle.config_hash)
 }
 
 #[cfg(test)]

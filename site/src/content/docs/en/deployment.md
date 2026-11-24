@@ -23,6 +23,8 @@ minutes: 10
 
 `PINGWAF_INGRESS_LISTENERS` is an experimental TCP bind diagnostic for isolated development, not a custom site deployment setting. It is unset by default. An agent or all-in-one process can pre-bind entries such as `http@127.0.0.1:81,https@[::1]:8443`; bind status is reported separately from site status. HTTP entries do not forward traffic and HTTPS entries do not negotiate TLS.
 
+The legacy agent protocol delivers default-ingress sites only. A TCP bind report does not authorize custom-ingress traffic.
+
 ## Docker Compose
 
 ```bash

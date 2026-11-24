@@ -32,7 +32,9 @@ use uuid::Uuid;
 use crate::api::agents::command_type;
 use crate::api::state::AppState;
 use crate::config_history::{self, VersionScope};
-use crate::grpc::config::{build_site_config, now_timestamp};
+use crate::grpc::config::{
+    build_site_config, history_config_hash, now_timestamp,
+};
 use crate::models::{agent, agent_sites, api_key, config_version, site};
 
 /// The sites an agent serves: its binding when it has one, otherwise every
@@ -95,7 +97,6 @@ where
 /// unbound agent. `None` when the agent does not serve the site.
 async fn update_payload_for_agent(
     db: &DatabaseConnection,
-    changed_site_config: &SiteConfig,
     agent_row: &agent::Model,
     site_id: Uuid,
 ) -> Result<Option<SiteConfig>, DbErr> {
@@ -103,15 +104,8 @@ async fn update_payload_for_agent(
     if !visible.contains(&site_id) {
         return Ok(None);
     }
-    if agent_row.site_scope != "selected"
-        && visible.len() == 1
-        && agent_row.site_id == Some(site_id)
-    {
-        return Ok(Some(changed_site_config.clone()));
-    }
-    // A selected or unbound agent carries every visible site: the payload is
-    // authoritative, so it must list them all or the agent would drop the
-    // sites it does not carry.
+    // Always use the legacy builder, even for a single bound site: moving it
+    // to custom ingress must send an empty replacement, not its history bundle.
     let config = build_site_config(db, Some(&visible)).await?;
     Ok(Some(config))
 }
@@ -158,7 +152,7 @@ pub(crate) async fn repush_agent_config(
 /// the agent runs — one that stays behind the hash issued here gets the
 /// configuration pushed again (see [`repush_agent_config`]). Agents never pull.
 ///
-/// A successful build also records a configuration version (unless the latest
+/// Also records a configuration version (unless the latest
 /// version already carries this fingerprint), which is what makes the console
 /// and the `pingwaf config` CLI able to list and roll back changes.
 pub async fn notify_config_changed(
@@ -166,27 +160,23 @@ pub async fn notify_config_changed(
     site_id: Uuid,
     actor: Option<&str>,
 ) {
-    // Build the new configuration. If the database is unhappy there is nothing
-    // worth sending, so bail out with a warning.
-    let site_config = match build_site_config(&state.db, Some(&[site_id])).await
-    {
-        Ok(config) => config,
-        Err(err) => {
-            tracing::warn!(%site_id, error = %err, "failed to build site config for push");
-            return;
-        },
-    };
-
-    // Record the version before the push: the database is already committed,
-    // so the snapshot must land even if no agent is connected to receive it.
+    // Schedule the version capture independently of delivery, including
+    // when no agent is connected to receive it.
     // The ~19-table capture is best-effort and off the request path (same
     // detached-task pattern as notification delivery): a slow capture must
     // not stretch every API mutation. Hash-based dedup happens inside
     // record_version, so repeat pushes stay cheap even when two spawns race.
     let db = state.db.clone();
-    let config_hash = site_config.config_hash.clone();
     let actor = actor.map(str::to_string);
     tokio::spawn(async move {
+        let config_hash = match history_config_hash(&db, &[site_id]).await {
+            Ok(hash) => hash,
+            Err(err) => {
+                tracing::warn!(%site_id, error = %err, "failed to fingerprint site configuration history");
+                // An empty hash disables history deduplication, not capture.
+                String::new()
+            },
+        };
         if let Err(err) = config_history::record_version(
             &db,
             VersionScope::Site(site_id),
@@ -212,25 +202,19 @@ pub async fn notify_config_changed(
 
     let mut delivered = 0usize;
     for row in &agents {
-        let payload = match update_payload_for_agent(
-            &state.db,
-            &site_config,
-            row,
-            site_id,
-        )
-        .await
-        {
-            Ok(payload) => payload,
-            Err(err) => {
-                tracing::warn!(
-                    agent_id = %row.id,
-                    %site_id,
-                    error = %err,
-                    "failed to build the config payload for an agent"
-                );
-                continue;
-            },
-        };
+        let payload =
+            match update_payload_for_agent(&state.db, row, site_id).await {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::warn!(
+                        agent_id = %row.id,
+                        %site_id,
+                        error = %err,
+                        "failed to build the config payload for an agent"
+                    );
+                    continue;
+                },
+            };
         let Some(site_config_for_agent) = payload else {
             continue;
         };
@@ -300,14 +284,8 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
             },
         };
     }
+    let site_count = all_site_ids.len();
     let site_ids: Vec<Uuid> = all_site_ids.into_iter().collect();
-    let config = match build_site_config(&state.db, Some(&site_ids)).await {
-        Ok(config) => config,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to build site config for push");
-            return;
-        },
-    };
 
     // Global settings (defense mode, error pages) get their own version,
     // snapshotted from the tables that feed every site's bundle. Recorded
@@ -315,9 +293,15 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
     // Detached like the per-site path — the push must not wait on the
     // snapshot capture.
     let db = state.db.clone();
-    let config_hash = config.config_hash.clone();
     let actor = actor.map(str::to_string);
     tokio::spawn(async move {
+        let config_hash = match history_config_hash(&db, &site_ids).await {
+            Ok(hash) => hash,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to fingerprint global configuration history");
+                String::new()
+            },
+        };
         if let Err(err) = config_history::record_version(
             &db,
             VersionScope::Global,
@@ -350,7 +334,7 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
     }
 
     tracing::info!(
-        sites = site_ids.len(),
+        sites = site_count,
         total = agents.len(),
         delivered,
         "global config change pushed to agents"
@@ -466,4 +450,167 @@ pub async fn notify_site_deleted(
         delivered,
         "site removal pushed to agents"
     );
+}
+
+#[cfg(test)]
+pub(crate) async fn check_legacy_ingress_delivery(
+    db: &DatabaseConnection,
+    owner_id: &str,
+) {
+    use crate::auth::password::hash_password_with_cost;
+    use pingwaf_proto::control_plane::{
+        control_plane_server::ControlPlane, GetSiteConfigRequest,
+        RegisterAgentRequest, SyncRulesRequest,
+    };
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use tokio_stream::StreamExt;
+    use tonic::{Code, Request};
+
+    let sites = site::Entity::find().all(db).await.unwrap();
+    let default = sites.iter().find(|s| s.ingress_port.is_none()).unwrap();
+    let custom = sites
+        .iter()
+        .find(|s| s.ingress_port == Some(81) && s.domain == default.domain)
+        .unwrap();
+    let ids: Vec<_> = sites.iter().map(|s| s.id).collect();
+    let assert_legacy = |config: &SiteConfig| {
+        assert_eq!(config.sites.len(), 1);
+        assert_eq!(config.sites[0].id, default.id.to_string());
+        let rules = config.sites[0].rules.as_ref().unwrap();
+        assert_eq!(rules.site_policies.len(), 1);
+        assert_eq!(rules.site_policies[0].domain, default.domain);
+    };
+    assert_legacy(&build_site_config(db, Some(&ids)).await.unwrap());
+    let history_before = history_config_hash(db, &[custom.id]).await.unwrap();
+    assert_ne!(
+        history_before,
+        build_site_config(db, Some(&[custom.id]))
+            .await
+            .unwrap()
+            .config_hash
+    );
+    let snapshot = crate::config_catalog::capture(
+        db,
+        VersionScope::Site(custom.id),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot["tables"]["sites"][0]["ingress_port"], 81);
+    for port in [84, 81] {
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE sites SET ingress_port = $1 WHERE id = $2",
+            [port.into(), custom.id.into()],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            history_config_hash(db, &[custom.id]).await.unwrap()
+                == history_before,
+            port == 81
+        );
+    }
+
+    let key_id = Uuid::new_v4();
+    let raw_key = "pwk_legacy_delivery_test";
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, created_at) \
+         VALUES ($1, $2, 'legacy test', $3, 'pwk_lega', now())",
+        [key_id.into(), Uuid::parse_str(owner_id).unwrap().into(), hash_password_with_cost(raw_key, 4).unwrap().into()],
+    )).await.unwrap();
+    let registry = AgentRegistry::new();
+    let service = ControlPlaneService::new(
+        db.clone(),
+        std::sync::Arc::new(crate::config::ServerConfig::default()),
+        registry.clone(),
+        None,
+        CacheStatusRegistry::new(),
+    );
+    let registered = service
+        .register_agent(Request::new(RegisterAgentRequest {
+            api_key: raw_key.into(),
+            hostname: "legacy-delivery".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_legacy(registered.initial_config.as_ref().unwrap());
+    let request_config = |site_id: String| {
+        Request::new(GetSiteConfigRequest {
+            agent_id: registered.agent_id.clone(),
+            agent_token: registered.agent_token.clone(),
+            site_id,
+        })
+    };
+    let request_rules = |site_id: String| {
+        Request::new(SyncRulesRequest {
+            agent_id: registered.agent_id.clone(),
+            agent_token: registered.agent_token.clone(),
+            site_id,
+            ..Default::default()
+        })
+    };
+    for id in [String::new(), default.id.to_string()] {
+        assert_legacy(
+            &service
+                .get_site_config(request_config(id.clone()))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
+        let mut stream = service
+            .sync_rules(request_rules(id))
+            .await
+            .unwrap()
+            .into_inner();
+        let bundle = stream.next().await.unwrap().unwrap();
+        assert_eq!(bundle.site_id, default.id.to_string());
+        assert_eq!(bundle.site_policies.len(), 1);
+        assert!(stream.next().await.is_none());
+    }
+    assert_eq!(
+        service
+            .get_site_config(request_config(custom.id.to_string()))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        service
+            .sync_rules(request_rules(custom.id.to_string()))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        Code::PermissionDenied
+    );
+
+    let agent_id = Uuid::parse_str(&registered.agent_id).unwrap();
+    let (sender, mut rx) = tokio::sync::mpsc::channel(1);
+    registry.connect(agent_id, sender).await;
+    assert!(repush_agent_config(db, &registry, agent_id).await.unwrap());
+    let Some(Payload::UpdateSite(update)) = rx.try_recv().unwrap().payload
+    else {
+        panic!("expected a legacy update");
+    };
+    assert_legacy(update.site_config.as_ref().unwrap());
+
+    // The legacy single-binding branch must send an authoritative empty
+    // replacement (discarding a previously served site), not silence.
+    let mut row = agent::Entity::find_by_id(agent_id)
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    row.site_id = Some(custom.id);
+    assert!(update_payload_for_agent(db, &row, custom.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .sites
+        .is_empty());
 }

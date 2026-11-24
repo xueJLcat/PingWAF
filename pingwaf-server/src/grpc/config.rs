@@ -2034,12 +2034,13 @@ fn failover_mode_of(policy: &str) -> FailoverMode {
     }
 }
 
-/// Builds the complete domain → failover-policy registry across all sites.
+/// Builds the legacy domain → failover-policy registry for default ingress.
 /// One lightweight query; the result rides in every `RuleBundle`.
 async fn load_site_policies(
     db: &DatabaseConnection,
 ) -> Result<Vec<SitePolicy>, sea_orm::DbErr> {
     let rows = site::Entity::find()
+        .filter(site::Column::IngressPort.is_null())
         .order_by_asc(site::Column::Domain)
         .all(db)
         .await?;
@@ -2073,13 +2074,36 @@ fn merge_trusted_proxy_ranges(
     merged
 }
 
-/// Builds a [`SiteConfig`] for the given sites, or for every site when
-/// `site_ids` is `None`.
+/// Builds the legacy wire payload. Older agents index by hostname alone;
+/// filtering only the visibility IDs before this query is not sufficient.
 pub async fn build_site_config(
     db: &DatabaseConnection,
     site_ids: Option<&[Uuid]>,
 ) -> Result<SiteConfig, sea_orm::DbErr> {
+    assemble_site_config(db, site_ids, false).await
+}
+
+/// Internal only: history still captures sites on every ingress. Its hash must
+/// change for a port or protocol edit even though the old wire schema has no
+/// field for either. Never send this value to an agent.
+pub(crate) async fn history_config_hash(
+    db: &DatabaseConnection,
+    site_ids: &[Uuid],
+) -> Result<String, DbErr> {
+    Ok(assemble_site_config(db, Some(site_ids), true)
+        .await?
+        .config_hash)
+}
+
+async fn assemble_site_config(
+    db: &DatabaseConnection,
+    site_ids: Option<&[Uuid]>,
+    for_history: bool,
+) -> Result<SiteConfig, DbErr> {
     let mut query = site::Entity::find().order_by_asc(site::Column::Domain);
+    if !for_history {
+        query = query.filter(site::Column::IngressPort.is_null());
+    }
     if let Some(ids) = site_ids {
         if ids.is_empty() {
             // Nothing requested: return an empty configuration instead of
@@ -2094,7 +2118,7 @@ pub async fn build_site_config(
         }
         query = query.filter(site::Column::Id.is_in(ids.iter().copied()));
     }
-    let rows = query.all(db).await?;
+    let rows = query.order_by_asc(site::Column::Id).all(db).await?;
 
     // Resolve every trusted-proxy IP group the sites reference in one query;
     // disabled groups are skipped so they stop widening the trust scope.
@@ -2152,6 +2176,23 @@ pub async fn build_site_config(
         config_hash: String::new(),
     };
     config.config_hash = fingerprint(&config);
+    if for_history {
+        for row in rows.iter().filter(|row| row.ingress_port.is_some()) {
+            use std::fmt::Write as _;
+            let _ = write!(
+                config.config_hash,
+                ":{}:{}:{}",
+                row.id,
+                row.ingress_port.unwrap_or_default(),
+                row.ingress_protocol.as_deref().unwrap_or_default()
+            );
+        }
+        // A deployment-wide history marker may contain thousands of sites;
+        // keep the stored hash the same size as a legacy fingerprint.
+        if config.config_hash.contains(':') {
+            config.config_hash = fingerprint(&config);
+        }
+    }
     Ok(config)
 }
 

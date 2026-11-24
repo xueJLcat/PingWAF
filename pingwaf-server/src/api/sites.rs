@@ -1286,6 +1286,8 @@ async fn create(
         name: Set(name),
         domain: Set(domain.clone()),
         alternate_domains: Set(alternate_domains),
+        ingress_port: Set(None),
+        ingress_protocol: Set(None),
         status: Set(status),
         plan: Set(plan),
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
@@ -1641,6 +1643,8 @@ fn clone_site_row(
     active.name = Set(name);
     active.domain = Set(domain);
     active.alternate_domains = Set(alternate_domains);
+    active.ingress_port = Set(None);
+    active.ingress_protocol = Set(None);
     active.status = Set(site_status::PAUSED.to_string());
     active.created_at = Set(timestamp);
     active
@@ -5280,6 +5284,8 @@ mod tests {
             name: "source".to_string(),
             domain: "source.example.com".to_string(),
             alternate_domains: vec!["alt.example.com".to_string()],
+            ingress_port: Some(8443),
+            ingress_protocol: Some("https".to_string()),
             status: "active".to_string(),
             plan: "free".to_string(),
             cache_quota_mb: 1024,
@@ -5310,6 +5316,8 @@ mod tests {
         );
 
         assert!(clone.trust_proxy_headers.unwrap());
+        assert_eq!(clone.ingress_port, Set(None));
+        assert_eq!(clone.ingress_protocol, Set(None));
         assert!(!clone.trust_last_hop.unwrap());
         assert_eq!(clone.trusted_proxy_group_ids.unwrap(), vec![group_id]);
         assert_eq!(

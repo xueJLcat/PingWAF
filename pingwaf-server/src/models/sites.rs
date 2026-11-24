@@ -47,11 +47,16 @@ pub mod sites {
         pub name: String,
         /// The primary hostname; it is the one certificate issuance and
         /// display default to.
-        #[sea_orm(unique)]
         pub domain: String,
         /// Extra hostnames served by the same site, each with the same
         /// routing, WAF and cache configuration as `domain`.
         pub alternate_domains: Vec<String>,
+        /// Internal until managed delivery is ready. Some REST handlers
+        /// serialize this entity directly; do not expose the gated fields.
+        #[serde(skip)]
+        pub ingress_port: Option<i32>,
+        #[serde(skip)]
+        pub ingress_protocol: Option<String>,
         pub status: String,
         pub plan: String,
         /// Disk budget, in MiB, the agents may use for this site's cache.

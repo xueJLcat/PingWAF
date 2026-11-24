@@ -504,6 +504,8 @@ ports are reserved. An unavailable port does not stop the other entries; a
 change or retry requires a process restart. A `Bound` heartbeat entry means
 TCP bind only: valid unmatched HTTP requests return `404`, HTTPS connections
 are closed without a handshake, and neither entry can be assigned to a site.
+The legacy agent protocol delivers default-ingress sites only. A custom TCP
+bind report does not grant the agent permission to serve custom-ingress sites.
 
 ## Deployment Modes
 

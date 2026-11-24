@@ -428,6 +428,17 @@ impl ControlPlaneService {
             .await
             .map_err(db_status)
     }
+
+    /// For legacy per-site requests only. Keep these rows from the same read
+    /// that checked the ingress; `SyncRules` builds from them directly.
+    async fn legacy_delivery_sites(
+        &self,
+        row: &agent::Model,
+    ) -> Result<Vec<site::Model>, Status> {
+        let mut sites = self.visible_sites(row).await?;
+        sites.retain(|site| site.ingress_port.is_none());
+        Ok(sites)
+    }
 }
 
 #[tonic::async_trait]
@@ -738,7 +749,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         let payload = request.into_inner();
         let row = self.authorize(&payload.agent_token).await?;
 
-        let sites = self.visible_sites(&row).await?;
+        let sites = self.legacy_delivery_sites(&row).await?;
+        // SyncRules predates listener identity and sends one bare RuleBundle
+        // at a time. Only build from the visible default-ingress rows.
         let requested = payload.site_id.trim();
         let selected: Vec<site::Model> = if requested.is_empty() {
             sites
@@ -1353,15 +1366,22 @@ impl ControlPlaneTrait for ControlPlaneService {
             let id = Uuid::parse_str(requested).map_err(|_| {
                 Status::invalid_argument("site_id is not a UUID")
             })?;
-            let visible = self.visible_sites(&row).await?;
+            let visible = self.legacy_delivery_sites(&row).await?;
             if !visible.iter().any(|site| site.id == id) {
                 return Err(Status::permission_denied(
                     "agent is not allowed to read this site",
                 ));
             }
-            build_site_config(&self.db, Some(&[id]))
+            let config = build_site_config(&self.db, Some(&[id]))
                 .await
-                .map_err(db_status)?
+                .map_err(db_status)?;
+            // The site may have left default ingress since the visibility read.
+            if config.sites.is_empty() {
+                return Err(Status::permission_denied(
+                    "agent is not allowed to read this site",
+                ));
+            }
+            config
         };
 
         tracing::debug!(

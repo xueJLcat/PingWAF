@@ -222,6 +222,7 @@ async fn site_ingress_migration_postgres() {
     db.execute_unprepared(&insert("notapp.test", "{}", 81, "http"))
         .await
         .unwrap();
+    crate::grpc::check_legacy_ingress_delivery(&db, USER).await;
     let a: String = scalar(&db, "SELECT id::text FROM sites WHERE domain='app.test' AND ingress_port=81").await;
     let b: String = scalar(&db, "SELECT id::text FROM sites WHERE domain='app.test' AND ingress_port=82").await;
     let tx = db.begin().await.unwrap();

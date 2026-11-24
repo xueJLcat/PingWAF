@@ -12,6 +12,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- **Legacy agent configuration is default-ingress only.** Registration,
+  configuration pulls, rule sync and pushes omit custom-ingress sites; their
+  hostnames cannot override the default-ingress failover policy on older
+  agents. Configuration history still captures the site's ingress fields.
 - **Site creation is atomic.** A new site, its default pool and origin, its
   TLS settings, and its built-in rules are committed together before the site
   is published to agents. PostgreSQL now rejects overlapping hostnames even
