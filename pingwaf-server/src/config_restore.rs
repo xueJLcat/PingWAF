@@ -958,16 +958,12 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             ApiError::BadRequest(message.into()).with_code(code),
         ));
     }
-    if !assignments.is_empty() {
-        let gated = db.query_one(statement(db,
-            "SELECT EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'sites'::regclass AND conname = 'sites_custom_ingress_disabled')",
-            Vec::new(),
-        )).await?.ok_or_else(|| DbErr::Custom("missing ingress migration state".into()))?;
-        if gated.try_get_by_index::<bool>(0)? {
-            return Err(RestoreError::Ingress(ApiError::BadRequest(
-                "custom ingress writes are disabled by the installed database migration".into()
-            ).with_code("site.ingress_unavailable")));
-        }
+    if !assignments.is_empty()
+        && !crate::api::sites::custom_ingress_writes_enabled(db).await?
+    {
+        return Err(RestoreError::Ingress(ApiError::BadRequest(
+            "custom ingress writes are disabled by the installed database migration".into()
+        ).with_code("site.ingress_unavailable")));
     }
     for (id, owner, port, protocol, active) in assignments {
         crate::grpc::check_assigned_ingress(

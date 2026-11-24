@@ -20,6 +20,12 @@ import type {
   UpsertSslRequest,
 } from './types'
 
+export interface IngressOptions {
+  writes_enabled: boolean
+  agents: { id: string; name: string; listeners: [number, 'http' | 'https'][] }[]
+  assigned_agent_ids: string[]
+}
+
 /**
  * Sites CRUD — `/api/v1/sites`.
  *
@@ -28,6 +34,9 @@ import type {
  * rather than `403` so existence is never leaked.
  */
 export const sitesApi = {
+  ingressOptions: (siteId?: string) =>
+    apiClient.get<IngressOptions>('/sites/ingress-options', { query: { site_id: siteId } }),
+
   list: (query: SiteListQuery = {}) =>
     apiClient.get<Page<Site>>('/sites', { query: { page_size: 200, ...query } }),
 

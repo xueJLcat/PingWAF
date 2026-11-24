@@ -428,6 +428,8 @@ pub struct CreateSiteRequest {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateSiteRequest {
+    #[serde(default)]
+    pub ingress_agent_ids: Option<std::collections::BTreeSet<Uuid>>,
     #[serde(flatten)]
     pub ingress: IngressFields,
     #[serde(default)]
@@ -1204,6 +1206,7 @@ fn default_true() -> bool {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites", get(list).post(create))
+        .route("/sites/ingress-options", get(ingress_options))
         .route("/sites/{site_id}", get(show).put(update).delete(remove))
         .route(
             "/sites/{site_id}/upstreams",
@@ -1234,6 +1237,111 @@ pub fn routes() -> Router<AppState> {
             get(show_ssl).put(upsert_ssl).delete(delete_ssl),
         )
         .route("/sites/{site_id}/clone", post(clone_site))
+}
+
+#[derive(Deserialize)]
+struct IngressOptionsQuery {
+    site_id: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+struct IngressOptions {
+    writes_enabled: bool,
+    agents: Vec<crate::grpc::IngressAgentOption>,
+    assigned_agent_ids: Vec<Uuid>,
+}
+
+async fn ingress_options(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<IngressOptionsQuery>,
+) -> Result<Json<IngressOptions>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let tx = state
+        .db
+        .begin_with_config(
+            Some(sea_orm::IsolationLevel::RepeatableRead),
+            Some(sea_orm::AccessMode::ReadOnly),
+        )
+        .await?;
+    let (owner, assigned_agent_ids) = if let Some(id) = query.site_id {
+        let site =
+            crate::api::common::load_site(&tx, id, &current, false).await?;
+        let ids = crate::models::agent_sites::Entity::find()
+            .filter(crate::models::agent_sites::Column::SiteId.eq(id))
+            .select_only()
+            .column(crate::models::agent_sites::Column::AgentId)
+            .order_by_asc(crate::models::agent_sites::Column::AgentId)
+            .into_tuple::<Uuid>()
+            .all(&tx)
+            .await?;
+        (site.user_id, ids)
+    } else {
+        (current.id, Vec::new())
+    };
+    let writes_enabled = custom_ingress_writes_enabled(&tx).await?;
+    let agents =
+        crate::grpc::ingress_agent_options(&tx, &state.agents, owner).await?;
+    tx.commit().await?;
+    Ok(Json(IngressOptions {
+        writes_enabled,
+        agents,
+        assigned_agent_ids,
+    }))
+}
+
+pub(crate) async fn custom_ingress_writes_enabled(
+    db: &impl ConnectionTrait,
+) -> Result<bool, DbErr> {
+    db.query_one(sea_orm::Statement::from_string(db.get_database_backend(),
+        "SELECT NOT EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'sites'::regclass AND conname = 'sites_custom_ingress_disabled')"
+    )).await?.ok_or_else(|| DbErr::Custom("missing ingress migration state".into()))?.try_get_by_index(0)
+}
+
+async fn write_ingress_assignments(
+    txn: &sea_orm::DatabaseTransaction,
+    state: &AppState,
+    site: &site::Model,
+    ids: std::collections::BTreeSet<Uuid>,
+) -> Result<(), ApiError> {
+    let (Some(port), Some(protocol)) =
+        (site.ingress_port, site.ingress_protocol.as_deref())
+    else {
+        return Err(ApiError::BadRequest(
+            "ingress_agent_ids requires a custom ingress".into(),
+        )
+        .with_code("site.ingress_invalid"));
+    };
+    if site.status == site_status::ACTIVE && ids.is_empty() {
+        return Err(ApiError::BadRequest(
+            "active custom ingress requires an explicitly assigned agent"
+                .into(),
+        )
+        .with_code("site.ingress_unavailable"));
+    }
+    crate::models::agent_sites::Entity::delete_many()
+        .filter(crate::models::agent_sites::Column::SiteId.eq(site.id))
+        .exec(txn)
+        .await?;
+    for id in ids {
+        crate::grpc::check_agent_ingress(
+            txn,
+            &state.agents,
+            id,
+            site.user_id,
+            port,
+            protocol,
+        )
+        .await?;
+        crate::models::agent_sites::ActiveModel {
+            agent_id: Set(id),
+            site_id: Set(site.id),
+            created_at: Set(Utc::now()),
+        }
+        .insert(txn)
+        .await?;
+    }
+    Ok(())
 }
 
 /// `GET /api/v1/sites`
@@ -1411,36 +1519,14 @@ async fn create(
     .await
     .map_err(map_site_domain_conflict)?;
 
-    if let (Some(port), Some(protocol)) =
-        (model.ingress_port, model.ingress_protocol.as_deref())
-    {
-        if model.status == site_status::ACTIVE
-            && payload.ingress_agent_ids.is_empty()
-        {
-            return Err(ApiError::BadRequest(
-                "active custom ingress requires an explicitly assigned agent"
-                    .into(),
-            )
-            .with_code("site.ingress_unavailable"));
-        }
-        for agent_id in payload.ingress_agent_ids {
-            crate::grpc::check_agent_ingress(
-                &txn,
-                &state.agents,
-                agent_id,
-                current.id,
-                port,
-                protocol,
-            )
-            .await?;
-            crate::models::agent_sites::ActiveModel {
-                agent_id: Set(agent_id),
-                site_id: Set(id),
-                created_at: Set(timestamp),
-            }
-            .insert(&txn)
-            .await?;
-        }
+    if model.ingress_port.is_some() {
+        write_ingress_assignments(
+            &txn,
+            &state,
+            &model,
+            payload.ingress_agent_ids,
+        )
+        .await?;
     }
     // Every site starts with a default origin pool; the first origin node
     // goes into it.
@@ -2394,7 +2480,11 @@ async fn update(
         // Same backstop as create: the uniqueness check above is a pre-check,
         // the DB constraint decides under concurrency.
         .map_err(map_site_domain_conflict)?;
-    if updated.status == site_status::ACTIVE && (ingress_changed || activating)
+    if let Some(ids) = payload.ingress_agent_ids {
+        require_write(&current)?;
+        write_ingress_assignments(&txn, &state, &updated, ids).await?;
+    } else if updated.status == site_status::ACTIVE
+        && (ingress_changed || activating)
     {
         crate::grpc::check_site_ingress(&txn, &state.agents, &updated).await?;
     }

@@ -309,12 +309,52 @@ pub(crate) async fn check_agent_ingress(
         .await?
         .ok_or_else(|| unavailable("agent has no current managed session"))?;
     if !agents
-        .has_bound_ingress(agent_id, session, port, protocol)
+        .bound_ingresses(agent_id, session)
         .await
+        .contains(&(port, protocol))
     {
         return Err(unavailable("agent has no recent bound listener for the requested port and protocol"));
     }
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct IngressAgentOption {
+    id: Uuid,
+    name: String,
+    listeners: Vec<(i32, &'static str)>,
+}
+
+pub(crate) async fn ingress_agent_options(
+    db: &impl ConnectionTrait,
+    registry: &super::AgentRegistry,
+    owner: Uuid,
+) -> Result<Vec<IngressAgentOption>, DbErr> {
+    let mut options = Vec::new();
+    for id in registry.managed_stream_ids().await {
+        let Some(session) = current_session(db, id).await? else {
+            continue;
+        };
+        let listeners = registry.bound_ingresses(id, session).await;
+        if listeners.is_empty() {
+            continue;
+        }
+        match authorize(db, id).await {
+            Ok((agent, key_owner))
+                if key_owner == owner && agent.site_scope == "selected" =>
+            {
+                options.push(IngressAgentOption {
+                    id,
+                    name: agent.display_name.unwrap_or(agent.hostname),
+                    listeners,
+                });
+            },
+            Err(BuildError::Storage(err)) => return Err(err),
+            _ => {},
+        }
+    }
+    options.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
+    Ok(options)
 }
 
 pub(crate) async fn check_site_ingress(
@@ -698,7 +738,21 @@ pub(super) async fn check_postgres(
             state: pingwaf_proto::IngressBindState::Bound as i32,
         }],
     };
+    assert!(ingress_agent_options(&tx, &registry, custom.user_id)
+        .await
+        .unwrap()
+        .is_empty());
     registry.record_ingress(id, stream, Some(&bound)).await;
+    let options = ingress_agent_options(&tx, &registry, custom.user_id)
+        .await
+        .unwrap();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].id, id);
+    assert_eq!(options[0].listeners, [(81, "http")]);
+    assert!(ingress_agent_options(&tx, &registry, Uuid::new_v4())
+        .await
+        .unwrap()
+        .is_empty());
     check_site_ingress(&tx, &registry, custom).await.unwrap();
     assert!(check_agent_ingress(
         &tx,
@@ -715,6 +769,10 @@ pub(super) async fn check_postgres(
         .connect_session(id, sender, Some(Uuid::new_v4()))
         .await;
     registry.record_ingress(id, replacement, Some(&bound)).await;
+    assert!(ingress_agent_options(&tx, &registry, custom.user_id)
+        .await
+        .unwrap()
+        .is_empty());
     assert!(check_site_ingress(&tx, &registry, custom).await.is_err());
     tx.commit().await.unwrap();
     let assigned = fetch(token.clone()).await.unwrap();

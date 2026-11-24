@@ -14,6 +14,7 @@ pub mod control_plane;
 mod managed;
 pub(crate) use managed::{
     check_agent_ingress, check_assigned_ingress, check_site_ingress,
+    ingress_agent_options, IngressAgentOption,
 };
 pub mod registry;
 pub mod visitor_auth;

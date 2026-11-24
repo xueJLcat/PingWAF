@@ -12,6 +12,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- Show available per-agent listeners when creating, editing or cloning a site. Administrators can replace the selected agents while updating a custom site.
+
 - Reject HSTS overlaps and HTTPS redirects that conflict with a custom HTTP listener. Restrict custom ACME orders to DNS-01 and keep DNS credentials out of shared certificate views, custom clones and recipient agent bundles.
 
 - Check the final hostname and listener assignments during backup preview, transactional restore and configuration history rollback, including older site snapshots and sites retained outside the snapshot.

@@ -575,6 +575,15 @@ A hostname already claimed by another site, including wildcard overlap, returns
 HTTP `400` with `error.code: "site.domain_conflict"`. This also applies when a
 concurrent request wins the claim before creation commits.
 
+### GET /sites/ingress-options
+
+Administrators can retrieve ingress choices before creating, editing or cloning a site.
+Pass the optional `site_id` when editing to obtain the site's current assignments and the owner's eligible agents.
+Omit it for a new site or clone. The response contains `writes_enabled`, `assigned_agent_ids` and `agents`.
+Each agent has an `id`, a `name` and a `listeners` array of pairs such as `[81, "http"]`.
+Only current authenticated selected-scope agents with a fresh bound listener are offered.
+When editing a custom site, omit `ingress_agent_ids` to preserve assignments or provide the complete replacement list.
+
 ### GET /sites/{site_id}
 
 Get site details including upstreams and SSL config.

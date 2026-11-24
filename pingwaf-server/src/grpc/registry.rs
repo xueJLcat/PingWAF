@@ -517,32 +517,41 @@ impl AgentRegistry {
             .collect()
     }
 
-    pub(super) async fn has_bound_ingress(
+    pub(super) async fn managed_stream_ids(&self) -> Vec<Uuid> {
+        self.inner
+            .read()
+            .await
+            .connected
+            .iter()
+            .filter_map(|(id, connection)| connection.session.map(|_| *id))
+            .collect()
+    }
+
+    pub(super) async fn bound_ingresses(
         &self,
         id: Uuid,
         session: Uuid,
-        port: i32,
-        protocol: &str,
-    ) -> bool {
+    ) -> Vec<(i32, &'static str)> {
         let inner = self.inner.read().await;
-        let Some((at, report)) = inner
+        let Some((_, report)) = inner
             .connected
             .get(&id)
             .filter(|connection| connection.session == Some(session))
             .and_then(|connection| connection.ingress.as_ref())
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
         else {
-            return false;
+            return Vec::new();
         };
-        at.elapsed() < Duration::from_secs(60)
-            && report.listeners.iter().any(|listener| {
-                listener.port as i32 == port
-                    && listener.state() == IngressBindState::Bound
-                    && matches!(
-                        (protocol, listener.protocol()),
-                        ("http", IngressProtocol::Http)
-                            | ("https", IngressProtocol::Https)
-                    )
+        report
+            .listeners
+            .iter()
+            .filter(|l| l.state() == IngressBindState::Bound)
+            .filter_map(|l| match l.protocol() {
+                IngressProtocol::Http => Some((l.port as i32, "http")),
+                IngressProtocol::Https => Some((l.port as i32, "https")),
+                _ => None,
             })
+            .collect()
     }
 
     /// Latest validated TCP inventory on this stream. Callers must supply a

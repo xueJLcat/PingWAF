@@ -29,6 +29,8 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sitesApi, siteKeys } from '@/api/sites'
+import { SiteIngressFields } from './sites/SiteIngressFields'
+import { defaultIngress, ingressRequest, siteListener, type IngressDraft } from './sites/ingressForm'
 import { ApiError } from '@/api/client'
 import {
   isDomainConflictError,
@@ -67,6 +69,7 @@ interface SiteFormErrors {
 }
 
 interface SiteFormState {
+  ingress: IngressDraft
   name: string
   domain: string
   alternateDomains: string[]
@@ -75,6 +78,7 @@ interface SiteFormState {
 }
 
 const emptyForm: SiteFormState = {
+  ingress: defaultIngress,
   name: '',
   domain: '',
   alternateDomains: [],
@@ -330,6 +334,13 @@ export function SitesListPage() {
   // opening a dialog it could not submit (the server would answer 403).
   const [searchParams, setSearchParams] = useSearchParams()
   const [urlCreateOpen, setUrlCreateOpen] = useState(false)
+  const inventorySite = cloneOpen ? undefined : editing?.id
+  const ingressInventory = useQuery({
+    queryKey: [...siteKeys.all, 'ingress-options', inventorySite ?? null],
+    queryFn: () => sitesApi.ingressOptions(inventorySite),
+    enabled: canWrite && (dialogOpen || urlCreateOpen || cloneOpen),
+    refetchInterval: dialogOpen || urlCreateOpen || cloneOpen ? 20_000 : false,
+  })
   const wantsNewSite = canWrite && searchParams.get('new') === '1'
   if (wantsNewSite && !urlCreateOpen) setUrlCreateOpen(true)
   useEffect(() => {
@@ -343,7 +354,7 @@ export function SitesListPage() {
     setCloneSource(site)
     setCloneForm({
       ...emptyForm,
-      // The clone reuses everything but the primary domain, which must be new.
+      ingress: { ...defaultIngress, listener: siteListener(site) },
       // The suffix is localized ("copy"/"副本"/"コピー").
       name: site.name ? `${site.name} ${t('pages.sites.cloneNameSuffix', 'copy')}` : `${site.domain} ${t('pages.sites.cloneNameSuffix', 'copy')}`,
       alternateDomains: site.alternate_domains ?? [],
@@ -429,6 +440,7 @@ export function SitesListPage() {
         domain,
         alternate_domains: alternateDomains,
         ...(name ? { name } : {}),
+        ...ingressRequest(cloneForm.ingress, siteListener(cloneSource), true),
       },
     })
   }
@@ -439,6 +451,7 @@ export function SitesListPage() {
     setEditing(site)
     setForm({
       ...emptyForm,
+      ingress: { ...defaultIngress, listener: siteListener(site) },
       name: site.name,
       domain: site.domain,
       alternateDomains: site.alternate_domains ?? [],
@@ -518,13 +531,19 @@ export function SitesListPage() {
       errors.upstream = t('pages.sites.upstreamRequired')
     }
 
+    const ingress = ingressRequest(form.ingress, siteListener(editing))
+    if (form.ingress.listener && !form.ingress.paused && (!editing || editing.status === 'active') &&
+        (form.ingress.agents !== null || !editing) && !form.ingress.agents?.length) {
+      errors.top = t('pages.sites.ingressRequireAgent')
+    }
+
     setFormErrors(errors)
     if (Object.values(errors).some(Boolean)) return
 
     if (editing) {
       updateSite.mutate({
         id: editing.id,
-        data: { name, domain, alternate_domains: alternateDomains },
+        data: { name, domain, alternate_domains: alternateDomains, ...ingress },
       })
       return
     }
@@ -536,6 +555,7 @@ export function SitesListPage() {
       domain,
       alternate_domains: alternateDomains,
       upstream_address: upstreamAddress,
+      ...ingress,
     }
     if (form.upstreamTls) payload.upstream_tls = true
     createSite.mutate(payload)
@@ -958,6 +978,8 @@ export function SitesListPage() {
               {formErrors.top}
             </p>
           )}
+          <SiteIngressFields value={form.ingress} onChange={ingress => setForm(f => ({ ...f, ingress }))}
+            inventory={ingressInventory.data} loadError={ingressInventory.isError} canPause={!editing || editing.status === 'active'} />
           <Input
             label={t('common.name')}
             value={form.name}
@@ -1114,6 +1136,8 @@ export function SitesListPage() {
               {cloneErrors.top}
             </p>
           )}
+          <SiteIngressFields value={cloneForm.ingress} onChange={ingress => setCloneForm(f => ({ ...f, ingress }))}
+            inventory={ingressInventory.data} loadError={ingressInventory.isError} clone canPause={false} />
           <Input
             label={t('common.name')}
             value={cloneForm.name}

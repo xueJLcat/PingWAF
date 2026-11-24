@@ -322,6 +322,7 @@ export interface CloneSiteRequest {
 }
 
 export interface UpdateSiteRequest {
+  ingress_agent_ids?: string[]
   ingress_port?: number | null
   ingress_protocol?: 'http' | 'https' | null
   name?: string
