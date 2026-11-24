@@ -87,6 +87,10 @@ impl PullWindow {
 }
 
 impl Lease {
+    pub(super) fn version(&self) -> Version {
+        self.version
+    }
+
     pub fn permits(&self, applied: Version) -> bool {
         self.permits_at(applied, now())
     }

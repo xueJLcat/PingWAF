@@ -53,6 +53,12 @@ impl Candidate {
         &self.sites
     }
 
+    /// Compare decoded policy, not protobuf bytes or legacy fingerprints.
+    #[cfg(target_os = "linux")]
+    fn same_policy(&self, other: &Self) -> bool {
+        self.sites == other.sites
+    }
+
     /// Takes the hostname only, not an HTTP authority or a forwarding header.
     /// A non-default listener cannot fall back to the default namespace.
     pub fn site_id(&self, listener: Listener, hostname: &str) -> Option<Uuid> {
@@ -256,17 +262,21 @@ fn index(
         routes: HashMap::new(),
     };
     let mut protocols = HashMap::new();
-    for item in data.sites {
-        let site = item.site.as_ref().context("managed site is missing")?;
+    for mut item in data.sites {
+        let site = item.site.as_mut().context("managed site is missing")?;
         let bundle = site
             .rules
-            .as_ref()
+            .as_mut()
             .context("managed rule bundle is missing")?;
         let id = parse_uuid(&site.id)?;
         ensure!(
             site.id == bundle.site_id,
             "managed rule bundle belongs to a different site"
         );
+        // Already verified the raw snapshot checksum. This field is a legacy
+        // fingerprint of wire bytes; map iteration order can change it even
+        // when the rule content is equal. Managed consumers don't read it.
+        bundle.config_hash.clear();
         SiteStatusEnum::try_from(site.status)
             .context("invalid managed site status")?;
         ensure!(

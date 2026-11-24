@@ -252,7 +252,7 @@ mod tests {
             .unwrap();
         let state = Arc::new(AppliedState::default());
         state.start_session(session);
-        let pending = state.prepare(received).unwrap();
+        let pending = state.prepare(received).unwrap().unwrap();
         let view =
             Arc::new(View::build(pending.candidate(), cache_dir).unwrap());
         assert!(state.publish(pending, view).unwrap());

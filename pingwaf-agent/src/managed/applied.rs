@@ -18,10 +18,20 @@ struct State<T> {
 }
 
 struct Applied<T> {
-    version: Version,
-    lease: Lease,
+    policy: Candidate,
     view: T,
-    revoked: watch::Sender<bool>,
+    authorization: watch::Sender<Authorization>,
+}
+
+struct Authorization {
+    lease: Lease,
+    revoked: bool,
+}
+
+impl Authorization {
+    fn is_live(&self) -> bool {
+        !self.revoked && self.lease.permits(self.lease.version())
+    }
 }
 
 /// Exclusive, one-use ticket for the view being compiled in isolation.
@@ -52,7 +62,7 @@ impl<T> Default for AppliedState<T> {
 impl<T> State<T> {
     fn revoke(&mut self) {
         if let Some(active) = self.active.take() {
-            active.revoked.send_replace(true);
+            active.authorization.send_modify(|a| a.revoked = true);
         }
     }
 }
@@ -80,9 +90,13 @@ impl<T> AppliedState<T> {
         }
     }
 
-    /// Withdraw the old view before attempting to build a replacement. Even
-    /// a newer candidate received too late to serve can withdraw traffic.
-    pub fn prepare(&self, received: Received) -> Option<Pending> {
+    /// Renew a live equivalent view, or withdraw it before building a
+    /// replacement. Even a newer candidate received too late can withdraw
+    /// traffic. Returning `None` alone is not evidence of renewal.
+    pub fn prepare(
+        &self,
+        received: Received,
+    ) -> anyhow::Result<Option<Pending>> {
         let version = received.candidate.version();
         let mut state = self.lock();
         if state.session != Some(version.session)
@@ -91,14 +105,29 @@ impl<T> AppliedState<T> {
                     || version.generation <= latest.generation
             })
         {
-            return None;
+            return Ok(None);
+        }
+        state.latest = Some(version);
+        let mut pending = Some(Pending { received });
+        let renewable = state.active.as_ref().filter(|active| {
+            pending.as_ref().is_some_and(|candidate| {
+                candidate.received.lease.permits(version)
+                    && active.authorization.borrow().is_live()
+                    && active.policy.same_policy(candidate.candidate())
+            })
+        });
+        if let Some(active) = renewable {
+            match active.renew(&mut pending) {
+                Ok(true) => return Ok(None),
+                Ok(false) => {},
+                Err(error) => {
+                    state.revoke();
+                    return Err(error);
+                },
+            }
         }
         state.revoke();
-        state.latest = Some(version);
-        received
-            .lease
-            .permits(version)
-            .then_some(Pending { received })
+        Ok(pending.filter(|p| p.received.lease.permits(version)))
     }
 
     /// A timer must be armed before publishing; a timer error is fail-closed.
@@ -114,19 +143,15 @@ impl<T> AppliedState<T> {
             return Ok(false);
         }
         let timer = lease.expiry_timer()?;
-        let (revoked, mut notice) = watch::channel(false);
-        let expiry_signal = revoked.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = notice.wait_for(|revoked| *revoked) => {},
-                _ = timer.wait() => { expiry_signal.send_replace(true); },
-            }
-        });
-        state.active = Some(Arc::new(Applied {
-            version,
+        let (authorization, _) = watch::channel(Authorization {
             lease,
+            revoked: false,
+        });
+        watch_expiry(authorization.clone(), version, timer);
+        state.active = Some(Arc::new(Applied {
+            policy: pending.received.candidate,
             view,
-            revoked,
+            authorization,
         }));
         Ok(true)
     }
@@ -139,6 +164,59 @@ impl<T> AppliedState<T> {
     }
 }
 
+impl<T> Applied<T> {
+    fn renew(&self, pending: &mut Option<Pending>) -> anyhow::Result<bool> {
+        let Some(candidate) = pending.as_ref() else {
+            return Ok(false);
+        };
+        let version = candidate.candidate().version();
+        // Start the timer first; never resurrect a connection when either
+        // lease expired while comparison or timer setup was in progress.
+        let timer = candidate.received.lease.expiry_timer()?;
+        let auth = &self.authorization;
+        let renewed = auth.send_if_modified(|current| {
+            if !current.is_live()
+                || !pending
+                    .as_ref()
+                    .is_some_and(|p| p.received.lease.permits(version))
+            {
+                return false;
+            }
+            let Some(pending) = pending.take() else {
+                return false;
+            };
+            current.lease = pending.received.lease;
+            true
+        });
+        if renewed {
+            watch_expiry(auth.clone(), version, timer);
+        }
+        Ok(renewed)
+    }
+}
+
+fn watch_expiry(
+    auth: watch::Sender<Authorization>,
+    version: Version,
+    timer: super::lease::ExpiryTimer,
+) {
+    let mut notice = auth.subscribe();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = notice.wait_for(|a| a.revoked || a.lease.version() != version) => {},
+            _ = timer.wait() => {
+                auth.send_if_modified(|a| {
+                    if a.lease.version() != version || a.revoked {
+                        return false;
+                    }
+                    a.revoked = true;
+                    true
+                });
+            },
+        }
+    });
+}
+
 impl<T> Drop for AppliedState<T> {
     fn drop(&mut self) {
         self.lock().revoke();
@@ -147,11 +225,11 @@ impl<T> Drop for AppliedState<T> {
 
 impl<T> Forwarding<T> {
     pub fn version(&self) -> Version {
-        self.0.version
+        self.0.authorization.borrow().lease.version()
     }
 
     fn is_live(&self) -> bool {
-        self.0.lease.permits(self.0.version) && !*self.0.revoked.borrow()
+        self.0.authorization.borrow().is_live()
     }
 
     pub async fn run<'a, F, R>(
@@ -161,14 +239,14 @@ impl<T> Forwarding<T> {
     where
         F: Future<Output = R>,
     {
-        let mut notice = self.0.revoked.subscribe();
+        let mut notice = self.0.authorization.subscribe();
         if !self.is_live() {
             return None;
         }
         let mut io = std::pin::pin!(serve(&self.0.view));
         tokio::select! {
             biased;
-            _ = notice.wait_for(|revoked| *revoked) => None,
+            _ = notice.wait_for(|a| a.revoked) => None,
             result = poll_fn(|cx| {
                 // If the machine just resumed, a ready socket can be
                 // scheduled before the timer task. Check again before I/O.
@@ -185,7 +263,11 @@ impl<T> Forwarding<T> {
 mod tests {
     use super::*;
     use crate::managed::{PullWindow, Receiver};
-    use pingwaf_proto::ManagedSnapshot;
+    use pingwaf_proto::{
+        ManagedSite, ManagedSiteConfig, ManagedSnapshot, RuleBundle, Site,
+        SiteCacheSettings,
+    };
+    use prost::Message;
     use sha2::{Digest, Sha256};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -197,6 +279,24 @@ mod tests {
         generation: i64,
         seconds: u32,
     ) -> Received {
+        receive_config(
+            receiver,
+            session,
+            epoch,
+            generation,
+            seconds,
+            Vec::new(),
+        )
+    }
+
+    fn receive_config(
+        receiver: &mut Receiver,
+        session: Uuid,
+        epoch: Uuid,
+        generation: i64,
+        seconds: u32,
+        config: Vec<u8>,
+    ) -> Received {
         PullWindow::start(receiver)
             .unwrap()
             .receive(
@@ -205,8 +305,8 @@ mod tests {
                     session_id: session.to_string(),
                     authority_epoch: epoch.to_string(),
                     generation,
-                    config_hash: hex::encode(Sha256::digest([])),
-                    config: Vec::new(),
+                    config_hash: hex::encode(Sha256::digest(&config)),
+                    config,
                     lease_seconds: seconds,
                 },
             )
@@ -223,9 +323,11 @@ mod tests {
         state.start_session(session);
         let old = state
             .prepare(received(&mut receiver, session, epoch, 1, 10))
+            .unwrap()
             .unwrap();
         let current = state
             .prepare(received(&mut receiver, session, epoch, 2, 10))
+            .unwrap()
             .unwrap();
         assert!(state.forwarding().is_none());
         assert!(!state.publish(old, 1).unwrap());
@@ -237,8 +339,17 @@ mod tests {
             forwarding.run(|view| std::future::ready(*view)).await,
             Some(2)
         );
+        let different = config(Uuid::new_v4(), "hash", 100);
         let in_progress = state
-            .prepare(received(&mut receiver, session, epoch, 3, 10))
+            .prepare(receive_config(
+                &mut receiver,
+                session,
+                epoch,
+                3,
+                10,
+                different,
+            ))
+            .unwrap()
             .unwrap();
         assert_eq!(forwarding.run(|_| std::future::ready(())).await, None);
         state.end_session(session);
@@ -255,6 +366,7 @@ mod tests {
         state.start_session(session);
         let pending = state
             .prepare(received(&mut receiver, session, epoch, 1, 10))
+            .unwrap()
             .unwrap();
         assert!(state.publish(pending, ()).unwrap());
         let forwarding = state.forwarding().unwrap();
@@ -288,6 +400,7 @@ mod tests {
         state.start_session(session);
         let pending = state
             .prepare(received(&mut receiver, session, epoch, 1, 1))
+            .unwrap()
             .unwrap();
         assert!(state.publish(pending, ()).unwrap());
         let forwarding = state.forwarding().unwrap();
@@ -315,6 +428,7 @@ mod tests {
         let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let pending = state
             .prepare(received(&mut receiver, session, epoch, 1, 10))
+            .unwrap()
             .unwrap();
         assert!(state
             .publish(pending, origin.local_addr().unwrap())
@@ -351,5 +465,119 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    fn config(id: Uuid, hash: &str, cap: u32) -> Vec<u8> {
+        let id = id.to_string();
+        ManagedSiteConfig {
+            sites: vec![ManagedSite {
+                site: Some(Site {
+                    id: id.clone(),
+                    domain: "example.com".into(),
+                    rules: Some(RuleBundle {
+                        site_id: id,
+                        config_hash: hash.into(),
+                        cache_settings: Some(SiteCacheSettings {
+                            type_max_file_size_mb: [
+                                ("html".into(), cap),
+                                ("css".into(), 4),
+                            ]
+                            .into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn equivalent_config_renews_pinned_view_past_old_deadline() {
+        let state = AppliedState::default();
+        let (session, epoch, id) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        state.start_session(session);
+        let old = receive_config(
+            &mut receiver,
+            session,
+            epoch,
+            1,
+            1,
+            config(id, "first-wire-hash", 2),
+        );
+        let old_version = old.candidate.version();
+        let pending = state.prepare(old).unwrap().unwrap();
+        assert!(state.publish(pending, 42).unwrap());
+        let forwarding = state.forwarding().unwrap();
+        let equivalent = receive_config(
+            &mut receiver,
+            session,
+            epoch,
+            2,
+            10,
+            config(id, "second-wire-hash", 2),
+        );
+        let equivalent_version = equivalent.candidate.version();
+        assert_ne!(old_version.hash, equivalent_version.hash);
+        assert!(state.prepare(equivalent).unwrap().is_none());
+        assert_eq!(forwarding.version(), equivalent_version);
+        assert_eq!(
+            forwarding
+                .run(|view| async move {
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    *view
+                })
+                .await,
+            Some(42)
+        );
+
+        let changed = receive_config(
+            &mut receiver,
+            session,
+            epoch,
+            3,
+            10,
+            config(id, "second-wire-hash", 3),
+        );
+        assert!(state.prepare(changed).unwrap().is_some());
+        assert!(state.forwarding().is_none());
+        assert_eq!(forwarding.run(|_| std::future::ready(())).await, None);
+    }
+
+    #[tokio::test]
+    async fn equivalent_config_after_expiry_requires_a_new_view() {
+        let state = AppliedState::default();
+        let (session, epoch) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut receiver = Receiver::default();
+        receiver.set_session(Some(session));
+        state.start_session(session);
+        let first = state
+            .prepare(received(&mut receiver, session, epoch, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(state.publish(first, 1).unwrap());
+        let expired = state.forwarding().unwrap();
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                expired.run(|_| std::future::pending::<()>())
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        let fresh = state
+            .prepare(received(&mut receiver, session, epoch, 2, 10))
+            .unwrap()
+            .unwrap();
+        assert!(state.publish(fresh, 2).unwrap());
+        assert_eq!(expired.run(|_| std::future::ready(())).await, None);
+        assert_eq!(state.forwarding().unwrap().version().generation, 2);
     }
 }
