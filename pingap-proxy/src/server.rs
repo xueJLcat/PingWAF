@@ -19,6 +19,10 @@ use super::tracing::{
 };
 use super::{ErrorTemplate, LOG_TARGET, ServerConf, set_append_proxy_headers};
 use crate::ServerLocationsProvider;
+use crate::headers::{
+    strip_managed_request_cookies, strip_managed_response_cookies,
+    strip_managed_trailer_cookies,
+};
 use ahash::AHashMap;
 use async_trait::async_trait;
 use bstr::ByteSlice;
@@ -2352,6 +2356,7 @@ impl ProxyHttp for Server {
         debug!(target: LOG_TARGET, "--> upstream request filter");
         defer!(debug!(target: LOG_TARGET, "<-- upstream request filter"););
         set_append_proxy_headers(session, ctx, upstream_response);
+        strip_managed_request_cookies(upstream_response)?;
         // Record what the client asked for *before* touching the header: the
         // response path needs both facts (was the encoding the proxy's own
         // request, and can the client decode it) to know whether it owes the
@@ -2510,8 +2515,9 @@ impl ProxyHttp for Server {
         // the `max_ttl` fallback floor would otherwise cache a
         // cookie-bearing response that carried no `Cache-Control` at all,
         // which is the same leak with one less header.
-        if resp.headers.contains_key(http::header::SET_COOKIE)
-            && !set_cookie_is_shareable(cc.as_ref())
+        if ctx.upstream.stripped_managed_set_cookie
+            || (resp.headers.contains_key(http::header::SET_COOKIE)
+                && !set_cookie_is_shareable(cc.as_ref()))
         {
             return Ok(RespCacheable::Uncacheable(NoCacheReason::Custom(
                 "set-cookie",
@@ -2622,6 +2628,10 @@ impl ProxyHttp for Server {
         // call response plugin
         self.handle_response_plugin(session, ctx, upstream_response)
             .await?;
+        // This also covers old cache entries and headers renamed by a
+        // response plugin. Locally issued login and challenge responses are
+        // written directly by request plugins, not passed through this hook.
+        strip_managed_response_cookies(upstream_response)?;
 
         // Identity stamp: every response leaving the edge says `server:
         // pingwaf`, the way `server: cloudflare` does. Visitors and site
@@ -2656,10 +2666,14 @@ impl ProxyHttp for Server {
     ) -> pingora::Result<()> {
         debug!(target: LOG_TARGET, "--> upstream response filter");
         defer!(debug!(target: LOG_TARGET, "<-- upstream response filter"););
+        ctx.upstream.stripped_managed_set_cookie |=
+            strip_managed_response_cookies(upstream_response)?;
         // Ahead of the plugins: whatever they do with the response, the gzip
         // fallback decides first whether this body reaches the client encoded.
         self.apply_upstream_gzip_fallback(ctx, upstream_response);
         self.handle_upstream_response_plugin(session, ctx, upstream_response)?;
+        ctx.upstream.stripped_managed_set_cookie |=
+            strip_managed_response_cookies(upstream_response)?;
         #[cfg(feature = "tracing")]
         inject_telemetry_headers(ctx, upstream_response);
         ctx.upstream.status = Some(upstream_response.status);
@@ -2686,6 +2700,16 @@ impl ProxyHttp for Server {
                 .on_response(&ctx.upstream.address, upstream_response.status);
         }
 
+        Ok(())
+    }
+
+    fn upstream_response_trailer_filter(
+        &self,
+        _session: &mut Session,
+        trailers: &mut http::HeaderMap,
+        _ctx: &mut Self::CTX,
+    ) -> pingora::Result<()> {
+        strip_managed_trailer_cookies(trailers);
         Ok(())
     }
 
@@ -4144,6 +4168,49 @@ value = 'proxy_set_headers = ["name:value"]'
             )
             .unwrap()
             .is_cacheable()
+    }
+
+    #[tokio::test]
+    async fn test_removed_origin_managed_cookie_still_blocks_cache_admission() {
+        let server = new_server();
+        let mock_io = Builder::new()
+            .read(b"GET / HTTP/1.1\r\nHost: app.example\r\n\r\n")
+            .build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        response
+            .append_header("Cache-Control", "max-age=60")
+            .unwrap();
+        response
+            .append_header("Set-Cookie", "__pingwaf_managed_clearance_a=x")
+            .unwrap();
+        let mut ctx = Ctx {
+            cache: Some(Box::default()),
+            ..Default::default()
+        };
+        server
+            .upstream_response_filter(&mut session, &mut response, &mut ctx)
+            .await
+            .unwrap();
+        assert!(!response.headers.contains_key(http::header::SET_COOKIE));
+        assert!(
+            !server
+                .response_cache_filter(&session, &response, &mut ctx)
+                .unwrap()
+                .is_cacheable()
+        );
+
+        // Entries written by older builds still pass through the downstream filter.
+        response
+            .append_header("Set-Cookie", "__pingwaf_managed_clearance_a=stale")
+            .unwrap();
+        response.append_header("Set-Cookie", "theme=blue").unwrap();
+        server
+            .response_filter(&mut session, &mut response, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.headers[http::header::SET_COOKIE], "theme=blue");
     }
 
     #[tokio::test]

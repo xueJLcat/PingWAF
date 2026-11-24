@@ -2,6 +2,8 @@
 
 将认证决策委托给外部 HTTP 服务，类似 nginx 的 `auth_request` 或 Traefik 的 ForwardAuth。对每个请求 Pingap 向 `auth_url` 发 `GET`；`2xx` 放行，其他状态码原样回传客户端——从而支持重定向到登录页等流程。
 
+以 `__pingwaf_managed_` 开头的 Cookie 名称保留给 PingWAF 边缘凭据。认证子请求不携带这些 Cookie，认证服务也不能通过回传的响应设置它们。其他 Cookie 不受影响。
+
 - **步骤：** `request`（固定）
 - **注册名：** `forward_auth`
 

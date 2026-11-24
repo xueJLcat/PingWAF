@@ -17,11 +17,12 @@ use super::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::header::{COOKIE, SET_COOKIE};
 use http::{HeaderName, HeaderValue, StatusCode};
 use pingap_config::PluginConf;
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
-    ensure_client_ip, get_host,
+    ensure_client_ip, get_host, sets_managed_cookie, without_managed_cookies,
 };
 use pingora::proxy::Session;
 use std::borrow::Cow;
@@ -133,7 +134,13 @@ impl Plugin for ForwardAuth {
                         .iter()
                         .any(|h| h.eq_ignore_ascii_case(name.as_str()))
                 {
-                    builder = builder.header(name.as_str(), value.as_bytes());
+                    if name == COOKIE {
+                        if let Some(value) = without_managed_cookies(value) {
+                            builder = builder.header(name, value);
+                        }
+                    } else {
+                        builder = builder.header(name, value);
+                    }
                 }
             }
             let uri = req_header
@@ -201,6 +208,7 @@ impl Plugin for ForwardAuth {
             if name.as_str().eq_ignore_ascii_case("content-length")
                 || name.as_str().eq_ignore_ascii_case("transfer-encoding")
                 || name.as_str().eq_ignore_ascii_case("connection")
+                || (name == SET_COOKIE && sets_managed_cookie(value))
             {
                 continue;
             }
@@ -225,9 +233,51 @@ register_plugin!("forward_auth", ForwardAuth);
 
 #[cfg(test)]
 mod tests {
-    use super::ForwardAuth;
-    use pingap_config::PluginConf;
+    use super::*;
     use pretty_assertions::assert_eq;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_test::io::Builder;
+
+    #[tokio::test]
+    async fn managed_cookies_do_not_reach_or_return_from_auth_service() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let auth = ForwardAuth::try_from(
+            &toml::from_str::<PluginConf>(&format!(
+                "category = 'forward_auth'\nauth_url = 'http://{}/verify'",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let io = Builder::new().read(b"GET / HTTP/1.1\r\nHost: app.example\r\nCookie: __pingwaf_managed_clearance_a=pass; theme=dark\r\nCookie: __pingwaf_managed_oidc_a=session\r\n\r\n").build();
+        let mut session = Session::new_h1(Box::new(io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (result, ()) = tokio::join!(
+                auth.handle_request(PluginStep::Request, &mut session, &mut ctx),
+                async {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        assert!(request.len() < 8192);
+                        request.push(stream.read_u8().await.unwrap());
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    assert!(!request.contains("__pingwaf_managed_"), "{request}");
+                    assert!(request.contains("cookie: theme=dark\r\n"), "{request}");
+                    stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nSet-Cookie: __pingwaf_managed_clearance_a=fake\r\nSet-Cookie: auth_session=app\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                }
+            );
+            let RequestPluginResult::Respond(response) = result.unwrap() else {
+                panic!("auth denial must be relayed");
+            };
+            let headers: Vec<_> = response.headers.unwrap().into_iter().filter(|(name, _)| name == SET_COOKIE).collect();
+            assert_eq!(headers, vec![(SET_COOKIE, HeaderValue::from_static("auth_session=app"))]);
+        }).await.unwrap();
+    }
 
     #[test]
     fn test_forward_auth_params() {

@@ -70,6 +70,8 @@ http.request.method in {"TRACE" "TRACK"}
 
 レベルは `None`、`NonInteractive`、`Managed`（リスクに応じて選択）、`Interactive` です。Proof of Work は SHA-256 の先頭ゼロ目標を使います。通過結果は `__pingwaf_clearance` に保存され、値は `base64(payload).base64(HMAC-SHA256)` で発行サイトに紐づくため、別ドメインへ再利用できません。
 
+`__pingwaf_managed_` で始まる Cookie 名は PingWAF 専用です。プロキシはこれらの Cookie をオリジンや外部の `forward_auth` サービスに送信せず、それらのサービスからの設定も許可しません。
+
 難易度は適応型です。`pow_difficulty` から開始し、同一クライアントの検証失敗や `rate_threshold` を超えるリクエスト量に応じて `pow_max_difficulty` まで引き上げ、成功すると基本値に戻ります。発行と検証には IP ごとの毎分上限（`pow_issue_limit_per_min`、`pow_verify_limit_per_min`）もあり、発行上限を超えると `429` ページ、検証上限を超えると保留中のチャレンジを消費せずに拒否します。
 
 ## ボットポリシー

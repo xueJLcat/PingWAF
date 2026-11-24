@@ -22,6 +22,11 @@ cookie to visitors that solve it.
 | `pow_verify_limit_per_min` | int | `300` | Solution submissions accepted per host+IP per 60-second window. Over it verification fails closed without spending the pending nonce. |
 | `cookie_secret` | string | *(generated)* | HMAC key used to sign clearance cookies. Leave it unset (or set to the legacy `change-me`) and the process generates a random key instead — set it explicitly only if the secret must survive restarts. |
 | `cookie_name` | string | `__pingwaf_clearance` | Name of the clearance cookie. |
+
+The cookie name above applies to standalone and default ingress. Experimental
+managed ingress uses `__pingwaf_managed_clearance_<site UUID>` instead; the
+proxy reserves `__pingwaf_managed_` for edge credentials and does not pass
+those cookies between clients and origins. Custom ingress is not yet enabled.
 | `exempt_paths` | string[] | `[]` | Paths that bypass the challenge (health checks, APIs). |
 | `exempt_user_agents` | string[] | `[]` | User-agent substrings that bypass the challenge. |
 | `browser_integrity_check` | bool | `true` | Validate browser fingerprint consistency during verification. |

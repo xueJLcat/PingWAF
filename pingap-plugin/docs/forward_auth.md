@@ -3,8 +3,12 @@
 Delegates the authentication decision to an external HTTP service, the way
 nginx's `auth_request` or Traefik's ForwardAuth do. For every request Pingap
 issues a `GET` to `auth_url`; a `2xx` lets the request through, anything else is
-relayed back to the client verbatim — which is what makes redirect-to-login flows
+relayed back to the client — which is what makes redirect-to-login flows
 work.
+
+PingWAF reserves cookie names beginning with `__pingwaf_managed_` for edge
+credentials. They are excluded from auth subrequests, and the auth service
+cannot set them on a relayed response. Other cookies are unchanged.
 
 - **Step:** `request` (fixed)
 - **Registered as:** `forward_auth`

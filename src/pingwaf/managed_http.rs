@@ -366,7 +366,7 @@ mod tests {
                     ..Default::default()
                 });
                 sites.push(item);
-                tasks.spawn(origin(origin_socket, name));
+                tasks.spawn(origin(origin_socket, name, false));
             }
 
             let cache = tempfile::tempdir().unwrap();
@@ -510,7 +510,7 @@ mod tests {
         request
     }
 
-    async fn origin(socket: TcpListener, marker: &str) {
+    async fn origin(socket: TcpListener, marker: &str, check_cookies: bool) {
         loop {
             let (mut io, _) = socket.accept().await.unwrap();
             let request = read_origin_headers(&mut io).await;
@@ -522,14 +522,23 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&request)
             );
-            io.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{marker}", marker.len()).as_bytes()).await.unwrap();
+            let extra = if check_cookies {
+                let request =
+                    String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(!request.contains("__pingwaf_managed_"), "{request}");
+                assert!(request.contains("cookie: theme=blue"), "{request}");
+                "Set-Cookie: __pingwaf_managed_clearance_test=origin\r\nSet-Cookie: theme=green\r\n"
+            } else {
+                ""
+            };
+            io.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{marker}", marker.len()).as_bytes()).await.unwrap();
             return;
         }
     }
 
     async fn request(addr: std::net::SocketAddr, host: &str) -> String {
         let mut client = TcpStream::connect(addr).await.unwrap();
-        client.write_all(format!("GET /route HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        client.write_all(format!("GET /route HTTP/1.1\r\nHost: {host}\r\nCookie: __pingwaf_managed_clearance_test=client; theme=blue\r\nCookie: __pingwaf_managed_oidc_test=client\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         response
@@ -555,7 +564,7 @@ mod tests {
                         Some(addr.port()),
                         socket.local_addr().unwrap(),
                     ));
-                    tasks.spawn(origin(socket, marker));
+                    tasks.spawn(origin(socket, marker, true));
                 }
             }
             let cache = tempfile::tempdir().unwrap();
@@ -607,6 +616,16 @@ mod tests {
                 if let Some(marker) = marker {
                     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
                     assert!(response.ends_with(marker), "{response}");
+                    assert!(
+                        !response.contains("__pingwaf_managed_"),
+                        "{response}"
+                    );
+                    assert!(
+                        response
+                            .to_ascii_lowercase()
+                            .contains("set-cookie: theme=green"),
+                        "{response}"
+                    );
                 } else {
                     assert!(response.starts_with("HTTP/1.1 421"), "{response}");
                 }

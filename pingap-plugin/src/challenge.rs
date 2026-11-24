@@ -34,9 +34,10 @@ use http::header;
 use http::{HeaderValue, StatusCode};
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
-    Ctx, HTTP_HEADER_CONTENT_HTML, HttpResponse, Plugin, PluginStep,
-    ProxyTrust, RequestPluginResult, ensure_client_ip, get_cookie_value,
-    get_host, get_req_header_value, resolve_client_ip_with_trust,
+    Ctx, HTTP_HEADER_CONTENT_HTML, HttpResponse, MANAGED_COOKIE_PREFIX, Plugin,
+    PluginStep, ProxyTrust, RequestPluginResult, ensure_client_ip,
+    get_cookie_value, get_host, get_req_header_value,
+    resolve_client_ip_with_trust,
 };
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
@@ -1169,7 +1170,10 @@ pub(crate) fn scoped_clearance_name<'a>(
     rules: Option<&SiteRules>,
 ) -> Cow<'a, str> {
     rules.map_or(Cow::Borrowed(name), |rules| {
-        Cow::Owned(format!("{name}_{}", rules.site_id))
+        Cow::Owned(format!(
+            "{MANAGED_COOKIE_PREFIX}clearance_{}",
+            rules.site_id
+        ))
     })
 }
 
@@ -3004,7 +3008,10 @@ cookie_secret = "test-secret"
             .unwrap()
             .split_once('=')
             .unwrap();
-        assert_eq!(name, scoped_clearance_name(&plugin.cookie_name, Some(&a)));
+        assert_eq!(
+            name,
+            format!("{MANAGED_COOKIE_PREFIX}clearance_{}", a.site_id)
+        );
         assert_eq!(
             request(&plugin, &a, "/", Some(&format!("{name}={value}")), ip)
                 .await,

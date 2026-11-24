@@ -76,6 +76,8 @@ Difficulty is adaptive: it starts at `pow_difficulty` and rises per client (up t
 
 Challenge levels are `None`, `NonInteractive`, `Managed` (picks per request risk) and `Interactive`. Proof of work uses SHA-256 with a leading-zero target. A pass is stored in `__pingwaf_clearance`, a cookie whose value is `base64(payload).base64(HMAC-SHA256)` and which is bound to the host that issued it, so it cannot be replayed against another hostname. Alternate domains of the same site each need their own pass.
 
+Cookie names beginning with `__pingwaf_managed_` are reserved for PingWAF edge credentials. Origins and external `forward_auth` services do not receive or set them. This does not change the default-ingress clearance cookie.
+
 ## Bot policy
 
 Bot protection is configured per site with `ua_analysis`, `js_detection`, `tls_fingerprint`, `behavioral_analysis`, an action (`block`, `challenge`, `js_challenge`, `log`, `allow`), a known-bot allow list, IP and DNS verification, and an optional verified-IP group. Rate limiting uses the same dimension vocabulary — `ip`, `ip_nat`, `host`, `path`, `asn`, `country`, `header:<name>`, `cookie:<name>`, `query:<name>` — with actions `block`, `log`, `challenge`, `js_challenge` and `allow`.

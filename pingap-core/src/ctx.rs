@@ -267,6 +267,8 @@ pub trait LocationInstance: Send + Sync {
 /// Information about the upstream (backend) server.
 #[derive(Default)]
 pub struct UpstreamInfo {
+    /// An origin Set-Cookie field was removed before cache admission.
+    pub stripped_managed_set_cookie: bool,
     /// Upstream instance
     pub upstream_instance: Option<Arc<dyn UpstreamInstance>>,
     /// Location instance

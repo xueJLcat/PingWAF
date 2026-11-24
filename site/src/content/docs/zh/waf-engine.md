@@ -76,6 +76,8 @@ http.request.headers["user-agent"] contains "${jndi:"
 
 挑战等级为 `None`、`NonInteractive`、`Managed`（按请求风险自动选择）与 `Interactive`。工作量证明使用 SHA-256 前导零目标。通过结果存入 `__pingwaf_clearance` Cookie，值为 `base64(payload).base64(HMAC-SHA256)`，并绑定签发它的 Host，因此无法重放到其他域名；同一站点的备用域名也需要分别完成一次质询。
 
+以 `__pingwaf_managed_` 开头的 Cookie 名称保留给 PingWAF 边缘凭据。源站和外部 `forward_auth` 服务既不会收到这些 Cookie，也不能通过代理设置它们。默认入口的挑战通行 Cookie 不变。
+
 ## Bot 策略
 
 Bot 防护按站点配置：`ua_analysis`、`js_detection`、`tls_fingerprint`、`behavioral_analysis`、动作（`block`、`challenge`、`js_challenge`、`log`、`allow`）、已知 Bot 白名单、IP 与 DNS 校验，以及可选的已验证 IP 组。限流维度与之一致——`ip`、`ip_nat`、`host`、`path`、`asn`、`country`、`header:<name>`、`cookie:<name>`、`query:<name>`，动作为 `block`、`log`、`challenge`、`js_challenge` 与 `allow`。

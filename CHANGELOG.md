@@ -12,6 +12,11 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- **Reserved managed browser cookie namespace.** The proxy and external
+  `forward_auth` subrequests do not forward cookies named `__pingwaf_managed_*`
+  to services or let those services set them. Other cookie names are unaffected.
+  Managed challenge cookies use the reserved namespace; custom ingress is not
+  yet enabled.
 - **Legacy agent configuration is default-ingress only.** Registration,
   configuration pulls, rule sync and pushes omit custom-ingress sites; their
   hostnames cannot override the default-ingress failover policy on older

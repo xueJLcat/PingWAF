@@ -315,6 +315,11 @@ fn handle_special_headers(
     // Handle variables that reference other request headers, like `$http_user_agent`.
     if let Some(name) = buf.strip_prefix(b"$http_") {
         let key = std::str::from_utf8(name).ok()?;
+        if key.eq_ignore_ascii_case("cookie") {
+            return session
+                .get_header(header::COOKIE)
+                .and_then(without_managed_cookies);
+        }
         // nginx spelling: `$http_user_agent` names `User-Agent`. Header names
         // never contain underscores, so mapping them is unambiguous.
         if key.contains('_') {
@@ -744,6 +749,49 @@ pub fn get_req_header_value<'a>(
         }
     }
     None
+}
+
+/// Reserved for browser credentials issued by managed PingWAF sites.
+pub const MANAGED_COOKIE_PREFIX: &str = "__pingwaf_managed_";
+
+fn managed_cookie_name(pair: &[u8]) -> bool {
+    pair.trim_ascii_start()
+        .starts_with(MANAGED_COOKIE_PREFIX.as_bytes())
+}
+
+/// Filter a Cookie field without interpreting unrelated application values
+/// as UTF-8. Never return an empty field after stripping edge credentials.
+pub fn without_managed_cookies(value: &HeaderValue) -> Option<HeaderValue> {
+    let pairs = value.as_bytes().split(|&byte| byte == b';');
+    // Also reject a reserved name in a malformed comma-joined field. Keep
+    // non-reserved values unchanged, including their original formatting.
+    let reserved =
+        |pair: &[u8]| pair.split(|&byte| byte == b',').any(managed_cookie_name);
+    if !pairs.clone().any(reserved) {
+        return Some(value.clone());
+    }
+    let filtered = pairs
+        .map(<[u8]>::trim_ascii)
+        .filter(|pair| !pair.is_empty() && !reserved(pair))
+        .collect::<Vec<_>>()
+        .join(&b"; "[..]);
+    if filtered.is_empty() {
+        return None;
+    }
+    HeaderValue::from_bytes(&filtered).ok().map(|mut filtered| {
+        filtered.set_sensitive(value.is_sensitive());
+        filtered
+    })
+}
+
+/// Whether an origin's Set-Cookie field attempts to use the edge namespace.
+/// Set-Cookie is not list-valued; reject an entire malformed combined field
+/// that contains a reserved name rather than misparse Expires or attributes.
+pub fn sets_managed_cookie(value: &HeaderValue) -> bool {
+    value
+        .as_bytes()
+        .split(|&byte| byte == b',')
+        .any(managed_cookie_name)
 }
 
 /// Parses the "Cookie" header to find the value of a specific cookie.
@@ -1228,6 +1276,31 @@ mod tests {
                 HTTP_HEADER_CONTENT_TEXT.0.to_string(),
                 HTTP_HEADER_CONTENT_TEXT.1.to_str().unwrap_or_default()
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn cookie_header_variable_redacts_managed_values() {
+        let session = new_test_session(
+            &["Cookie: __pingwaf_managed_oidc_test=secret; app=public"],
+            "/",
+        )
+        .await;
+        assert_eq!(
+            get_cookie_value(
+                session.req_header(),
+                "__pingwaf_managed_oidc_test"
+            ),
+            Some("secret")
+        );
+        assert_eq!(
+            convert_header_value(
+                &HeaderValue::from_static("$http_cookie"),
+                &session,
+                &Ctx::default()
+            )
+            .unwrap(),
+            "app=public"
         );
     }
 

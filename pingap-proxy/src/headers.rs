@@ -12,9 +12,70 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use pingap_core::{Ctx, convert_header_value};
-use pingora::http::RequestHeader;
+use http::{
+    HeaderMap,
+    header::{COOKIE, SET_COOKIE},
+};
+use pingap_core::{
+    Ctx, MANAGED_COOKIE_PREFIX, convert_header_value, sets_managed_cookie,
+    without_managed_cookies,
+};
+use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::Session;
+
+pub(super) fn strip_managed_request_cookies(
+    header: &mut RequestHeader,
+) -> pingora::Result<()> {
+    let fields = header.headers.get_all(COOKIE);
+    if fields.iter().any(|value| {
+        value
+            .as_bytes()
+            .windows(MANAGED_COOKIE_PREFIX.len())
+            .any(|bytes| bytes == MANAGED_COOKIE_PREFIX.as_bytes())
+    }) {
+        let retained: Vec<_> =
+            fields.iter().filter_map(without_managed_cookies).collect();
+        header.remove_header(&COOKIE);
+        for field in retained {
+            header.append_header(COOKIE, field)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn strip_managed_response_cookies(
+    header: &mut ResponseHeader,
+) -> pingora::Result<bool> {
+    let fields = header.headers.get_all(SET_COOKIE);
+    if !fields.iter().any(sets_managed_cookie) {
+        return Ok(false);
+    }
+    let retained: Vec<_> = fields
+        .iter()
+        .filter(|field| !sets_managed_cookie(field))
+        .cloned()
+        .collect();
+    header.remove_header(&SET_COOKIE);
+    for field in retained {
+        header.append_header(SET_COOKIE, field)?;
+    }
+    Ok(true)
+}
+
+pub(super) fn strip_managed_trailer_cookies(trailers: &mut HeaderMap) {
+    let fields = trailers.get_all(SET_COOKIE);
+    if fields.iter().any(sets_managed_cookie) {
+        let retained: Vec<_> = fields
+            .iter()
+            .filter(|field| !sets_managed_cookie(field))
+            .cloned()
+            .collect();
+        trailers.remove(SET_COOKIE);
+        for field in retained {
+            trailers.append(SET_COOKIE, field);
+        }
+    }
+}
 
 /// Returns true when the header value may contain a `$…` / `:…` substitution.
 #[inline]
@@ -65,7 +126,7 @@ pub fn set_append_proxy_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::set_append_proxy_headers;
+    use super::*;
     use pingap_config::LocationConf;
     use pingap_core::Ctx;
     use pingap_location::Location;
@@ -73,6 +134,75 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use tokio_test::io::Builder;
+
+    #[test]
+    fn managed_cookie_filter_handles_all_fields_and_preserves_app_values() {
+        use http::HeaderValue;
+
+        let mut request = RequestHeader::build("GET", b"/", None).unwrap();
+        request
+            .append_header(COOKIE, "__pingwaf_managed_oidc_one=secret")
+            .unwrap();
+        request.append_header(COOKIE, HeaderValue::from_bytes(b"theme=\xff;\t__pingwaf_managed_clearance_two = pass; cart=3").unwrap()).unwrap();
+        request
+            .append_header(
+                COOKIE,
+                "note=__pingwaf_managed_literal; __pingwaf_clearance=legacy",
+            )
+            .unwrap();
+        request
+            .append_header(
+                COOKIE,
+                "bad=1, __pingwaf_managed_visitor_three=value",
+            )
+            .unwrap();
+        strip_managed_request_cookies(&mut request).unwrap();
+        let values = request
+            .headers
+            .get_all(COOKIE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            [
+                b"theme=\xff; cart=3".as_slice(),
+                b"note=__pingwaf_managed_literal; __pingwaf_clearance=legacy"
+                    .as_slice()
+            ]
+        );
+
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        let normal = "lang=en; Expires=Mon, 01 Jan 2040 00:00:00 GMT";
+        for value in [
+            normal,
+            "__pingwaf_managed_oidc_one=secret",
+            "bad=1, __pingwaf_managed_visitor_three=value",
+            "theme=dark",
+        ] {
+            response.append_header(SET_COOKIE, value).unwrap();
+        }
+        assert!(strip_managed_response_cookies(&mut response).unwrap());
+        assert!(!strip_managed_response_cookies(&mut response).unwrap());
+        assert_eq!(
+            response
+                .headers
+                .get_all(SET_COOKIE)
+                .iter()
+                .collect::<Vec<_>>(),
+            [normal, "theme=dark"]
+        );
+
+        let mut trailers = HeaderMap::new();
+        trailers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("__pingwaf_managed_state_a=x"),
+        );
+        trailers.append("grpc-status", HeaderValue::from_static("0"));
+        strip_managed_trailer_cookies(&mut trailers);
+        assert!(!trailers.contains_key(SET_COOKIE));
+        assert_eq!(trailers["grpc-status"], "0");
+    }
 
     async fn new_session() -> Session {
         let headers = [
