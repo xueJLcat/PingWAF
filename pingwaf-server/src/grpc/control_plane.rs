@@ -179,6 +179,21 @@ impl ControlPlaneService {
         self.authorize_claims(&claims).await
     }
 
+    pub(super) async fn authorize_managed_visitor_site(
+        &self,
+        token: &str,
+        site_id: Uuid,
+    ) -> Result<site::Model, Status> {
+        let claims = self.agent_claims(token)?;
+        let agent_id = claims
+            .subject_id()
+            .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
+        let session_id = managed_session_id(&claims)?.ok_or_else(|| {
+            Status::permission_denied("managed protocol was not negotiated")
+        })?;
+        managed::visitor_site(&self.db, agent_id, session_id, site_id).await
+    }
+
     async fn authorize_claims(
         &self,
         claims: &Claims,

@@ -75,6 +75,7 @@ service ControlPlane {
 message VisitorValidateRequest {
   string agent_id = 1;
   string agent_token = 2;
+  // Default-ingress hostname or managed:<canonical site UUID>.
   string site_id = 3;
   string visitor_id = 4;
   // The version the session was issued with. A mismatch means a password
@@ -1334,8 +1335,9 @@ message MetricAck {
 message VisitorChallengeRequest {
   string agent_id = 1;
   string agent_token = 2;
-  // The host the login was started from. A challenge is only answerable at
-  // the site it was issued for, so a nonce cannot be replayed elsewhere.
+  // Default-ingress hostname or managed:<canonical site UUID>. Managed
+  // references require a current managed session and explicit assignment.
+  // A challenge can only be answered in the namespace it was issued for.
   string site_id = 3;
 }
 
@@ -1353,6 +1355,7 @@ message VisitorChallengeResponse {
 message VisitorLoginRequest {
   string agent_id = 1;
   string agent_token = 2;
+  // Same site reference as VisitorChallengeRequest.
   string site_id = 3;
   // The id from `VisitorChallengeResponse`; consumed by this call.
   string challenge_id = 4;

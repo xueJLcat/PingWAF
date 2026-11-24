@@ -172,6 +172,239 @@ async fn resolve_site(
     Ok(row)
 }
 
+const MANAGED_SITE_PREFIX: &str = "managed:";
+
+#[cfg(test)]
+pub(super) async fn check_managed_password_postgres(
+    service: &ControlPlaneService,
+    token: &str,
+    raw_key: &str,
+    agent_id: Uuid,
+    default: &site::Model,
+    custom: &site::Model,
+) {
+    use pingwaf_proto::{
+        control_plane_server::ControlPlane, RegisterAgentRequest,
+    };
+    use sea_orm::{ConnectionTrait, DbBackend, Statement, Value};
+    use tonic::Code;
+
+    let exec = |sql: &'static str, values: Vec<Value>| async move {
+        service
+            .db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                sql,
+                values,
+            ))
+            .await
+            .unwrap();
+    };
+    let peers = site::Entity::find()
+        .filter(site::Column::IngressPort.eq(82))
+        .filter(site::Column::Domain.eq(&custom.domain))
+        .one(&service.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let peer = peers.id;
+    let scope = format!("{MANAGED_SITE_PREFIX}{}", custom.id);
+    let peer_scope = format!("{MANAGED_SITE_PREFIX}{peer}");
+    let issue = |token: &str, scope: &str| {
+        service.visitor_login_challenge(Request::new(VisitorChallengeRequest {
+            agent_token: token.into(),
+            site_id: scope.into(),
+            ..Default::default()
+        }))
+    };
+    assert_eq!(
+        issue(token, &scope).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    exec(
+        "UPDATE sites SET ingress_protocol = 'https', ingress_port = CASE WHEN id = $1 THEN 18443 ELSE 18444 END WHERE id IN ($1, $2)",
+        vec![custom.id.into(), peer.into()],
+    )
+    .await;
+    assert_eq!(
+        issue(token, &scope).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    for id in [custom.id, peer] {
+        exec("INSERT INTO site_oidc (id, site_id, enabled, auth_mode, created_at, updated_at) VALUES ($1, $2, true, 'local', now(), now())", vec![Uuid::new_v4().into(), id.into()]).await;
+    }
+    exec(
+        "UPDATE sites SET status = 'active' WHERE id = $1",
+        vec![peer.into()],
+    )
+    .await;
+    assert_eq!(
+        issue(token, &peer_scope).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let legacy = service
+        .register_agent(Request::new(RegisterAgentRequest {
+            api_key: raw_key.into(),
+            hostname: "visitor-legacy-test".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        issue(&legacy.agent_token, &scope).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert!(issue(&legacy.agent_token, &default.domain).await.is_ok());
+    exec(
+        "INSERT INTO agent_sites (agent_id, site_id) VALUES ($1, $2)",
+        vec![agent_id.into(), peer.into()],
+    )
+    .await;
+    assert!(issue(token, &peer_scope).await.is_ok());
+    let challenge = issue(token, &scope).await.unwrap().into_inner();
+    let login = |token: &str, namespace: &str| {
+        service.visitor_login(Request::new(VisitorLoginRequest {
+            agent_token: token.into(),
+            site_id: namespace.into(),
+            challenge_id: challenge.challenge_id.clone(),
+            ..Default::default()
+        }))
+    };
+    assert_eq!(
+        login(token, &peer_scope).await.unwrap_err().code(),
+        Code::NotFound
+    );
+    assert_eq!(
+        login(&legacy.agent_token, &default.domain)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::NotFound
+    );
+    let visitor = Uuid::new_v4();
+    let password = "local visitor regression fixture";
+    let email = "managed-visitor@example.test";
+    let hash =
+        crate::auth::password::hash_password_with_cost(password, 4).unwrap();
+    exec(
+        "INSERT INTO site_visitors (id, email, password_hash, created_at, updated_at) VALUES ($1, $2, $3, now(), now())",
+        vec![visitor.into(), email.into(), hash.into()],
+    ).await;
+    exec(
+        "INSERT INTO visitor_site_grants (id, site_id, visitor_id, created_at) VALUES ($1, $2, $3, now())",
+        vec![Uuid::new_v4().into(), custom.id.into(), visitor.into()],
+    ).await;
+    // Use a recorded nonce/answer fixture to exercise the existing verifier
+    // without random work or relying on a randomly invalid answer.
+    let proof = |challenge_id: String| async move {
+        exec("UPDATE visitor_auth_states SET payload = '{\"nonce\":\"fixture\",\"difficulty\":0}'::jsonb WHERE id = $1", vec![challenge_id.clone().into()]).await;
+        challenge_id
+    };
+    let submit = |namespace: &str, challenge_id: String| {
+        service.visitor_login(Request::new(VisitorLoginRequest {
+            agent_token: token.into(),
+            site_id: namespace.into(),
+            challenge_id,
+            solution: "0".into(),
+            timestamp: chrono::Utc::now().timestamp(),
+            email: email.into(),
+            password: password.into(),
+            ..Default::default()
+        }))
+    };
+    let success = submit(&scope, proof(challenge.challenge_id.clone()).await)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(success.ok);
+    assert_eq!(success.visitor_id, visitor.to_string());
+    assert_eq!(
+        login(token, &scope).await.unwrap_err().code(),
+        Code::NotFound
+    );
+    let peer_challenge = issue(token, &peer_scope).await.unwrap().into_inner();
+    assert!(
+        !submit(&peer_scope, proof(peer_challenge.challenge_id).await)
+            .await
+            .unwrap()
+            .into_inner()
+            .ok
+    );
+    let validate = |site_id: String| {
+        service.visitor_validate_session(Request::new(VisitorValidateRequest {
+            agent_token: token.into(),
+            site_id,
+            visitor_id: visitor.to_string(),
+            token_version: success.token_version,
+            ..Default::default()
+        }))
+    };
+    assert!(validate(scope.clone()).await.unwrap().into_inner().valid);
+    assert_eq!(
+        validate(peer_scope).await.unwrap().into_inner().reason,
+        "not_granted"
+    );
+    exec(
+        "UPDATE site_oidc SET enabled = false WHERE site_id = $1",
+        vec![custom.id.into()],
+    )
+    .await;
+    assert_eq!(
+        validate(scope).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+
+    exec(
+        "DELETE FROM site_visitors WHERE id = $1",
+        vec![visitor.into()],
+    )
+    .await;
+    exec(
+        "DELETE FROM site_oidc WHERE site_id IN ($1, $2)",
+        vec![custom.id.into(), peer.into()],
+    )
+    .await;
+    exec(
+        "DELETE FROM agent_sites WHERE agent_id = $1 AND site_id = $2",
+        vec![agent_id.into(), peer.into()],
+    )
+    .await;
+    exec(
+        "UPDATE sites SET status = $1, ingress_protocol = 'http', ingress_port = $3 WHERE id = $2",
+        vec![peers.status.into(), peer.into(), peers.ingress_port.into()],
+    )
+    .await;
+    exec(
+        "UPDATE sites SET ingress_protocol = 'http', ingress_port = $2 WHERE id = $1",
+        vec![custom.id.into(), custom.ingress_port.into()],
+    )
+    .await;
+}
+
+/// The site and the exact namespace to use when issuing/consuming challenges.
+/// Managed UUIDs never enter the hostname lookup, even on an older token.
+async fn resolve_password_site(
+    service: &ControlPlaneService,
+    token: &str,
+    site_ref: &str,
+) -> Result<(site::Model, String), Status> {
+    if let Some(value) = site_ref.strip_prefix(MANAGED_SITE_PREFIX) {
+        let id = Uuid::parse_str(value)
+            .ok()
+            .filter(|id| !id.is_nil() && id.to_string() == value)
+            .ok_or_else(|| {
+                Status::invalid_argument("invalid managed site UUID")
+            })?;
+        let row = service.authorize_managed_visitor_site(token, id).await?;
+        return Ok((row, site_ref.to_owned()));
+    }
+    let agent = service.authorize(token).await?;
+    let row = resolve_site(service, &agent, site_ref).await?;
+    let scope = row.domain.clone();
+    Ok((row, scope))
+}
+
 /// Writes a challenge row and returns what the browser needs.
 async fn issue_challenge(
     service: &ControlPlaneService,
@@ -213,7 +446,11 @@ async fn consume_challenge(
     if id.is_empty() {
         return Err(Status::invalid_argument("challenge_id is required"));
     }
+    use crate::models::visitor_auth_states::auth_state_kind::LOGIN_CHALLENGE;
+
     let row = visitor_auth_state::Entity::find_by_id(id.to_string())
+        .filter(visitor_auth_state::Column::SiteId.eq(expected_site))
+        .filter(visitor_auth_state::Column::Kind.eq(LOGIN_CHALLENGE))
         .one(&service.db)
         .await
         .map_err(db_status)?;
@@ -224,6 +461,8 @@ async fn consume_challenge(
     // solution is still spent, or the same nonce could be tried against
     // password guesses in a loop.
     let deleted = visitor_auth_state::Entity::delete_by_id(id.to_string())
+        .filter(visitor_auth_state::Column::SiteId.eq(expected_site))
+        .filter(visitor_auth_state::Column::Kind.eq(LOGIN_CHALLENGE))
         .exec(&service.db)
         .await
         .map_err(db_status)?;
@@ -233,11 +472,6 @@ async fn consume_challenge(
     }
     if row.expires_at <= chrono::Utc::now() {
         return Err(Status::not_found(error_code::CHALLENGE_EXPIRED));
-    }
-    // A challenge issued for another site is not answerable here, even by
-    // an agent that serves both.
-    if row.site_id != expected_site {
-        return Err(Status::permission_denied(error_code::CHALLENGE_EXPIRED));
     }
     let nonce = row
         .payload
@@ -262,11 +496,12 @@ pub(crate) async fn visitor_login_challenge(
     request: Request<VisitorChallengeRequest>,
 ) -> Result<Response<VisitorChallengeResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
     // Resolving the site here means a challenge can only be issued for a
     // site this agent actually serves.
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
-    let issued = issue_challenge(service, &site_row.domain).await?;
+    let (_, scope) =
+        resolve_password_site(service, &payload.agent_token, &payload.site_id)
+            .await?;
+    let issued = issue_challenge(service, &scope).await?;
     Ok(Response::new(VisitorChallengeResponse {
         challenge_id: issued.id,
         nonce: issued.nonce,
@@ -283,14 +518,14 @@ pub(crate) async fn visitor_login(
     request: Request<VisitorLoginRequest>,
 ) -> Result<Response<VisitorLoginResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
-    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
+    let (site_row, scope) =
+        resolve_password_site(service, &payload.agent_token, &payload.site_id)
+            .await?;
 
     // The challenge is spent before the credentials are looked at, so a
     // wrong password cannot be retried against the same nonce.
     let challenge =
-        consume_challenge(service, &payload.challenge_id, &site_row.domain)
-            .await?;
+        consume_challenge(service, &payload.challenge_id, &scope).await?;
     if !pingwaf_challenge::js_challenge::verify::verify_proof_of_work(
         &challenge.nonce,
         &payload.solution,
@@ -936,9 +1171,9 @@ pub(crate) async fn visitor_validate_session(
     request: Request<VisitorValidateRequest>,
 ) -> Result<Response<VisitorValidateResponse>, Status> {
     let payload = request.into_inner();
-    let agent_row = service.authorize(&payload.agent_token).await?;
-    // Scoped to a site the agent serves, like every other visitor call.
-    let _site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
+    let (site_row, _) =
+        resolve_password_site(service, &payload.agent_token, &payload.site_id)
+            .await?;
     let Ok(visitor_id) = Uuid::parse_str(payload.visitor_id.trim()) else {
         return Ok(Response::new(VisitorValidateResponse {
             valid: false,
@@ -974,7 +1209,7 @@ pub(crate) async fn visitor_validate_session(
     // must end access to that site, not just block the next sign-in.
     let granted = visitor_site_grant::Entity::find()
         .filter(visitor_site_grant::Column::VisitorId.eq(visitor.id))
-        .filter(visitor_site_grant::Column::SiteId.eq(_site_row.id))
+        .filter(visitor_site_grant::Column::SiteId.eq(site_row.id))
         .one(&service.db)
         .await
         .map_err(db_status)?

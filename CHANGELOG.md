@@ -30,6 +30,10 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Added
 
+- **Managed visitor password RPC scope.** Login challenges, password login
+  and session validation accept an explicitly assigned custom HTTPS site by
+  UUID with a current managed token. A challenge can only be consumed by its
+  issuing site. The edge visitor plugin is not yet wired for custom ingress.
 - **Managed OIDC view validation.** In the isolated data-plane view, a
   custom HTTPS site requires an explicit callback that selects that site.
   Login state and sessions are scoped to the site and origin; logout clears

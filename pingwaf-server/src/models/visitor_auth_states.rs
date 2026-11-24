@@ -18,8 +18,8 @@ pub mod visitor_auth_states {
         pub id: String,
         /// `login_challenge` / `passkey_reg` / `passkey_login`.
         pub kind: String,
-        /// The host the login was started from, so a challenge answered at
-        /// another site is refused.
+        /// Default-ingress hostname or `managed:<UUID>` for a custom site.
+        /// A challenge may only be consumed within its issuing namespace.
         pub site_id: String,
         /// Set only for the kinds that have an account in hand.
         pub visitor_id: Option<Uuid>,

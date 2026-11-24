@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::api::keys::key_allows_agent;
 use crate::models::{
-    agent, agent_sites, api_key, role, site, site_status, user,
+    agent, agent_sites, api_key, role, site, site_oidc, site_status, user,
 };
 
 use super::config::assemble_managed_config;
@@ -99,6 +99,67 @@ pub(super) async fn authorize_session(
         Ok(row)
     }
     status_for_scope(agent_id, read_identity(db, agent_id, session_id).await)
+}
+
+pub(super) async fn visitor_site(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    session_id: Uuid,
+    site_id: Uuid,
+) -> Result<site::Model, Status> {
+    async fn read_site(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+        session_id: Uuid,
+        site_id: Uuid,
+    ) -> Result<site::Model, BuildError> {
+        let tx = db
+            .begin_with_config(
+                Some(IsolationLevel::RepeatableRead),
+                Some(AccessMode::ReadOnly),
+            )
+            .await?;
+        require_session(&tx, agent_id, session_id).await?;
+        let (agent, owner) = authorize(&tx, agent_id).await?;
+        if agent.site_scope != "selected"
+            || agent_sites::Entity::find()
+                .filter(agent_sites::Column::AgentId.eq(agent.id))
+                .filter(agent_sites::Column::SiteId.eq(site_id))
+                .one(&tx)
+                .await?
+                .is_none()
+        {
+            return Err(BuildError::Forbidden);
+        }
+        let site = site::Entity::find_by_id(site_id)
+            .filter(site::Column::UserId.eq(owner))
+            .filter(site::Column::Status.eq(site_status::ACTIVE))
+            .filter(site::Column::IngressPort.is_not_null())
+            .filter(site::Column::IngressProtocol.eq("https"))
+            .one(&tx)
+            .await?
+            .ok_or(BuildError::Forbidden)?;
+        let permits_visitor =
+            site_oidc::Entity::find()
+                .filter(site_oidc::Column::SiteId.eq(site_id))
+                .filter(site_oidc::Column::Enabled.eq(true))
+                .filter(site_oidc::Column::AuthMode.is_in([
+                    site_oidc::AuthMode::LOCAL,
+                    site_oidc::AuthMode::BOTH,
+                ]))
+                .one(&tx)
+                .await?
+                .is_some();
+        if !permits_visitor {
+            return Err(BuildError::Forbidden);
+        }
+        tx.commit().await?;
+        Ok(site)
+    }
+    status_for_scope(
+        agent_id,
+        read_site(db, agent_id, session_id, site_id).await,
+    )
 }
 
 fn status_for_scope<T>(
@@ -552,6 +613,10 @@ pub(super) async fn check_postgres(
     let site = config.sites[0].site.as_ref().unwrap();
     assert_eq!(site.id, custom.id.to_string());
     assert!(site.rules.as_ref().unwrap().site_policies.is_empty());
+    super::visitor_auth::check_managed_password_postgres(
+        service, &token, raw_key, id, default, custom,
+    )
+    .await;
     let Err(BuildError::Storage(stale)) =
         build_in_view(&ready, id, session).await
     else {
