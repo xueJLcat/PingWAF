@@ -11,16 +11,26 @@ use std::time::Duration;
 const USER: &str = "00000000-0000-0000-0000-000000000001";
 
 /// Recreate the .55 schema with its original applied migration names.
-/// The next official release added a second, independently named 000104.
+/// Later upstream releases reused numbers from the local 104–115 range.
 struct Local55;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Local55 {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         Migrator::migrations().into_iter()
-            .take_while(|m| m.name() <= "m20240101_000115_dynamic_pages")
-            .filter(|m| !matches!(m.name(), "m20240101_000104_site_ssl_self_signed_backfill"
-                | "m20240101_000105_tunnel_connectors" | "m20240101_000106_tunnel_sessions"))
+            .filter(|m| m.name() < "m20240101_000104" || matches!(m.name(),
+                "m20240101_000104_site_ingress"
+                | "m20240101_000105_managed_config_order"
+                | "m20240101_000106_ingress_tls_policy"
+                | "m20240101_000107_enable_site_ingress"
+                | "m20240101_000108_site_listeners"
+                | "m20240101_000109_static_drafts"
+                | "m20240101_000110_site_handlers"
+                | "m20240101_000111_static_releases"
+                | "m20240101_000112_directory_versions"
+                | "m20240101_000113_page_integrity"
+                | "m20240101_000114_protection_reports"
+                | "m20240101_000115_dynamic_pages"))
             .collect()
     }
 }

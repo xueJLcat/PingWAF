@@ -118,7 +118,7 @@ export function SyslogSettings(){
   const stats=st?.stats
   const grid='grid gap-3 sm:grid-cols-2 lg:grid-cols-3'
   return <Card><CardBody className="space-y-4">
-    <div className="flex flex-wrap items-center justify-between gap-3 [&_button]:min-h-11 sm:[&_button]:min-h-9"><h2 className="text-base font-semibold">{label('title')}</h2>
+    <div className="flex flex-wrap items-center justify-between gap-3 [&_button]:min-h-11 sm:[&_button]:min-h-9"><h2 className="text-base font-semibold text-fg-strong">{label('title')}</h2>
       {v && !draft && <div className="flex flex-wrap gap-2"><Button onClick={()=>begin(v)}>{label(v.configured?'edit':'configure')}</Button>
       {v.configured && <Button disabled={busy} onClick={()=>setConfirm({action:'remove',revision:v.revision,target:describeTarget(v.config),discard:false})}>{label('remove')}</Button>}</div>}</div>
     {query.isError && <p role="alert">{query.error.message} <Button onClick={()=>void query.refetch()}>{label('reload')}</Button></p>}

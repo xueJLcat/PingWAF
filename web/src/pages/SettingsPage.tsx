@@ -3215,7 +3215,7 @@ export function LogBufferPage() {
   const canWrite = useCanWrite()
   const guard = useUnsavedGuard(useAnyUnsaved())
   return <div className="space-y-4">{guard}<PageHeader title={t('nav.logBuffer')} /><SyslogSettings />
-    <Card><CardBody className="space-y-3"><h2 className="text-base font-semibold">{t('syslog.buffer')}</h2><EsBufferDirectory canWrite={canWrite} /></CardBody></Card>
+    <Card><CardBody className="space-y-3"><h2 className="text-base font-semibold text-fg-strong">{t('syslog.buffer')}</h2><EsBufferDirectory canWrite={canWrite} /></CardBody></Card>
   </div>
 }
 

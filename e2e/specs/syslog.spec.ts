@@ -17,6 +17,29 @@ test('maintain a log destination across desktop and mobile with a real UDP recei
   try {
     await page.goto(endpoint)
     await expect(page.getByRole('heading', {name:'Log services', exact:true})).toBeVisible()
+    const toggleTheme = page.getByRole('button', { name: 'Toggle theme', exact: true })
+    for (const theme of ['light', 'dark']) {
+      if (await page.locator('html').getAttribute('data-theme') !== theme) await toggleTheme.click()
+      for (const title of ['Syslog forwarding', 'Elasticsearch log buffer directory']) {
+        const heading = page.getByRole('heading', { name: title, exact: true })
+        await expect(heading).toBeVisible()
+        const contrast = await heading.evaluate(el => {
+          function luminance(rgb: string) {
+            const [r, g, b] = rgb.match(/[\d.]+/g)!.slice(0, 3).map(value => {
+              const v = Number(value) / 255
+              return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+            })
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+          }
+          const surface = el.closest('.bg-elevated')!
+          const text = luminance(getComputedStyle(el).color)
+          const bg = luminance(getComputedStyle(surface).backgroundColor)
+          return (Math.max(text, bg) + 0.05) / (Math.min(text, bg) + 0.05)
+        })
+        expect(contrast, title + ' in ' + theme).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+    await toggleTheme.click()
     await page.getByRole('button', {name:'Configure forwarding'}).click()
     const host = page.getByLabel('Server address', {exact:true})
     const transport = page.getByLabel('Transport', {exact:true})
