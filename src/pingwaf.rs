@@ -1905,6 +1905,14 @@ async fn start_legacy_data_plane(
     _host: IngressHost,
 ) -> anyhow::Result<()> {
     let (config, initial_hash, initial_key) = loop {
+        // On a warm start the disk snapshot may arrive before the control plane.
+        // Initialize from the first accepted projection so its application can
+        // be acknowledged even when the persisted and incoming hashes match.
+        #[cfg(target_os = "linux")]
+        if _host.as_ref().is_some_and(|host| !host.has_received_default_config()) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
         let snapshot = rule_cache.all_sites();
         if _host.is_none() { apply_tunnel_policies(&snapshot); }
         let (key, orders) = runtime_certificate_orders(&_host, &snapshot);

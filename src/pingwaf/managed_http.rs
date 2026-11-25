@@ -80,6 +80,10 @@ impl DefaultRoutes {
 }
 
 impl Host {
+    pub(super) fn has_received_default_config(&self) -> bool {
+        self.defaults.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
     pub(super) fn default_routes_applied(&self, hash: Arc<str>) {
         let mut routes = self.default_routes.write().unwrap_or_else(|e| e.into_inner());
         if routes.expected_hash == hash.as_ref() {
