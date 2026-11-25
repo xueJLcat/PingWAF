@@ -29,9 +29,9 @@ test.describe('tunnels', () => {
     await page.getByRole('tab', { name: 'Tunnels' }).click()
 
     // ── Create: the pairing command is shown exactly once ────────────────────
-    await page.getByRole('button', { name: 'Create tunnel' }).click()
+    await page.getByRole('button', { name: 'Create tunnel', exact: true }).first().click()
     await page.getByRole('textbox', { name: 'Name' }).fill(tunnelName)
-    await page.getByRole('button', { name: 'Create tunnel', exact: true }).last().click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Create tunnel', exact: true }).click()
 
     const pairingDialog = page.getByRole('dialog')
     await expect(pairingDialog.getByText('Install and pair')).toBeVisible()
@@ -100,9 +100,9 @@ test.describe('tunnels', () => {
     // A tunnel to bind to.
     await page.goto('/agents')
     await page.getByRole('tab', { name: 'Tunnels' }).click()
-    await page.getByRole('button', { name: 'Create tunnel' }).click()
+    await page.getByRole('button', { name: 'Create tunnel', exact: true }).first().click()
     await page.getByRole('textbox', { name: 'Name' }).fill(`${tunnelName}-pool`)
-    await page.getByRole('button', { name: 'Create tunnel', exact: true }).last().click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Create tunnel', exact: true }).click()
     await page.getByRole('dialog').getByRole('button', { name: 'Done' }).click()
 
     // Bind the site's default pool to it.

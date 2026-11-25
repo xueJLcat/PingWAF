@@ -247,8 +247,7 @@ test.describe('WAF custom rules', () => {
       await shot(page, 'custom-rules-04-rule-edited')
 
       /* ── 5. Edge: a normal request passes, the marked one is blocked ─── */
-      const normal = await page.goto(`http://${domain}/?e2e-normal=${run}`)
-      expect(normal?.status()).toBe(200)
+      await app.waitForSite(domain)
 
       const attackUrl = `http://${domain}/?${marker}=1`
       let blockedBody = ''

@@ -147,8 +147,7 @@ test.describe('WAF protection page — UI expectations', () => {
       await openProtection(page, app.adminUrl, siteId)
       await expect(page.getByRole('heading', { name: 'Web Protection' })).toBeVisible()
 
-      // Six entry points, Overview selected, no seventh/legacy tab left over.
-      await expect(page.getByRole('tab')).toHaveCount(6)
+      await expect(page.getByRole('tab')).toHaveCount(7)
       await expect(page.getByRole('tab', { name: 'Overview' })).toHaveAttribute(
         'aria-selected',
         'true',
@@ -158,6 +157,7 @@ test.describe('WAF protection page — UI expectations', () => {
         'Custom rules',
         'Path exceptions',
         'Rate limiting & challenge',
+        '网页防篡改',
       ]) {
         await expect(page.getByRole('tab', { name })).toBeVisible()
       }
@@ -495,9 +495,8 @@ test.describe('WAF protection page — UI expectations', () => {
           'the posture banner must keep reporting the site rule set while a search filter is active',
         )
         .toBe(bannerBefore)
-      // The filtered-empty state renders the "missing rule pack" CTA, not the
-      // Reset button, so there is nothing safe to click here; the finally block
-      // deletes the site.
+      await page.getByRole('button', { name: 'Reset', exact: true }).click()
+      await expect(page.getByText(/^\d+ rules$/).first()).toHaveText(`${seededCount} rules`)
     } finally {
       await deleteSiteIfPresent(page, app.adminUrl, domain)
     }

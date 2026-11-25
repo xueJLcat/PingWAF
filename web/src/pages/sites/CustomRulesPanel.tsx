@@ -79,6 +79,18 @@ export function CustomRulesPanel() {
 
   const allRules = useMemo(() => rulesQuery.data?.items ?? [], [rulesQuery.data])
   const totalRules = rulesQuery.data?.total ?? allRules.length
+  const needsCounts = Boolean(debouncedSearch) || totalRules > allRules.length
+  const countsQuery = useQuery({
+    queryKey: [...ruleKeys.all(siteId), 'counts'],
+    queryFn: async () => {
+      const [all, active] = await Promise.all([
+        rulesApi.list(siteId, { page_size: 1 }),
+        rulesApi.list(siteId, { page_size: 1, enabled: true }),
+      ])
+      return { total: all.total, active: active.total }
+    },
+    enabled: Boolean(siteId) && needsCounts,
+  })
   const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
 
   /** Derived exactly the way the control plane derives it for the agents. */
@@ -97,6 +109,9 @@ export function CustomRulesPanel() {
     enabled: Boolean(siteId),
   })
   const settings = settingsQuery.data
+  const siteCounts = needsCounts && countsQuery.data
+    ? countsQuery.data
+    : { active: waf.active_rules, total: waf.total_rules }
   const effectiveMode = settings?.mode ?? waf.mode
   const effectiveParanoia = settings?.paranoia_level ?? waf.paranoia_level
 
@@ -254,17 +269,19 @@ export function CustomRulesPanel() {
   )
 
   const loading =
-    rulesQuery.isPending || groupsQuery.isPending || settingsQuery.isPending
-  const failed = (rulesQuery.isError && !rulesQuery.data) || (groupsQuery.isError && !groupsQuery.data)
+    rulesQuery.isPending || groupsQuery.isPending || settingsQuery.isPending || (needsCounts && countsQuery.isPending)
+  const failed = (rulesQuery.isError && !rulesQuery.data) || (groupsQuery.isError && !groupsQuery.data) ||
+    (needsCounts && countsQuery.isError && !countsQuery.data)
 
   return (
     <div>
       {failed ? (
         <ErrorState
-          error={rulesQuery.error ?? groupsQuery.error}
+          error={rulesQuery.error ?? groupsQuery.error ?? countsQuery.error}
           onRetry={() => {
             void rulesQuery.refetch()
             void groupsQuery.refetch()
+            if (needsCounts) void countsQuery.refetch()
           }}
           retrying={rulesQuery.isFetching}
         />
@@ -314,8 +331,8 @@ export function CustomRulesPanel() {
                 </p>
                 <p className="text-xs text-fg-subtle">
                   {t('pages.waf.postureHint', {
-                    active: waf.active_rules,
-                    total: waf.total_rules,
+                    active: siteCounts.active,
+                    total: siteCounts.total,
                   })}
                 </p>
               </div>
@@ -326,7 +343,7 @@ export function CustomRulesPanel() {
                 />
                 <PostureStat
                   label={t('pages.waf.activeRules')}
-                  value={`${waf.active_rules}/${waf.total_rules}`}
+                  value={`${siteCounts.active}/${siteCounts.total}`}
                 />
                 <Badge tone={MODE_TONE[effectiveMode] ?? 'neutral'} dot>
                   {t(`pages.waf.mode_${effectiveMode}`)}
@@ -497,17 +514,17 @@ export function CustomRulesPanel() {
                   className="py-12"
                   icon={<Shield weight="duotone" className="h-8 w-8" />}
                   title={
-                    allRules.length === 0
+                    siteCounts.total === 0
                       ? t('pages.waf.emptyTitle')
                       : t('pages.waf.noResults')
                   }
                   description={
-                    allRules.length === 0
+                    siteCounts.total === 0
                       ? t('pages.waf.emptyDescription')
                       : t('pages.waf.noResultsDescription')
                   }
                   action={
-                    allRules.length === 0 ? (
+                    siteCounts.total === 0 ? (
                       canWrite ? (
                         <div className="flex items-center gap-2">
                           <Button
