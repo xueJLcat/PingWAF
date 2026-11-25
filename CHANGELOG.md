@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Check all physical site listeners against the dashboard port, including the implicit HTTP/HTTPS pair. Configuration restore now validates terminal handlers, standard listener conflicts and uploaded release availability before writing. Migration 000117 extends the TLS policy checks to additional HTTP listeners.
+
 - Add console maintenance for ASN databases and institution name tables, login GeoIP file status and removal, and persistent Elasticsearch buffer directories.
 
 - Require a matching operator preview before issuing dynamic page test

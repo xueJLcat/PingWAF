@@ -55,6 +55,19 @@ use crate::grpc::{AgentRegistry, ControlPlaneService};
 use crate::migration::Migrator;
 use crate::models::{instance_setting, role, user};
 
+async fn check_dashboard_ingress(db: &sea_orm::DatabaseConnection, port: u16) -> anyhow::Result<()> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let row = db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT s.id FROM sites s CROSS JOIN LATERAL
+         site_listener_claims(s.ingress_port, s.ingress_protocol, s.additional_ingresses) c
+         WHERE c.port = $1 LIMIT 1", [i32::from(port).into()])).await?;
+    if let Some(row) = row {
+        let id: uuid::Uuid = row.try_get("", "id")?;
+        anyhow::bail!("dashboard port {port} is configured as ingress for site {id}; move that site or select another dashboard port");
+    }
+    Ok(())
+}
+
 /// Starts the PingWAF control plane server.
 ///
 /// This function:
@@ -183,17 +196,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
         anyhow::anyhow!("failed to bind HTTP address {http_addr}: {err}")
     })?;
     let admin_port = http_listener.local_addr()?.port();
-    {
-        use crate::models::site;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-        if let Some(existing) = site::Entity::find()
-            .filter(site::Column::IngressPort.eq(i32::from(admin_port)))
-            .one(&db)
-            .await?
-        {
-            anyhow::bail!("dashboard port {admin_port} is configured as ingress for site {}; move that site or select another dashboard port", existing.id);
-        }
-    }
+    check_dashboard_ingress(&db, admin_port).await?;
     let agents = AgentRegistry::with_admin_port(admin_port);
     if let Some(choice) = es::directory::load(&db).await? {
         let setting = config.elasticsearch.get_or_insert_with(Default::default);

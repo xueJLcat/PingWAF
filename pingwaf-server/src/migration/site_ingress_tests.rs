@@ -252,6 +252,16 @@ async fn site_ingress_migration_postgres() {
     );
     Migrator::up(&db, None).await.unwrap();
 
+    // An omitted ingress denotes both standard physical ports.
+    assert!(crate::check_dashboard_ingress(&db, 80).await.is_err());
+    assert!(crate::check_dashboard_ingress(&db, 443).await.is_err());
+    assert!(crate::check_dashboard_ingress(&db, 9080).await.is_ok());
+    let implicit = config_restore::prepare_restore_with_agents(
+        &db, &crate::grpc::AgentRegistry::with_admin_port(443),
+        scope, &legacy_snapshot, Default::default(),
+    ).await.unwrap_err();
+    assert_eq!(crate::api::error::ApiError::from(implicit).code(), "site.ingress_invalid");
+
     for port in [81, 82, 83] {
         db.execute_unprepared(&insert("app.test", "{}", port, "http"))
             .await
@@ -265,6 +275,10 @@ async fn site_ingress_migration_postgres() {
         .await,
         4
     );
+    db.execute_unprepared("UPDATE sites SET additional_ingresses=ARRAY['http:18090'] WHERE ingress_port=81").await.unwrap();
+    assert!(crate::check_dashboard_ingress(&db, 18090).await.is_err());
+    assert!(crate::check_dashboard_ingress(&db, 81).await.is_err());
+    db.execute_unprepared("UPDATE sites SET additional_ingresses='{}' WHERE ingress_port=81").await.unwrap();
     let state = crate::api::state::AppState::new(
         db.clone(),
         crate::config::ServerConfig::default(),
@@ -287,6 +301,22 @@ async fn site_ingress_migration_postgres() {
     let overlap = tls_tx.execute_unprepared("UPDATE sites SET alternate_domains=ARRAY['*.example.test'] WHERE ingress_port=82").await.unwrap_err();
     assert_db_error(&overlap, "23514", Some("sites_ingress_hsts_conflict"));
     tls_tx.rollback().await.unwrap();
+    let secure = insert("extras.test", "{}", 18443, "https");
+    db.execute_unprepared(&secure).await.unwrap();
+    let extra_http = "UPDATE sites SET additional_ingresses=ARRAY['http:18091'] WHERE domain='extras.test'";
+    let force_https = "INSERT INTO site_ssl(id,site_id,domain,always_use_https,created_at) SELECT gen_random_uuid(),id,domain,true,now() FROM sites WHERE domain='extras.test'";
+    let first = db.begin().await.unwrap();
+    first.execute_unprepared(force_https).await.unwrap();
+    first.execute_unprepared("SET CONSTRAINTS ALL IMMEDIATE").await.unwrap();
+    assert_db_error(&first.execute_unprepared(extra_http).await.unwrap_err(), "23514", Some("sites_ingress_https_redirect"));
+    first.rollback().await.unwrap();
+    let second = db.begin().await.unwrap();
+    second.execute_unprepared(extra_http).await.unwrap();
+    second.execute_unprepared("SET CONSTRAINTS ALL IMMEDIATE").await.unwrap();
+    let enable_hsts = force_https.replace("always_use_https", "hsts_enabled");
+    assert_db_error(&second.execute_unprepared(&enable_hsts).await.unwrap_err(), "23514", Some("sites_ingress_hsts_conflict"));
+    second.rollback().await.unwrap();
+    db.execute_unprepared("DELETE FROM sites WHERE domain='extras.test'").await.unwrap();
     // Concurrent updates to separate tables must serialize before either
     // transaction checks the shared hostname. The loser cannot commit both.
     db.execute_unprepared(&legacy_insert("race-tls.test"))
@@ -428,6 +458,31 @@ async fn site_ingress_migration_postgres() {
     let one = config_catalog::capture(&db, site_scope, true)
         .await
         .unwrap();
+    let mut standard = one.clone();
+    let row = &mut standard["tables"]["sites"][0];
+    row["domain"] = "redirect-restore.test".into();
+    row["alternate_domains"] = serde_json::json!([]);
+    row["ingress_port"] = 80.into();
+    row["ingress_protocol"] = "http".into();
+    row["site_handler"] = serde_json::json!({"kind":"redirect","target":"https://destination.example.test"});
+    let trial = db.begin().await.unwrap();
+    let plan = config_restore::prepare_restore_with_agents(
+        &trial, &state.agents, site_scope, &standard, Default::default(),
+    ).await.unwrap();
+    config_restore::apply_restore(&trial, plan).await.unwrap();
+    assert!(scalar::<bool>(&trial, "SELECT EXISTS(SELECT FROM sites WHERE domain='redirect-restore.test' AND ingress_port=80 AND site_handler->>'kind'='redirect')").await);
+    trial.rollback().await.unwrap();
+    let mut missing_zip = standard.clone();
+    missing_zip["tables"]["sites"][0]["site_handler"] = serde_json::json!({"kind":"zip","digest":"a".repeat(64)});
+    let missing = config_restore::prepare_restore_with_agents(
+        &db, &state.agents, site_scope, &missing_zip, Default::default(),
+    ).await.unwrap_err();
+    assert!(DbErr::from(missing).to_string().contains("matching uploaded static release"));
+    standard["tables"]["sites"][0]["domain"] = "app.test".into();
+    let overlap = config_restore::prepare_restore_with_agents(
+        &db, &state.agents, site_scope, &standard, Default::default(),
+    ).await.unwrap_err();
+    assert_eq!(crate::api::error::ApiError::from(overlap).code(), "site.domain_conflict");
     let mut legacy = one.clone();
     let fields = legacy["tables"]["sites"][0].as_object_mut().unwrap();
     fields.remove("ingress_port");

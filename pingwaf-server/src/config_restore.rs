@@ -854,13 +854,23 @@ async fn check_restore_ingress<C: ConnectionTrait>(
         return Ok(());
     }
     let mut claims = Vec::new();
+    let mut zip_releases = Vec::new();
     let mut assignments = Vec::new();
     for row in sites.into_iter().flat_map(|table| &table.rows) {
         let fields: crate::api::sites::IngressFields =
             serde::Deserialize::deserialize(row)
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let handler: Option<crate::models::site_handler::SiteHandler> =
+            serde_json::from_value(row["site_handler"].clone())
+                .map_err(|e| RestoreError::Ingress(ApiError::BadRequest(e.to_string())))?;
+        if let Some(handler) = &handler {
+            handler.to_proto().map_err(|e| RestoreError::Ingress(ApiError::BadRequest(e)))?;
+            if let crate::models::site_handler::SiteHandler::Zip { digest } = handler {
+                zip_releases.push(json!({"id":row["id"], "digest":digest}));
+            }
+        }
         let (port, protocol) = fields
-            .resolve(None, true, agents.admin_port)
+            .resolve_for_site(None, true, agents.admin_port, handler.is_some())
             .map_err(RestoreError::Ingress)?;
         let extra = fields.additional(None, port, true, agents.admin_port)
             .map_err(RestoreError::Ingress)?;
@@ -888,6 +898,17 @@ async fn check_restore_ingress<C: ConnectionTrait>(
         }
         claims.push(json!({"id":row["id"], "domain":row["domain"], "aliases":row["alternate_domains"],
             "port":port, "protocol":protocol}));
+    }
+    if !zip_releases.is_empty() {
+        if let Some(missing) = db.query_one(statement(db, "
+            SELECT z.id FROM jsonb_to_recordset($1) AS z(id uuid,digest text)
+            WHERE NOT EXISTS (SELECT FROM static_releases r WHERE r.site_id=z.id AND r.digest=z.digest)
+            LIMIT 1", vec![json!(zip_releases).into()])).await? {
+            let id: Uuid = missing.try_get("", "id")?;
+            return Err(RestoreError::Ingress(ApiError::BadRequest(format!(
+                "matching uploaded static release is unavailable for site {id}"
+            ))));
+        }
     }
     let tls = plan
         .tables
@@ -918,8 +939,11 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             UNION ALL
             SELECT site_id, hsts_enabled, always_use_https FROM site_ssl
             WHERE NOT $4::boolean OR ($5::uuid IS NOT NULL AND site_id <> $5)
-        ), hosts AS (
-            SELECT id, coalesce(port,0) AS port, unnest(array_prepend(domain, aliases)) COLLATE "C" AS host FROM final_sites
+        ), hosts(id, port, host) AS (
+            SELECT id, physical_port, unnest(array_prepend(domain, aliases)) COLLATE "C" AS host
+            FROM final_sites CROSS JOIN LATERAL unnest(
+                CASE WHEN port IS NULL THEN ARRAY[80,443] ELSE ARRAY[port] END
+            ) AS listener(physical_port)
         ), labels AS (
             SELECT id, port, host, string_to_array(host,'.') AS parts FROM hosts
         )
@@ -930,7 +954,10 @@ async fn check_restore_ingress<C: ConnectionTrait>(
                          CROSS JOIN hosts h JOIN final_tls t ON t.site_id=h.id
                          WHERE plain.protocol='http' AND t.hsts_enabled AND site_ingress_hosts_overlap(p.host,h.host)) THEN 'hsts'
             WHEN EXISTS (SELECT FROM hosts WHERE site_ingress_hostname_valid(host) IS NOT TRUE) THEN 'hostname'
-            WHEN EXISTS (SELECT FROM final_sites WHERE port IS NOT NULL GROUP BY port HAVING count(DISTINCT protocol) > 1) THEN 'protocol'
+            WHEN EXISTS (SELECT FROM final_sites CROSS JOIN LATERAL unnest(
+                CASE WHEN port IS NULL THEN ARRAY[80,443] ELSE ARRAY[port] END
+            ) AS listener(physical_port) GROUP BY physical_port HAVING count(DISTINCT
+                coalesce(protocol, CASE physical_port WHEN 80 THEN 'http' ELSE 'https' END)) > 1) THEN 'protocol'
             WHEN EXISTS (SELECT FROM hosts GROUP BY port,host HAVING count(*) > 1) THEN 'domain'
             WHEN EXISTS (SELECT FROM labels l CROSS JOIN LATERAL generate_series(2,cardinality(parts)) pos
                          JOIN hosts w ON true WHERE w.port = l.port AND w.id <> l.id

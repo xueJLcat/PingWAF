@@ -122,6 +122,7 @@ mod m20240101_000113_page_integrity;
 mod m20240101_000114_protection_reports;
 mod m20240101_000115_dynamic_pages;
 mod m20240101_000116_dynamic_review;
+mod m20240101_000117_listener_tls;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -261,6 +262,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000114_protection_reports::Migration),
             Box::new(m20240101_000115_dynamic_pages::Migration),
             Box::new(m20240101_000116_dynamic_review::Migration),
+            Box::new(m20240101_000117_listener_tls::Migration),
         ]
     }
 }

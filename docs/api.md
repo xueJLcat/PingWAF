@@ -6566,3 +6566,9 @@ The control plane's own access log has its own window,
 `access_log_retention_days` on `GET/PUT /settings/api-protection` (default
 `30` days). The scheduled sweep enforces it; an ad-hoc `DELETE /logs/purge`
 without `site_id` trims it with the same `older_than_days` as the site logs.
+
+### Managed ingress and configuration restore
+
+Site writes and restore previews reserve the actual dashboard port. A legacy site with omitted listener fields claims HTTP 80 and HTTPS 443. Static and redirect handlers may select individual standard ports. A restore preview checks host conflicts on those physical ports and requires each referenced ZIP release to exist for the same site. Configuration JSON references the release by digest. Use the deployment database backup to recover the release data on another installation.
+
+Additional explicit HTTP listeners follow the same forced-HTTPS and overlapping-host HSTS checks as the explicit primary HTTP listener. Migration 000117 checks existing configurations and reports the affected site UUID if a conflict prevents upgrade.

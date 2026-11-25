@@ -405,20 +405,18 @@ impl IngressFields {
         self.resolve_for_site(current, is_admin, admin_port, current.is_some_and(|s| s.site_handler.is_some()))
     }
 
-    fn resolve_for_site(&self, current: Option<&site::Model>, is_admin: bool, admin_port: u16, terminal: bool) -> Result<(Option<i32>, Option<String>), ApiError> {
+    pub(crate) fn resolve_for_site(&self, current: Option<&site::Model>, is_admin: bool, admin_port: u16, terminal: bool) -> Result<(Option<i32>, Option<String>), ApiError> {
         let invalid = |reason: &str| {
             ApiError::BadRequest(reason.to_owned())
                 .with_code("site.ingress_invalid")
         };
+        let retained = self.ingress_port.is_none() && self.ingress_protocol.is_none();
         let port = match (&self.ingress_port, &self.ingress_protocol) {
-            (None, None) => return Ok((current.and_then(|s| s.ingress_port), current.and_then(|s| s.ingress_protocol.clone()))),
+            (None, None) => current.and_then(|s| s.ingress_port.zip(s.ingress_protocol.clone())),
             (Some(None), Some(None)) => None,
             (Some(Some(port)), Some(Some(protocol))) => {
                 let value = port.as_u64().filter(|p| (1..=65535).contains(p) && (terminal || !matches!(p, 80 | 443)))
                     .ok_or_else(|| invalid("invalid primary ingress port"))?;
-                if value == u64::from(admin_port) {
-                    return Err(invalid("the site ingress port is reserved for the management console"));
-                }
                 let protocol = protocol.as_str().filter(|p| matches!(*p, "http" | "https"))
                     .ok_or_else(|| invalid("ingress_protocol must be http or https"))?;
                 if (value == 80 && protocol != "http") || (value == 443 && protocol != "https") {
@@ -428,6 +426,16 @@ impl IngressFields {
             }
             _ => return Err(invalid("ingress_port and ingress_protocol must both be supplied, both null, or both omitted")),
         };
+        let reserved = match &port {
+            Some((primary, _)) => *primary == i32::from(admin_port),
+            None => matches!(admin_port, 80 | 443),
+        };
+        if reserved {
+            return Err(invalid("the site ingress port is reserved for the management console"));
+        }
+        if retained {
+            return Ok(port.unzip());
+        }
         if !is_admin
             && (port.is_some()
                 || current.is_some_and(|s| s.ingress_port.is_some()))
