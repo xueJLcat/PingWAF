@@ -552,8 +552,6 @@ export function DashboardPage() {
         description={t('pages.dashboard.description')}
         actions={
           <div className="flex items-center gap-2">
-            <Link className="text-sm underline" to="/reports">防护报告</Link>
-            <Link className="text-sm underline" to="/live-protection">实时大屏</Link>
             <span className="hidden items-center gap-1.5 text-xs text-fg-subtle sm:inline-flex">
               <Clock weight="duotone" className="h-3.5 w-3.5" />
               {t('pages.dashboard.autoRefresh')}

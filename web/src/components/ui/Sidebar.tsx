@@ -55,8 +55,6 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
       labelKey: 'nav.group.overview',
       items: [
         { to: '/dashboard', labelKey: 'nav.dashboard', icon: House },
-        { to: '/reports', labelKey: 'nav.protectionReports', icon: ChartLine },
-        { to: '/live-protection', labelKey: 'nav.liveProtection', icon: Desktop },
       ],
     },
     {
