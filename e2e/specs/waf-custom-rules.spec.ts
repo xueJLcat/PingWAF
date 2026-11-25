@@ -416,7 +416,12 @@ test.describe('WAF custom rules', () => {
         page.getByRole('row').filter({ hasText: editedName }),
       ).toHaveCount(0, { timeout: 30_000 })
     } finally {
-      await deleteSiteIfPresent(page, app.adminUrl, domain)
+      const cleanupPage = await page.context().newPage()
+      try {
+        await deleteSiteIfPresent(cleanupPage, app.adminUrl, domain)
+      } finally {
+        await cleanupPage.close()
+      }
     }
   })
 })

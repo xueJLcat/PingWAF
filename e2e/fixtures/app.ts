@@ -86,10 +86,15 @@ async function waitForSite(page: Page, domain: string, timeout = 30_000) {
   await expect
     .poll(
       async () => {
-        const response = await page.goto(`http://${domain}/?e2e-ready=1`, {
-          waitUntil: 'domcontentloaded',
-        })
-        return response?.status() ?? 0
+        try {
+          const response = await page.goto(`http://${domain}/?e2e-ready=1`, {
+            waitUntil: 'domcontentloaded',
+          })
+          return response?.status() ?? 0
+        } catch (error) {
+          if (error instanceof Error && /net::ERR_(CONNECTION_REFUSED|CONNECTION_RESET|EMPTY_RESPONSE)\b/.test(error.message)) return 0
+          throw error
+        }
       },
       { timeout, intervals: [1_000, 2_000, 5_000] },
     )
