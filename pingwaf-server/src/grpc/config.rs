@@ -96,15 +96,16 @@ pub fn site_status_proto(status: &str) -> i32 {
         site_status::ACTIVE => 0,  // SITE_STATUS_ACTIVE
         site_status::PAUSED => 1,  // SITE_STATUS_PAUSED
         site_status::PENDING => 2, // SITE_STATUS_PENDING
-        _ => 0,
+        _ => 2, // Unknown persisted states await reconciliation.
     }
 }
 
 /// Maps the persisted ACME challenge type onto `pingwaf.AcmeChallengeType`.
-pub fn acme_challenge_proto(challenge: Option<&str>) -> i32 {
+fn acme_challenge_proto(challenge: Option<&str>) -> Option<i32> {
     match challenge {
-        Some(acme_challenge::DNS_01) => 1, // ACME_DNS_01
-        _ => 0,                            // ACME_HTTP_01
+        Some(acme_challenge::DNS_01) => Some(1),
+        Some(acme_challenge::HTTP_01) | None => Some(0),
+        _ => None,
     }
 }
 
@@ -521,6 +522,10 @@ async fn load_error_pages(
         .await
 }
 
+pub(super) async fn unmatched_host_pages(db: &impl ConnectionTrait) -> Result<Vec<CustomErrorPage>, DbErr> {
+    Ok(load_error_pages(db).await?.iter().filter(|p| p.scope == "unmatched_host").map(error_page_to_proto).collect())
+}
+
 /// Turns a stored WAF rule into its protocol representation.
 ///
 /// A seeded row mirroring a managed rule carries its stable `PINGWAF-*` id as
@@ -796,6 +801,7 @@ fn ssl_to_proto(
     let owns_order = row.certificate_id.is_none()
         || selected.is_some_and(|cert| cert.site_id == Some(row.site_id));
     let can_order = owns_order
+        && acme_challenge_type.is_some()
         && (!site.custom_ingress
             || acme_challenge_type
                 == acme_challenge_proto(Some(acme_challenge::DNS_01)));
@@ -847,7 +853,7 @@ fn ssl_to_proto(
         key_pem,
         acme_enabled,
         acme_email,
-        acme_challenge_type,
+        acme_challenge_type: acme_challenge_type.unwrap_or_default(),
         acme_dns_provider,
         acme_dns_config: acme_dns_config.into_iter().collect(),
         min_tls_version: row.min_tls_version.clone(),
@@ -2316,7 +2322,7 @@ pub(super) async fn assemble_managed_config(
         ));
         sites.push(envelope);
     }
-    Ok(ManagedSiteConfig { sites })
+    Ok(ManagedSiteConfig { sites, listeners: None })
 }
 
 #[cfg(test)]
@@ -2338,9 +2344,11 @@ mod tests {
         assert_eq!(site_status_proto(site_status::ACTIVE), 0);
         assert_eq!(site_status_proto(site_status::PAUSED), 1);
         assert_eq!(site_status_proto(site_status::PENDING), 2);
-        assert_eq!(acme_challenge_proto(Some(acme_challenge::DNS_01)), 1);
-        assert_eq!(acme_challenge_proto(Some(acme_challenge::HTTP_01)), 0);
-        assert_eq!(acme_challenge_proto(None), 0);
+        assert_eq!(site_status_proto("unknown"), 2);
+        assert_eq!(acme_challenge_proto(Some(acme_challenge::DNS_01)), Some(1));
+        assert_eq!(acme_challenge_proto(Some(acme_challenge::HTTP_01)), Some(0));
+        assert_eq!(acme_challenge_proto(None), Some(0));
+        assert_eq!(acme_challenge_proto(Some("unknown")), None);
     }
 
     #[test]

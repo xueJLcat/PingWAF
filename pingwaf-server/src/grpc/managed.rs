@@ -30,10 +30,11 @@ pub(super) async fn build_snapshot(
     supports_site_archives: bool,
     supports_page_integrity: bool,
     supports_dynamic_pages: bool,
+    supports_panel_listeners: bool,
 ) -> Result<ManagedSnapshot, Status> {
     const MAX_ATTEMPTS: usize = 3;
     for _ in 0..MAX_ATTEMPTS {
-        match build_once(db, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity, supports_dynamic_pages).await {
+        match build_once(db, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity, supports_dynamic_pages, supports_panel_listeners).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(BuildError::Forbidden) => {
                 return Err(Status::permission_denied(
@@ -47,6 +48,7 @@ pub(super) async fn build_snapshot(
                     "configuration exceeds snapshot limit",
                 ));
             },
+            Err(BuildError::ListenerPolicy(reason)) => return Err(Status::failed_precondition(reason)),
             Err(BuildError::Storage(err)) => {
                 tracing::warn!(%agent_id, error = %err, "managed snapshot unavailable");
                 return Err(Status::internal("configuration unavailable"));
@@ -211,6 +213,7 @@ fn status_for_scope<T>(
 
 #[derive(Debug)]
 enum BuildError {
+    ListenerPolicy(String),
     Forbidden,
     TooLarge,
     Storage(DbErr),
@@ -242,11 +245,12 @@ async fn build_once(
     supports_site_archives: bool,
     supports_page_integrity: bool,
     supports_dynamic_pages: bool,
+    supports_panel_listeners: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     let tx = db
         .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
         .await?;
-    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity, supports_dynamic_pages).await?;
+    let snapshot = build_in_view(&tx, agent_id, session_id, supports_site_handlers, supports_site_archives, supports_page_integrity, supports_dynamic_pages, supports_panel_listeners).await?;
     tx.commit().await?;
     Ok(snapshot)
 }
@@ -259,6 +263,7 @@ async fn build_in_view(
     supports_site_archives: bool,
     supports_page_integrity: bool,
     supports_dynamic_pages: bool,
+    supports_panel_listeners: bool,
 ) -> Result<ManagedSnapshot, BuildError> {
     require_session(tx, agent_id, session_id).await?;
     let (agent, owner_id) = authorize(tx, agent_id).await?;
@@ -268,6 +273,17 @@ async fn build_in_view(
     let mut config = assemble_managed_config(tx, &sites).await?;
     if !supports_dynamic_pages { config.sites.retain(|s| s.protected_pages.iter().all(|r| r.dynamic_stage == "off" || r.dynamic_stage.is_empty())); }
     if !supports_page_integrity { config.sites.retain(|site| site.protected_pages.is_empty()); }
+    if supports_panel_listeners {
+        let mut listeners = pingwaf_proto::PanelListeners::for_sites(&config.sites);
+        let mut policy = crate::listener_policy::read(tx, agent_id).await?;
+        listeners.policy_revision = policy.revision;
+        if !listeners.endpoints.is_empty() {
+            policy.normalize().map_err(BuildError::ListenerPolicy)?;
+            policy.apply(&mut listeners).map_err(BuildError::ListenerPolicy)?;
+        }
+        listeners.unmatched_pages = super::config::unmatched_host_pages(tx).await?;
+        config.listeners = Some(listeners);
+    }
     if config.encoded_len() > pingwaf_proto::MAX_MANAGED_CONFIG_BYTES {
         return Err(BuildError::TooLarge);
     }
@@ -353,14 +369,18 @@ pub(crate) async fn check_agent_ingress(
         .ok_or_else(|| unavailable("agent has no current managed session"))?;
     let inventory = agents.session_ingress(agent_id, session).await
         .ok_or_else(|| unavailable("node listener inventory is unavailable"))?;
+    if inventory.panel.is_none() || !inventory.dynamic_bind {
+        return Err(unavailable("upgrade this node to support panel-managed listeners"));
+    }
+    let slots = available_listener_slots(tx, agent_id, &inventory).await?;
     let usable = match inventory.listeners.iter().find(|entry| entry.port as i32 == port) {
         Some(entry) => entry.state() == pingwaf_proto::IngressBindState::Bound
             && matches!((entry.protocol(), protocol),
                 (pingwaf_proto::IngressProtocol::Http, "http") |
                 (pingwaf_proto::IngressProtocol::Https, "https")),
-        None => inventory.dynamic_bind && inventory.listeners.len() < pingwaf_proto::MAX_INGRESS_LISTENERS,
+        None => slots > 0,
     };
-    if !usable || port == i32::from(agents.admin_port) {
+    if !usable || agents.reserved_ports.contains(&(port as u16)) {
         return Err(unavailable(
             "agent has no recent bound listener for the requested port and protocol",
         ));
@@ -376,6 +396,8 @@ pub(crate) struct IngressAgentOption {
     id: Uuid,
     name: String,
     dynamic_bind: bool,
+    available_slots: usize,
+    unavailable_ports: Vec<u32>,
     listeners: Vec<(i32, &'static str)>,
 }
 
@@ -416,6 +438,13 @@ pub(crate) async fn check_agent_site(
     Ok(())
 }
 
+async fn available_listener_slots(db: &impl ConnectionTrait, id: Uuid, inventory: &pingwaf_proto::IngressListeners) -> Result<usize, DbErr> {
+    let Some(panel) = inventory.panel.as_ref().filter(|_| inventory.dynamic_bind) else { return Ok(0) };
+    let policy = crate::listener_policy::read(db, id).await?;
+    let addresses = policy.addresses.as_ref().map_or(0, Vec::len);
+    Ok(pingwaf_proto::MAX_INGRESS_LISTENERS.saturating_sub(panel.sockets.len()).checked_div(addresses).unwrap_or(0))
+}
+
 pub(crate) async fn ingress_agent_options(
     db: &impl ConnectionTrait,
     registry: &super::AgentRegistry,
@@ -426,9 +455,24 @@ pub(crate) async fn ingress_agent_options(
         let Some(session) = current_session(db, id).await? else {
             continue;
         };
-        let listeners = registry.bound_ingresses(id, session).await;
-        let inventory = registry.session_ingress(id, session).await.unwrap_or_default();
-        let dynamic_bind = inventory.dynamic_bind;
+        let Some(inventory) = registry.session_ingress(id, session).await else { continue };
+        if inventory.panel.is_none() || !inventory.dynamic_bind { continue; }
+        let available_slots = available_listener_slots(db, id, &inventory).await?;
+        let mut listeners = Vec::new();
+        let mut unavailable_ports = Vec::new();
+        for entry in &inventory.listeners {
+            if entry.state() != pingwaf_proto::IngressBindState::Bound || registry.reserved_ports.contains(&(entry.port as u16)) {
+                unavailable_ports.push(entry.port);
+            } else {
+                let scheme = match entry.protocol() {
+                    pingwaf_proto::IngressProtocol::Http => "http",
+                    pingwaf_proto::IngressProtocol::Https => "https",
+                    _ => continue,
+                };
+                listeners.push((entry.port as i32, scheme));
+            }
+        }
+        let dynamic_bind = inventory.panel.is_some() && inventory.dynamic_bind;
         if listeners.is_empty() && !dynamic_bind {
             continue;
         }
@@ -443,6 +487,8 @@ pub(crate) async fn ingress_agent_options(
                     id,
                     name: agent.display_name.unwrap_or(agent.hostname),
                     dynamic_bind,
+                    available_slots,
+                    unavailable_ports,
                     listeners,
                 });
             },
@@ -480,11 +526,7 @@ pub(crate) async fn site_deployment(
         desired_revision: None,
         nodes: Vec::new(),
     };
-    let (Some(port), Some(protocol)) =
-        (model.ingress_port, model.ingress_protocol.as_deref())
-    else {
-        return Ok(result);
-    };
+    let (port, protocol) = model.ingress_port.zip(model.ingress_protocol.as_deref()).unwrap_or((80,"http"));
     if model.status == site_status::ACTIVE {
         let bundle =
             assemble_managed_config(tx, std::slice::from_ref(model)).await?;
@@ -492,16 +534,14 @@ pub(crate) async fn site_deployment(
             bundle.sites.into_iter().next().map(|s| s.site_revision);
     }
     let epoch = authority_epoch(tx).await?;
-    let assignments = agent_sites::Entity::find()
-        .filter(agent_sites::Column::SiteId.eq(model.id))
-        .order_by_asc(agent_sites::Column::AgentId)
-        .all(tx)
-        .await?;
+    let assignments = tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1 ORDER BY agent_id",
+        [model.id.into()])).await?;
     for row in assignments {
-        let id = row.agent_id;
+        let id: Uuid = row.try_get("", "agent_id")?;
         let agent = match authorize(tx, id).await {
             Ok((agent, owner))
-                if owner == model.user_id && agent.site_scope == "selected" =>
+                if owner == model.user_id =>
             {
                 agent
             },
@@ -760,6 +800,7 @@ pub(super) async fn check_postgres(
                 supports_site_archives: false,
                 supports_page_integrity: false,
                 supports_dynamic_pages: false,
+                supports_panel_listeners: false,
                 agent_token: token,
             }))
             .await
@@ -928,7 +969,8 @@ pub(super) async fn check_postgres(
             .code(),
         "site.ingress_unavailable"
     );
-    let bound = pingwaf_proto::IngressListeners {
+    let mut bound = pingwaf_proto::IngressListeners {
+        panel: None,
         supports_site_handlers: false,
                 supports_site_archives: false,
         static_directories: Default::default(),
@@ -947,6 +989,18 @@ pub(super) async fn check_postgres(
             .unwrap()
             .is_empty()
     );
+    registry.record_ingress(id, stream, Some(&bound)).await;
+    assert!(ingress_agent_options(&tx, &registry, custom.user_id).await.unwrap().is_empty());
+    assert!(check_site_ingress(&tx, &registry, custom).await.is_err());
+    bound.dynamic_bind = true;
+    bound.panel = Some(pingwaf_proto::PanelListenerReport {
+        desired_generation: 1,
+        applied_generation: 1,
+        policy_revision: 0,
+        sockets: vec![pingwaf_proto::PanelSocketStatus {
+            address: "127.0.0.1".into(), listener: Some(bound.listeners[0]), error: String::new(),
+        }],
+    });
     registry.record_ingress(id, stream, Some(&bound)).await;
     let options = ingress_agent_options(&tx, &registry, custom.user_id)
         .await
@@ -1068,7 +1122,7 @@ pub(super) async fn check_postgres(
     )
     .await;
     let Err(BuildError::Storage(stale)) =
-        build_in_view(&ready, id, session, false, false, false, false).await
+        build_in_view(&ready, id, session, false, false, false, false, false).await
     else {
         panic!("a stale view must not get a generation after newer content");
     };

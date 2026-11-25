@@ -318,6 +318,10 @@ impl HttpResponse {
     pub async fn send(self, session: &mut Session) -> pingora::Result<usize> {
         // First, build the response header.
         let header = self.new_response_header()?;
+        if session.req_header().method == http::Method::HEAD {
+            session.write_response_header(Box::new(header), true).await?;
+            return Ok(0);
+        }
         let size = self.body.len();
         // Write the header to the session.
         session

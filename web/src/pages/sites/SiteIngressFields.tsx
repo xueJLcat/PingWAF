@@ -5,6 +5,8 @@ import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Plus, Trash } from '@phosphor-icons/react'
 import { Button } from '@/components/ui/Button'
+import { Link } from 'react-router-dom'
+import { useAuthStore } from '@/stores/authStore'
 
 interface Props {
   value: IngressDraft
@@ -19,13 +21,22 @@ interface Props {
 
 export function SiteIngressFields({ value, onChange, inventory, loadError, clone, canPause, terminal, archive }: Props) {
   const { t } = useTranslation()
+  const admin = useAuthStore(s => s.user?.role === 'admin')
   const rows = value.listener ? [value.listener, ...(value.additional ?? [])] : ['http:80', 'https:443']
   const supports = (node: NonNullable<Props['inventory']>['agents'][number]) => (!terminal || node.supports_site_handlers) && (!archive || node.supports_site_archives)
-  const candidates = (rows: string[]) => (inventory?.agents ?? []).filter(agent => supports(agent) && rows.every(listener => {
-    const [scheme, port] = listener.split(':')
-    const bound = agent.listeners.find(([number]) => number === Number(port))
-    return bound ? bound[1] === scheme : agent.dynamic_bind
-  }))
+  const candidates = (rows: string[]) => (inventory?.agents ?? []).filter(agent => {
+    if (!supports(agent)) return false
+    const newPorts = new Set<number>()
+    for (const listener of rows) {
+      const [scheme, rawPort] = listener.split(':')
+      const port = Number(rawPort)
+      if (!port || port === inventory?.admin_port || inventory?.reserved_ports?.includes(port) || agent.unavailable_ports?.includes(port)) return false
+      const bound = agent.listeners.find(([number]) => number === port)
+      if (bound && bound[1] !== scheme) return false
+      if (!bound) newPorts.add(port)
+    }
+    return newPorts.size === 0 || (agent.dynamic_bind && newPorts.size <= (agent.available_slots ?? 0))
+  })
   const selected = value.agents ?? inventory?.assigned_agent_ids ?? []
   const eligible = candidates(rows)
   function changeRows(next: string[]) {
@@ -76,6 +87,8 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
       {unavailable.map(id => <label key={id} className="pw-touch-check flex items-center gap-2 break-all">
         <input type="checkbox" checked onChange={() => toggle(id)} />{inventory?.agents.find(node => node.id === id)?.name ?? id} · {t('pages.sites.ingressUnavailable')}
       </label>)}
+      {admin && selected.map(id => <Link key={id} to={'/agents?listeners=' + encodeURIComponent(id)} target="_blank" rel="noopener noreferrer"
+        className="block text-sm underline">{inventory?.agents.find(a => a.id === id)?.name ?? id} · 维护监听地址</Link>)}
       {canPause && <label className="pw-touch-check flex items-center gap-2">
         <input type="checkbox" checked={value.paused} onChange={event => onChange({ ...value, paused: event.target.checked })} />
         {t('pages.sites.ingressStage')}

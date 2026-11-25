@@ -39,7 +39,6 @@ use pingap_certificate::CertificateProvider;
 use pingap_certificate::{GlobalCertificate, TlsSettingParams};
 use pingap_config::ConfigManager;
 use pingap_core::BackgroundTask;
-#[cfg(feature = "tracing")]
 use pingap_core::HttpResponse;
 use pingap_core::LocationInstance;
 use pingap_core::PluginProvider;
@@ -469,7 +468,13 @@ pub trait ManagedSiteSelector: Send + Sync {
         &self,
         session: &Session,
         hostname: &str,
-    ) -> Option<ManagedRequestSite>;
+    ) -> Result<Option<ManagedRequestSite>, ManagedRouteMiss>;
+}
+
+pub enum ManagedRouteMiss {
+    Unmatched(Option<HttpResponse>),
+    Misdirected,
+    Unavailable,
 }
 
 #[derive(Clone)]
@@ -485,6 +490,9 @@ pub struct ManagedRequestSite {
 
 #[derive(Clone)]
 struct ManagedUpstreams(Arc<dyn UpstreamProvider>);
+
+#[derive(Clone)]
+struct AuthorizedDefaultSite;
 
 fn parse_managed_authority(value: &str) -> Option<(String, Option<u16>, bool)> {
     let authority: http::uri::Authority = value.parse().ok()?;
@@ -1039,15 +1047,30 @@ impl Server {
                         "invalid or ambiguous request authority",
                     )
                 })?;
-                let site = Self::select_managed_site(
-                    selector.as_ref(),
-                    session,
-                    ctx,
-                    &authority.hostname,
-                )?;
+                let site = match selector.select(session, &authority.hostname) {
+                    Ok(site) => site,
+                    Err(ManagedRouteMiss::Unmatched(Some(response))) => {
+                        ctx.state.status = Some(response.status);
+                        response.send(session).await?;
+                        return Ok(());
+                    }
+                    Err(ManagedRouteMiss::Unmatched(None)) => return Err(new_internal_error(404, "no site for this host")),
+                    Err(ManagedRouteMiss::Misdirected) => return Err(new_internal_error(421, "connection belongs to another site")),
+                    Err(ManagedRouteMiss::Unavailable) => return Err(new_internal_error(503, "site authorization unavailable")),
+                };
                 let host = authority.hostname.clone();
                 session.req_header_mut().extensions_mut().insert(authority);
-                (host, Some(site.route.clone()), Some(site))
+                if let Some(site) = site {
+                    let site = Self::select_managed_site(site, session, ctx)?;
+                    (host, Some(site.route.clone()), Some(site))
+                } else {
+                    session.req_header_mut().extensions_mut().insert(AuthorizedDefaultSite);
+                    if let Some(result) = self.handle_acme_challenge(session, ctx).await {
+                        result?;
+                        return Ok(());
+                    }
+                    (host, self.server_locations_provider.get(&self.name), None)
+                }
             } else {
                 (
                     legacy_host.flatten().unwrap_or_default(),
@@ -1182,14 +1205,10 @@ impl Server {
     }
 
     fn select_managed_site(
-        selector: &dyn ManagedSiteSelector,
+        site: ManagedRequestSite,
         session: &mut Session,
         ctx: &mut Ctx,
-        host: &str,
     ) -> pingora::Result<ManagedRequestSite> {
-        let site = selector.select(session, host).ok_or_else(|| {
-            new_internal_error(421, "no authorized site for this authority")
-        })?;
         // Disabled or missing site trust means socket peer, not the global
         // heuristic for forwarding headers from a private address.
         ctx.conn.client_ip = Some(
@@ -2226,7 +2245,8 @@ impl ProxyHttp for Server {
                 format!("No available upstream for {}", ctx.upstream.location),
             )
         };
-        let upstreams = if self.managed_selector.is_some() {
+        let upstreams = if self.managed_selector.is_some() &&
+            session.req_header().extensions.get::<AuthorizedDefaultSite>().is_none() {
             session
                 .req_header()
                 .extensions
@@ -2873,6 +2893,7 @@ impl ProxyHttp for Server {
             .get(http::header::USER_AGENT)
             .and_then(|v| v.to_str().ok());
         let method = req_header.method.as_str();
+        let head_only = method == "HEAD";
         let host = pingap_core::get_host(req_header).unwrap_or_default();
         let path = req_header.uri.path();
         // The one line per failure; pingora's own is suppressed, see
@@ -2920,6 +2941,7 @@ impl ProxyHttp for Server {
         }
 
         let mut resp = error_response_header(code);
+        let _ = resp.insert_header(http::header::CACHE_CONTROL, "private, no-store");
         // The edge generated this error itself (upstream unreachable, …) —
         // stamp it like every other edge response.
         let _ = resp.insert_header("server", "pingwaf");
@@ -2931,9 +2953,14 @@ impl ProxyHttp for Server {
         // The shared error page is used for 4xx and 5xx alike (404, 408, 413,
         // 429, 5xx), so it renders the status code it is answering with.
         let status = code.to_string();
+        let message = if matches!(e.etype(), pingora::ErrorType::HTTPStatus(_)) {
+            StatusCode::from_u16(code).ok().and_then(|s| s.canonical_reason()).unwrap_or("Request failed")
+        } else {
+            public_error_message(error_type)
+        };
         let content = self.error_template.render(
             pingap_util::get_pkg_version(),
-            public_error_message(error_type),
+            message,
             error_type,
             ctx.state.request_id.as_deref().unwrap_or(""),
             &status,
@@ -2972,7 +2999,7 @@ impl ProxyHttp for Server {
                 );
             });
 
-        let _ = server_session.write_response_body(buf, true).await;
+        let _ = server_session.write_response_body(if head_only { Bytes::new() } else { buf }, true).await;
         FailToProxy {
             error_code: code,
             can_reuse_downstream: false,
@@ -3477,8 +3504,8 @@ value = 'proxy_set_headers = ["name:value"]'
                 &self,
                 _session: &Session,
                 hostname: &str,
-            ) -> Option<ManagedRequestSite> {
-                (hostname == "shared.example").then(|| self.0.clone())
+            ) -> Result<Option<ManagedRequestSite>, ManagedRouteMiss> {
+                (hostname == "shared.example").then(|| Some(self.0.clone())).ok_or(ManagedRouteMiss::Misdirected)
             }
         }
         let server = new_server();
@@ -3536,8 +3563,8 @@ value = 'proxy_set_headers = ["name:value"]'
                 &self,
                 _: &Session,
                 host: &str,
-            ) -> Option<ManagedRequestSite> {
-                (host == "shared.example").then(|| self.0.clone())
+            ) -> Result<Option<ManagedRequestSite>, ManagedRouteMiss> {
+                (host == "shared.example").then(|| Some(self.0.clone())).ok_or(ManagedRouteMiss::Misdirected)
             }
         }
 

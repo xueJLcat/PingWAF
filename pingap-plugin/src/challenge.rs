@@ -46,7 +46,7 @@ use pingwaf_agent::cache::{
     ChallengeLevel as CacheChallengeLevel, SiteRules,
 };
 use pingwaf_challenge::js_challenge::page::{
-    ChallengePageParams, REQUIRED_DOM_IDS, challenge_scripts,
+    ChallengePageParams,
     generate_interactive_challenge_html, generate_js_challenge_html,
     generate_managed_challenge_html,
 };
@@ -62,7 +62,9 @@ use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tera::{Context, Tera};
+use tera::Tera;
+#[cfg(test)]
+use pingwaf_challenge::js_challenge::page::REQUIRED_DOM_IDS;
 use tracing::{debug, warn};
 
 use crate::host_cache::{HostCacheSweep, touch};
@@ -325,11 +327,6 @@ fn challenge_page_template(rules: &SiteRules) -> Option<String> {
         .map(|page| page.body_template.clone())
 }
 
-fn has_dom_id(html: &str, id: &str) -> bool {
-    html.contains(&format!("id=\"{id}\""))
-        || html.contains(&format!("id='{id}'"))
-}
-
 /// The control-plane template is global and changes rarely; compiling Tera on
 /// every challenge would put a template parse on the hot path. Keep the last
 /// compiled template, keyed by its source, and rebuild only when it changes.
@@ -360,44 +357,9 @@ fn render_challenge_template(
     template: &str,
     params: &ChallengePageParams,
 ) -> Option<String> {
-    if template.to_ascii_lowercase().contains("<script") {
-        warn!("challenge template contains <script>; using the built-in page");
-        return None;
-    }
-    let scripts = challenge_scripts(params);
     let tera = challenge_tera(template)?;
-    let mut context = Context::new();
-    context.insert("brand_name", &params.brand_name);
-    context.insert("request_id", &params.request_id);
-    context.insert("difficulty", &params.difficulty);
-    context.insert("verify_endpoint", &params.verify_endpoint);
-    context.insert("original_url", &params.original_url);
-    context.insert("challenge_scripts", &scripts);
-    let html = match tera.render("challenge.html", &context) {
-        Ok(html) => html,
-        Err(err) => {
-            warn!(error = %err, "challenge template render failed; using the built-in page");
-            return None;
-        },
-    };
-    // `challenge_scripts` is HTML; Tera escapes it unless the template uses
-    // `| safe`. A page without the compiled script can never pass the check.
-    if !html.contains("<script") || !html.contains("computeProofOfWork") {
-        warn!(
-            "challenge template did not inject the compiled script; use the documented challenge_scripts | safe filter; using the built-in page"
-        );
-        return None;
-    }
-    for id in REQUIRED_DOM_IDS {
-        if !has_dom_id(&html, id) {
-            warn!(
-                id,
-                "challenge template is missing a required DOM id; using the built-in page"
-            );
-            return None;
-        }
-    }
-    Some(html)
+    pingwaf_challenge::templates::render_challenge(&tera, template, params)
+        .map_err(|error| warn!(%error, "invalid challenge template; using built-in page")).ok()
 }
 
 /// Build a 503 challenge response, registering the pending challenge so the

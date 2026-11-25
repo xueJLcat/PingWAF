@@ -278,6 +278,7 @@ pub fn routes() -> Router<AppState> {
         .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
         .route("/agents/{agent_id}/static-roots", get(static_roots).put(update_static_root))
+        .route("/agents/{agent_id}/listener-policy", get(listener_policy).put(update_listener_policy))
         .route("/agents/flush-logs", post(flush_logs))
 }
 
@@ -308,6 +309,65 @@ async fn static_roots(State(state): State<AppState>, current: AuthUser, Path(id)
 
 #[derive(Deserialize)]
 struct DirectoryChange { revision: String, identifier: String, path: Option<String> }
+
+async fn listener_policy(State(state): State<AppState>, current: AuthUser, Path(id): Path<Uuid>)
+    -> Result<Json<serde_json::Value>, ApiError> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    current.require_admin().map_err(ApiError::from)?;
+    load_agent(&state, id, &current).await?;
+    let policy = crate::listener_policy::read(&state.db, id).await?;
+    let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT l.site_id, s.domain, l.port, l.status FROM panel_site_listeners l JOIN sites s ON s.id=l.site_id
+         WHERE l.agent_id=$1 ORDER BY s.domain,l.port", [id.into()])).await?;
+    let mut sites = Vec::new();
+    for row in rows {
+        sites.push(serde_json::json!({"site_id":row.try_get::<Uuid>("","site_id")?, "domain":row.try_get::<String>("","domain")?,
+            "port":row.try_get::<i32>("","port")?, "status":row.try_get::<String>("","status")?}));
+    }
+    let report = state.agents.ingress_listeners(id, std::time::Duration::from_secs(60)).await;
+    let observed = report.as_ref().and_then(|r|r.panel.as_ref()).map(|p| {
+        let sockets: Vec<_> = p.sockets.iter().filter_map(|s| {
+            let entry = s.listener.as_ref()?;
+            Some(serde_json::json!({"address":s.address, "port":entry.port, "protocol":if entry.protocol()==pingwaf_proto::IngressProtocol::Https {"https"} else {"http"},
+                "bound":entry.state()==pingwaf_proto::IngressBindState::Bound, "error":s.error}))
+        }).collect();
+        serde_json::json!({"desired_generation":p.desired_generation,"applied_generation":p.applied_generation,
+            "policy_revision":p.policy_revision,"sockets":sockets})
+    });
+    Ok(Json(serde_json::json!({"policy":policy,"sites":sites,"online":report.is_some(),"observed":observed})))
+}
+
+async fn require_listener_capability(state: &AppState, id: Uuid) -> Result<(),ApiError> {
+    if state.agents.ingress_listeners(id,std::time::Duration::from_secs(60)).await.is_some_and(|r|r.panel.is_none()) {
+        return Err(ApiError::Conflict("节点版本不支持面板下发监听，请先升级节点".into()));
+    }
+    Ok(())
+}
+
+async fn update_listener_policy(State(state): State<AppState>, current: AuthUser, Path(id): Path<Uuid>,
+    Json(mut policy): Json<crate::listener_policy::Policy>) -> Result<Json<crate::listener_policy::Policy>, ApiError> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    current.require_admin().map_err(ApiError::from)?;
+    load_agent(&state, id, &current).await?;
+    require_listener_capability(&state,id).await?;
+    policy.normalize().map_err(ApiError::BadRequest)?;
+    let tx = state.db.begin().await?;
+    let updated = tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE node_listener_policies SET addresses=$2, revision=revision+1, updated_by=$3 WHERE id=$1 AND revision=$4",
+        [id.into(), policy.addresses.clone().into(), current.email.clone().into(), policy.revision.into()])).await?;
+    if updated.rows_affected() != 1 { return Err(ApiError::Conflict("listener policy changed; refresh the node".into())); }
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM node_listener_overrides WHERE agent_id=$1", [id.into()])).await?;
+    for item in &policy.overrides {
+        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO node_listener_overrides(agent_id,site_id,port,addresses) VALUES ($1,$2,$3,$4)",
+            [id.into(), item.site_id.into(), i32::from(item.port).into(), item.addresses.clone().into()])).await?;
+    }
+    let result = crate::listener_policy::read(&tx, id).await?;
+    tx.commit().await?;
+    crate::grpc::notify_all_config_changed(&state, Some(&current.email)).await;
+    Ok(Json(result))
+}
 
 async fn update_static_root(State(state): State<AppState>, current: AuthUser, Path(id): Path<Uuid>,
     Json(change): Json<DirectoryChange>) -> Result<Response, ApiError> {

@@ -8,6 +8,14 @@ use uuid::Uuid;
 
 use super::{Candidate, Lease, Listener, Received, Version};
 
+// The receipt identifies a site by its primary entrance. A default site
+// still requires both HTTP and HTTPS to be bound before it can be applied.
+fn report_ingress(site: &pingwaf_proto::ManagedSite) -> pingwaf_proto::SiteIngress {
+    site.ingress.unwrap_or(pingwaf_proto::SiteIngress {
+        port: 80, protocol: pingwaf_proto::IngressProtocol::Http as i32,
+    })
+}
+
 /// A full, immutable proxy view is published as a unit. A caller must not use
 /// this store to publish a reference to providers that can be reloaded in place.
 pub struct AppliedState<T>(Arc<Mutex<State<T>>>);
@@ -18,11 +26,13 @@ struct State<T> {
     receipt: Option<(Lease, pingwaf_proto::ManagedApplyReport)>,
     active: Option<Arc<Applied<T>>>,
     listeners: HashMap<Listener, Forwarding<T>>,
+    sites: HashMap<(Listener, Uuid), Forwarding<T>>,
 }
 
 struct Applied<T> {
     policy: Candidate,
     view: T,
+    site_failures: HashMap<Uuid, &'static str>,
     authorization: watch::Sender<Authorization>,
 }
 
@@ -66,12 +76,16 @@ impl<T> Default for AppliedState<T> {
             receipt: None,
             active: None,
             listeners: HashMap::new(),
+            sites: HashMap::new(),
         })))
     }
 }
 
 impl<T> State<T> {
     fn revoke(&mut self) {
+        for (_, site) in self.sites.drain() {
+            site.1.send_modify(|a| a.revoked = true);
+        }
         for (_, scoped) in self.listeners.drain() {
             scoped.1.send_modify(|a| a.revoked = true);
         }
@@ -156,13 +170,26 @@ impl<T> AppliedState<T> {
             state.revoke();
             return Err(error);
         }
+        let State { sites, listeners, .. } = &mut *state;
+        sites.retain(|(listener, id), grant| {
+            let valid = listeners.contains_key(listener)
+                && grant.0.policy.same_site_transport(&received.candidate, *listener, *id)
+                && grant.is_live() && received.lease.permits(version);
+            if !valid { grant.1.send_modify(|a| a.revoked = true); }
+            valid
+        });
         if let Some(active) = state
             .active
             .as_ref()
             .filter(|a| a.policy.same_policy(&received.candidate))
         {
             match renew_authorization(&active.authorization, &received.lease) {
-                Ok(true) => return Ok(None),
+                Ok(true) => {
+                    for grant in state.sites.values() {
+                        renew_authorization(&grant.1, &received.lease)?;
+                    }
+                    return Ok(None);
+                },
                 Ok(false) => {},
                 Err(error) => {
                     state.revoke();
@@ -185,7 +212,7 @@ impl<T> AppliedState<T> {
                     failure_code: String::new(),
                         site_id: id.to_string(),
                         site_revision: site.site_revision.clone(),
-                        ingress: Some(site.ingress.clone()?),
+                        ingress: Some(report_ingress(site)),
                     })
                 })
                 .collect();
@@ -217,6 +244,10 @@ impl<T> AppliedState<T> {
     /// A timer must be armed before publishing; a timer error is fail-closed.
     /// Call on the data-plane runtime, not from a blocking compiler thread.
     pub fn publish(&self, pending: Pending, view: T) -> anyhow::Result<bool> {
+        self.publish_with_failures(pending, view, HashMap::new())
+    }
+
+    pub fn publish_with_failures(&self, pending: Pending, view: T, site_failures: HashMap<Uuid, &'static str>) -> anyhow::Result<bool> {
         let version = pending.candidate().version();
         let lease = pending.received.lease;
         let mut state = self.lock();
@@ -230,13 +261,13 @@ impl<T> AppliedState<T> {
             authorization: new_authorization(&lease)?,
             policy: pending.received.candidate,
             view,
+            site_failures,
         });
         let mut listeners = HashMap::new();
         for listener in active
             .policy
             .routes
             .keys()
-            .filter(|l| **l != Listener::Default)
         {
             let auth = match state.listeners.get(listener) {
                 Some(scoped) if scoped.0.policy.same_transport(&active.policy, *listener)
@@ -251,6 +282,19 @@ impl<T> AppliedState<T> {
             listeners.insert(*listener, Forwarding(active.clone(), auth, Arc::downgrade(&self.0)));
         }
         state.receipt = None;
+        let mut sites = HashMap::new();
+        for (listener, names) in &active.policy.routes {
+            for id in names.values() {
+                let key = (*listener, *id);
+                if sites.contains_key(&key) { continue; }
+                let auth = match state.sites.get(&key) {
+                    Some(old) if renew_authorization(&old.1, &lease)? => old.1.clone(),
+                    _ => new_authorization(&lease)?,
+                };
+                sites.insert(key, Forwarding(active.clone(), auth, Arc::downgrade(&self.0)));
+            }
+        }
+        state.sites = sites;
         state.listeners = listeners;
         state.active = Some(active);
         Ok(true)
@@ -260,6 +304,7 @@ impl<T> AppliedState<T> {
     pub fn application_report(
         &self,
         bound: &pingwaf_proto::IngressListeners,
+        defaults_ready: bool,
     ) -> Option<pingwaf_proto::ManagedApplyReport> {
         let state = self.lock();
         if let Some((lease, receipt)) = &state.receipt {
@@ -283,9 +328,10 @@ impl<T> AppliedState<T> {
                         .listeners
                         .get(&listener)
                         .is_some_and(|current| current.is_live() &&
-                            Uuid::parse_str(&row.site_id).ok().and_then(|id| current.0.policy.sites().get(&id))
-                                .is_some_and(|site| site.site_revision == row.site_revision &&
+                            Uuid::parse_str(&row.site_id).ok().filter(|id| !current.0.site_failures.contains_key(id)).and_then(|id| current.0.policy.sites().get(&id))
+                                .is_some_and(|site| site.ingress.is_some() && site.site_revision == row.site_revision &&
                                     site.additional_ingresses.is_empty()))
+                        && bound.panel.as_ref().is_some_and(|p| p.desired_generation == lease.version().generation)
                         && bound.listeners.iter().any(|socket| {
                             socket.port == ingress.port
                                 && socket.protocol == ingress.protocol
@@ -307,22 +353,22 @@ impl<T> AppliedState<T> {
             .sites()
             .iter()
             .filter_map(|(id, site)| {
-                let ingress = site.ingress.as_ref()?;
-                if site.site_revision.is_empty()
-                    || !std::iter::once(ingress).chain(&site.additional_ingresses).all(|entry| bound.listeners.iter().any(|socket| {
-                        socket.port == entry.port
-                            && socket.protocol == entry.protocol
-                            && socket.state()
-                                == pingwaf_proto::IngressBindState::Bound
-                    }))
-                {
-                    return None;
-                }
+                let panel = bound.panel.as_ref()?;
+                let id_text = id.to_string();
+                let mut expected = active.policy.endpoints().iter().filter(|e| e.site_ids.contains(&id_text)).peekable();
+                if active.site_failures.contains_key(id) || site.site_revision.is_empty() || (site.ingress.is_none() && !defaults_ready)
+                    || panel.desired_generation != version.generation || panel.policy_revision != active.policy.policy_revision
+                    || expected.peek().is_none() || !expected.all(|e| {
+                        let Some(ingress) = e.ingress else { return false };
+                        e.addresses.iter().all(|addr| panel.sockets.iter().any(|s| s.address == *addr &&
+                            s.listener.is_some_and(|l| l.port == ingress.port && l.protocol == ingress.protocol &&
+                                l.state() == pingwaf_proto::IngressBindState::Bound)))
+                    }) { return None; }
                 Some(pingwaf_proto::ManagedSiteApplication {
                     failure_code: String::new(),
                     site_id: id.to_string(),
                     site_revision: site.site_revision.clone(),
-                    ingress: Some(ingress.clone()),
+                    ingress: Some(report_ingress(site)),
                 })
             })
             .collect();
@@ -332,14 +378,38 @@ impl<T> AppliedState<T> {
             authority_epoch: version.authority.to_string(),
             generation: version.generation,
             sites,
-            received_sites: Vec::new(),
+            received_sites: active.site_failures.iter().filter_map(|(id, failure)| {
+                let site = active.policy.sites().get(id)?;
+                Some(pingwaf_proto::ManagedSiteApplication {
+                    site_id: id.to_string(), site_revision: site.site_revision.clone(),
+                    ingress: Some(report_ingress(site)), failure_code: (*failure).to_owned(),
+                })
+            }).collect(),
         })
     }
 
-    pub fn live_listeners(&self) -> Vec<Listener> {
-        self.lock().listeners.iter().filter_map(|(key, forwarding)| {
-            forwarding.is_live().then_some(*key)
-        }).collect()
+    pub fn live_endpoints(&self) -> (pingwaf_proto::PanelListenerReport, Vec<(std::net::SocketAddr, pingwaf_proto::IngressProtocol, Listener)>) {
+        let state = self.lock();
+        let mut endpoints = Vec::new();
+        for (listener, forwarding) in &state.listeners {
+            if !forwarding.is_live() { continue; }
+            let policy = &forwarding.0.policy;
+            for endpoint in policy.endpoints().iter().filter(|e| policy.endpoint_applies(e, *listener)) {
+                let ingress = endpoint.ingress.as_ref().expect("validated endpoint");
+                for address in &endpoint.addresses {
+                    let ip = address.parse().expect("validated bind address");
+                    endpoints.push((std::net::SocketAddr::new(ip, ingress.port as u16), ingress.protocol(), *listener));
+                }
+            }
+        }
+        let active = state.active.as_ref().filter(|a| a.authorization.borrow().is_live());
+        let report = pingwaf_proto::PanelListenerReport {
+            desired_generation: state.latest.map_or(0, |v| v.generation),
+            applied_generation: active.map_or(0, |a| a.authorization.borrow().lease.version().generation),
+            policy_revision: active.map_or(-1, |a| a.policy.policy_revision),
+            sockets: Vec::new(),
+        };
+        (report, endpoints)
     }
 
     pub fn forwarding(&self) -> Option<Forwarding<T>> {
@@ -351,6 +421,10 @@ impl<T> AppliedState<T> {
     }
 
     /// The caller must derive this identity from the accepting socket.
+    pub fn scoped_forwarding(&self, listener: Listener) -> Option<Forwarding<T>> {
+        self.lock().listeners.get(&listener).filter(|f| f.is_live()).cloned()
+    }
+
     pub fn forwarding_for(&self, listener: Listener) -> Option<Forwarding<T>> {
         let state = self.lock();
         if let Some(scoped) = state.listeners.get(&listener) {
@@ -424,6 +498,20 @@ impl<T> Drop for AppliedState<T> {
 }
 
 impl<T> Forwarding<T> {
+    /// Resolve the hostname and pin the site's authorization in one critical section.
+    pub fn site_grant(&self, listener: Listener, name: &str) -> Option<(Uuid, Self)> {
+        let shared = self.2.upgrade()?;
+        let state = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let current = state.listeners.get(&listener)?;
+        if !self.is_live() || !(self.1.same_channel(&current.1) || self.1.same_channel(&current.0.authorization)) {
+            return None;
+        }
+        let id = current.0.policy.site_id(listener, name)?;
+        let grant = state.sites.get(&(listener,id))?;
+        grant.is_live().then(|| (id,grant.clone()))
+    }
+
+    pub fn view(&self) -> &T { &self.0.view }
     /// Pick one immutable policy for the request while its transport still
     /// belongs to the same listener. Never reattach an expired connection.
     pub fn request_view(&self, listener: Listener) -> Option<T> where T: Clone {
@@ -500,7 +588,7 @@ mod tests {
             epoch,
             generation,
             seconds,
-            Vec::new(),
+            ManagedSiteConfig::from_sites(Vec::new()).encode_to_vec(),
         )
     }
 
@@ -684,8 +772,7 @@ mod tests {
 
     fn config(id: Uuid, hash: &str, cap: u32) -> Vec<u8> {
         let id = id.to_string();
-        ManagedSiteConfig {
-            sites: vec![ManagedSite {
+        ManagedSiteConfig::from_sites(vec![ManagedSite {
                 site: Some(Site {
                     id: id.clone(),
                     domain: "example.com".into(),
@@ -705,8 +792,7 @@ mod tests {
                     ..Default::default()
                 }),
                 ..Default::default()
-            }],
-        }
+            }])
         .encode_to_vec()
     }
 
@@ -726,6 +812,7 @@ mod tests {
             protocol: pingwaf_proto::IngressProtocol::Http as i32,
         });
         wire.sites[0].site_revision = "ab".repeat(32);
+        wire.listeners = Some(pingwaf_proto::PanelListeners::for_sites(&wire.sites));
         let next = receive_config(
             &mut receiver,
             session,
@@ -735,12 +822,12 @@ mod tests {
             wire.encode_to_vec(),
         );
         let pending = state.prepare(next).unwrap().unwrap();
-        let report = state.application_report(&Default::default()).unwrap();
+        let report = state.application_report(&Default::default(), false).unwrap();
         assert!(report.sites.is_empty());
         assert_eq!(report.received_sites.len(), 1);
         assert_eq!(report.received_sites[0].site_id, id.to_string());
         state.end_session(session);
-        assert!(state.application_report(&Default::default()).is_none());
+        assert!(state.application_report(&Default::default(), false).is_none());
         assert!(!state.publish(pending, ()).unwrap());
     }
 
@@ -769,6 +856,7 @@ mod tests {
             site.site_revision = "ab".repeat(32);
             wire.sites.push(site);
         }
+        wire.listeners = Some(pingwaf_proto::PanelListeners::for_sites(&wire.sites));
         let first = receive_config(
             &mut receiver,
             session,
@@ -791,6 +879,7 @@ mod tests {
         assert!(old_b.is_live());
 
         wire.sites.remove(0);
+        wire.listeners = Some(pingwaf_proto::PanelListeners::for_sites(&wire.sites));
         let second = receive_config(
             &mut receiver,
             session,

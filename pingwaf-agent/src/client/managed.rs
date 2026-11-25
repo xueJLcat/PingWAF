@@ -125,6 +125,7 @@ impl Session<'_> {
                 supports_site_archives: true,
                 supports_page_integrity: true,
                 supports_dynamic_pages: true,
+                supports_panel_listeners: true,
                 agent_token: token.to_string(),
             }),
         )

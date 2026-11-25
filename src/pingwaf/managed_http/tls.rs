@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use pingora::protocols::{ALPN, Ssl, Stream as Transport, l4::stream::Stream};
-use pingwaf_agent::{cache::SslConfig, managed::Listener};
+use pingwaf_agent::cache::SslConfig;
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
@@ -82,15 +82,11 @@ pub(super) async fn read_sni(stream: &mut Stream) -> anyhow::Result<Option<Strin
 }
 
 pub(super) async fn accept(
-    mut stream: Stream,
+    stream: Stream,
     view: &View,
-    listener: Listener,
-) -> anyhow::Result<(Transport, Uuid)> {
-    let sni = read_sni(&mut stream).await?.context("managed HTTPS requires SNI")?;
-    let (id, _) = view
-        .rules
-        .select(listener, &sni)
-        .context("SNI is not assigned to this listener")?;
+    id: Uuid,
+    sni: &str,
+) -> anyhow::Result<Transport> {
     let site = view.tls.get(&id).context("site has no TLS context")?;
     #[cfg(feature = "openssl")]
     let stream =
@@ -112,7 +108,7 @@ pub(super) async fn accept(
         matches!(stream.selected_alpn_proto(), Some(ALPN::H2)) || site.http1,
         "this ingress requires HTTP/2 ALPN"
     );
-    Ok((Box::new(stream), id))
+    Ok(Box::new(stream))
 }
 
 #[cfg(feature = "openssl")]

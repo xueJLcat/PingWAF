@@ -874,6 +874,7 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             .map_err(RestoreError::Ingress)?;
         let extra = fields.additional(None, port, true, agents.admin_port)
             .map_err(RestoreError::Ingress)?;
+        agents.validate_site_ports(port, &extra).map_err(RestoreError::Ingress)?;
         if let (Some(port), Some(protocol)) = (port, protocol.as_deref()) {
             let id = uuid_field(row, "id").ok_or_else(|| {
                 DbErr::Custom("invalid restored site id".into())
@@ -1063,6 +1064,7 @@ async fn prepare_restore_inner<C: ConnectionTrait>(
     if scope == VersionScope::Deployment && schema >= 2 {
         let missing: Vec<_> = tables_for(scope)
             .into_iter()
+            .filter(|spec| schema >= 3 || !matches!(spec.name, "node_listener_policies" | "node_listener_overrides"))
             .filter(|spec| !tables.contains_key(spec.name))
             .map(|spec| spec.name)
             .collect();
@@ -1100,6 +1102,9 @@ async fn prepare_restore_inner<C: ConnectionTrait>(
     let mut columns = HashMap::new();
     let mut warnings = Vec::new();
     let mut skipped_rows = 0usize;
+    if scope == VersionScope::Deployment && schema == 2 {
+        warnings.push("This snapshot predates panel-managed listeners. Existing node address policies are retained.".into());
+    }
 
     for spec in tables_for(scope) {
         let Some(rows) = rows_for(schema, &tables, spec.name)? else {
@@ -1183,6 +1188,14 @@ async fn prepare_restore_inner<C: ConnectionTrait>(
             // rows are skipped and reported, not silently dropped; the
             // historical `allow`+`off` rule state is repaired instead.
             let row_id = json_key(&row, "id").unwrap_or_default();
+            if spec.name == "error_pages" {
+                let scope = row["scope"].as_str().unwrap_or("site");
+                let status = row["status_code"].as_i64().and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| DbErr::Custom(format!("error page {row_id}: invalid status code")))?;
+                crate::api::error_pages::validate_definition(scope, status,
+                    row["content_type"].as_str().unwrap_or("text/html"), row["body_template"].as_str().unwrap_or(""))
+                    .map_err(|e| DbErr::Custom(format!("error page {row_id}: {e}")))?;
+            }
             match sanitise_restored_row(spec.name, &mut row) {
                 RowSanitisation::Keep => {},
                 RowSanitisation::Rewritten(what) => warnings.push(format!(
@@ -1311,7 +1324,7 @@ async fn delete_rows(
     site_id: Option<Uuid>,
 ) -> Result<(), DbErr> {
     let spec = prepared.spec;
-    if spec.name == "sites" {
+    if matches!(spec.name, "sites" | "node_listener_policies") {
         return Ok(());
     }
     if spec.filter == Filter::Singleton && !prepared.rows.is_empty() {
@@ -1426,7 +1439,11 @@ async fn upsert_rows(
         .filter(|column| *column != key)
         .map(|column| {
             let quoted = quote_ident(column);
-            format!("{quoted} = EXCLUDED.{quoted}")
+            if spec.name == "node_listener_policies" && column == "revision" {
+                format!("{quoted} = {table}.{quoted} + 1")
+            } else {
+                format!("{quoted} = EXCLUDED.{quoted}")
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1449,10 +1466,22 @@ pub async fn apply_restore(
     plan: RestorePlan,
 ) -> Result<RestoreReport, DbErr> {
     let site_id = plan.scope.column_value();
+    let policy_nodes: Vec<Uuid> = plan.tables.iter()
+        .filter(|t| t.spec.name == "node_listener_policies")
+        .flat_map(|t| &t.rows).filter_map(|r| uuid_field(r, "id")).collect();
     let mut by_layer = plan.tables.iter().collect::<Vec<_>>();
     by_layer.sort_by_key(|prepared| std::cmp::Reverse(prepared.spec.layer));
     for prepared in by_layer {
-        delete_rows(txn, prepared, site_id).await?;
+        if prepared.spec.name == "node_listener_overrides" {
+            if prepared.rows.iter().any(|r| uuid_field(r,"agent_id").is_none_or(|id| !policy_nodes.contains(&id))) {
+                return Err(DbErr::Custom("listener override has no node policy in the backup".into()));
+            }
+            txn.execute(statement(txn,
+                "DELETE FROM node_listener_overrides WHERE agent_id = ANY($1::uuid[])",
+                vec![policy_nodes.clone().into()])).await?;
+        } else {
+            delete_rows(txn, prepared, site_id).await?;
+        }
     }
     for id in &plan.prune_site_ids {
         txn.execute(statement(
@@ -1474,6 +1503,7 @@ pub async fn apply_restore(
         let singleton = prepared.spec.filter == Filter::Singleton;
         let upsert = prepared.spec.name == "sites"
             || prepared.spec.name == "instance_settings"
+            || prepared.spec.name == "node_listener_policies"
             || (singleton && !prepared.rows.is_empty());
         if upsert {
             upsert_rows(txn, prepared.spec, &prepared.rows).await?;
@@ -1483,6 +1513,17 @@ pub async fn apply_restore(
         report
             .rows_by_table
             .insert(prepared.spec.name.to_string(), prepared.rows.len());
+    }
+    for id in policy_nodes {
+        let mut policy = crate::listener_policy::read(txn, id).await?;
+        if policy.addresses.is_some() || !policy.overrides.is_empty() {
+            let original = policy.addresses.clone();
+            let overrides: Vec<_> = policy.overrides.iter().map(|o| o.addresses.clone()).collect();
+            policy.normalize().map_err(DbErr::Custom)?;
+            if policy.addresses != original || policy.overrides.iter().map(|o| &o.addresses).ne(&overrides) {
+                return Err(DbErr::Custom("backup contains noncanonical listener addresses".into()));
+            }
+        }
     }
     // A backup taken before the allow+off fix can restore a whitelist that
     // the engine would drop. Normalise it here as well as in migration 000096

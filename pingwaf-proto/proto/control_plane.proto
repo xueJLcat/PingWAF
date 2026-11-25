@@ -229,6 +229,20 @@ message IngressListeners {
   repeated string prepared_directories = 6;
   // Privileged inventory for node administrators; never serialize in site options.
   StaticRootRegistry static_root_registry = 7;
+  PanelListenerReport panel = 8;
+}
+
+message PanelListenerReport {
+  int64 desired_generation = 1;
+  int64 applied_generation = 2;
+  repeated PanelSocketStatus sockets = 3;
+  int64 policy_revision = 4;
+}
+
+message PanelSocketStatus {
+  string address = 1;
+  IngressListenerStatus listener = 2;
+  string error = 3;
 }
 
 message StaticRootRegistry {
@@ -1238,6 +1252,20 @@ message SiteIngress {
 
 message ManagedSiteConfig {
   repeated ManagedSite sites = 1;
+  // Presence distinguishes an explicit withdrawal from a legacy control plane.
+  PanelListeners listeners = 2;
+}
+
+message PanelListeners {
+  repeated PanelEndpoint endpoints = 1;
+  repeated CustomErrorPage unmatched_pages = 2;
+  int64 policy_revision = 3;
+}
+
+message PanelEndpoint {
+  SiteIngress ingress = 1;
+  repeated string addresses = 2;
+  repeated string site_ids = 3;
 }
 
 message ManagedApplyReport {
@@ -1263,6 +1291,7 @@ message GetManagedSnapshotRequest {
   bool supports_site_archives = 3;
   bool supports_page_integrity = 4;
   bool supports_dynamic_pages = 5;
+  bool supports_panel_listeners = 6;
 }
 
 // Hash the bytes exactly as transmitted, not a re-encoded protobuf with maps.

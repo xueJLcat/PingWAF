@@ -86,7 +86,7 @@ thread 'Pingora HTTP Proxy Service' panicked at …/pingora-core-0.9.x/src/servi
 Failed to build listeners: … PermissionDenied … bind() failed on [::]:443
 ```
 
-The HTTP and HTTPS site listeners default to `0.0.0.0:80` and `0.0.0.0:443`. Operators can set `PINGWAF_LISTEN_HTTP_ADDR` and `PINGWAF_LISTEN_HTTPS_ADDR` explicitly for IPv6 or for a restricted interface. For a managed listener, `http@81` binds `0.0.0.0:81`; an explicit IP address is also supported. The dashboard defaults to `0.0.0.0:9080`. Its configured port is reserved across site creation, cloning and backup restore, including paused sites.
+The dashboard defaults to `0.0.0.0:9080`. Its configured port is reserved across site creation, cloning and backup restore, including paused sites. Site sockets follow the node's current panel assignments.
 
 Images built from this repository grant that capability to the binary at build
 time (`setcap cap_net_bind_service=+ep /usr/local/bin/pingwaf`, asserted with
@@ -473,9 +473,6 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_API_KEY` | `agent.api_key` |
 | `PINGWAF_CACHE_DIR` | `agent.cache_dir` |
 | `PINGWAF_FAIL_OPEN` | `agent.fail_open` |
-| `PINGWAF_LISTEN_HTTP_ADDR` | — (data-plane `:80` listener; default `0.0.0.0:80`) |
-| `PINGWAF_LISTEN_HTTPS_ADDR` | — (data-plane `:443` listener; default `0.0.0.0:443`) |
-| `PINGWAF_INGRESS_LISTENERS` | — (experimental managed ingress on Linux; unset by default) |
 | `PINGWAF_METRICS_SHIP_INTERVAL` | `agent.metrics_ship_interval_secs` |
 | `PINGWAF_ES_ENABLED` | — Elasticsearch shipper toggle |
 | `PINGWAF_ES_URLS` | — Elasticsearch URLs (comma-separated) |
@@ -489,18 +486,9 @@ are listed against it below; the dash in a table entry means the setting has no
 
 ### Experimental TCP Listener Diagnostics
 
-On Linux, the all-in-one node supports dynamic listeners. To enable managed
-snapshots on a standalone agent, configure static listeners with
-`PINGWAF_INGRESS_LISTENERS`, for example `http@127.0.0.1:81,http@[::1]:83`.
-Use one IP literal per port, up to 32 declarations. The node retries failed
-binds and reports socket state separately from site application status.
+Linux all-in-one and standalone agents report their socket inventory while waiting for a signed-in control-plane session. Each active default site uses HTTP 80 and HTTPS 443. Explicit site entries request their own protocol and port. A node closes a socket when its last site is withdrawn or its authorization expires.
 
-Under Sites, add HTTP or HTTPS listener rows, select the target agent and
-associate a certificate for HTTPS. Dynamic listeners bind to all IPv4
-interfaces. Default wildcard HTTP/80 and HTTPS/443 can share their sockets
-with managed sites. Management and gRPC ports are reserved. Migration 108
-stores additional listeners. Back up the database before upgrading and
-restore that backup together with the previous binaries when rolling back.
+In **Agents**, open the listener address dialog. New nodes use the IPv4 wildcard. On upgrade, review the existing bind addresses and save their equivalents before enabling service. Addresses can be restricted further for an assigned site. Sites sharing one port must use the same addresses and protocol. Compare the saved revision with the socket report after saving. The node retries failed binds and reports the operating system error.
 
 ## Deployment Modes
 
@@ -794,6 +782,14 @@ control plane does not have to issue (and fail) its own HTTP-01 order. Set
 `PINGWAF_ACME_STATE` to override the file path. A remote agent that is itself
 the HTTP-01 endpoint can still issue locally; use **DNS-01** when it is not the
 instance owning the domain's port 80.
+
+For DNS-01, select an automatic DNS provider or complete manual validation separately.
+The node skips an unknown provider. The manual DNS task supplies the TXT record for the operator.
+
+Deployment configuration backups use schema 3 to include node bind addresses and
+per-site address overrides. Restoring a schema-2 backup retains the target nodes'
+address policies. A schema-3 restore applies overrides only for nodes represented
+in the backup. Review the assigned sites and the node's socket report after restore.
 
 ### Manual Certificates
 

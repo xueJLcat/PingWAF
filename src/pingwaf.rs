@@ -232,25 +232,6 @@ fn extract_port(addr: &str) -> &str {
     addr.rsplit(':').next().unwrap_or("9090")
 }
 
-/// Publishes the IPv4 wildcard by default. Explicit IPv6 addresses are supported.
-///
-/// Overrides, in order: `env_key`, then `legacy_key` (the `PINGWAF_ANALYSIS_*`
-/// spelling the dhat analysis harness still sets), then the default.
-pub(crate) fn public_listen_addr(
-    env_key: &str,
-    legacy_key: &str,
-    port: u16,
-) -> String {
-    for key in [env_key, legacy_key] {
-        if let Ok(value) = std::env::var(key) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return value.to_string();
-            }
-        }
-    }
-    format!("0.0.0.0:{port}")
-}
 
 /// True when every address in a comma-separated listen list is IPv6.
 ///
@@ -913,6 +894,21 @@ fn convert_cached_rules(
 
 /// The shared site translator can omit listeners and unmatched-host policy:
 /// a managed listener has already authorized exactly one site by hostname.
+fn unmatched_plugin_config<'a>(pages: impl Iterator<Item = (i64, &'a str, &'a str, &'a str)>) -> PluginConf {
+    let pages = pages.map(|(status, content_type, template, name)| {
+        let mut item = toml::Table::new();
+        item.insert("status_code".into(), status.into());
+        item.insert("content_type".into(), content_type.into());
+        item.insert("template".into(), template.into());
+        item.insert("name".into(), name.into());
+        toml::Value::Table(item)
+    }).collect();
+    let mut config = PluginConf::new();
+    config.insert("category".into(), "fallback_page".into());
+    config.insert("pages".into(), toml::Value::Array(pages));
+    config
+}
+
 fn convert_proxy_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -1449,35 +1445,8 @@ fn convert_proxy_config_with_handler(
         }
     }
     if !unmatched_pages.is_empty() {
-        let pages: Vec<toml::Value> = unmatched_pages
-            .values()
-            .map(|page| {
-                let mut item = toml::Table::new();
-                item.insert(
-                    "status_code".to_string(),
-                    toml::Value::Integer(i64::from(page.status_code)),
-                );
-                item.insert(
-                    "content_type".to_string(),
-                    toml::Value::String(page.content_type.clone()),
-                );
-                item.insert(
-                    "template".to_string(),
-                    toml::Value::String(page.body_template.clone()),
-                );
-                item.insert(
-                    "name".to_string(),
-                    toml::Value::String(page.name.clone()),
-                );
-                toml::Value::Table(item)
-            })
-            .collect();
-        let mut fallback_conf = PluginConf::new();
-        fallback_conf.insert(
-            "category".to_string(),
-            toml::Value::String("fallback_page".to_string()),
-        );
-        fallback_conf.insert("pages".to_string(), toml::Value::Array(pages));
+        let fallback_conf = unmatched_plugin_config(unmatched_pages.values().map(|p|
+            (i64::from(p.status_code), p.content_type.as_str(), p.body_template.as_str(), p.name.as_str())));
         plugins.insert(FALLBACK_PLUGIN_NAME.to_string(), fallback_conf);
         locations.insert(
             UNMATCHED_HOST_LOCATION_NAME.to_string(),
@@ -1517,17 +1486,9 @@ fn convert_proxy_config_with_handler(
              fail until one is issued or uploaded"
         );
     }
-    // Explicit IPv6 wildcard overrides can serve both address families.
-    let public_http_addr = public_listen_addr(
-        "PINGWAF_LISTEN_HTTP_ADDR",
-        "PINGWAF_ANALYSIS_HTTP_ADDR",
-        80,
-    );
-    let public_https_addr = public_listen_addr(
-        "PINGWAF_LISTEN_HTTPS_ADDR",
-        "PINGWAF_ANALYSIS_HTTPS_ADDR",
-        443,
-    );
+    // Handler identities only. The panel manifest owns the actual bind addresses.
+    let public_http_addr = String::from("0.0.0.0:80");
+    let public_https_addr = String::from("0.0.0.0:443");
     let mut servers: HashMap<String, PingapServerConf> = HashMap::new();
     servers.insert(
         "pingwaf".to_string(),
@@ -1576,20 +1537,6 @@ fn convert_proxy_config_with_handler(
     )
 }
 
-/// Build a `PingapConfig` from the agent's cached rules.
-fn build_pingap_config(rule_cache: &RuleCache) -> Option<PingapConfig> {
-    cached_rules_to_pingap_config(
-        &rule_cache.all_sites(),
-        rule_cache.cache_dir(),
-    )
-}
-
-/// Reload view of the cache. Unlike [`build_pingap_config`] it never declines:
-/// once the proxy is running, "nothing to serve" has to be applied, otherwise
-/// the locations and certificates of a deleted site stay loaded.
-fn build_reload_config(rule_cache: &RuleCache) -> PingapConfig {
-    convert_cached_rules(&rule_cache.all_sites(), rule_cache.cache_dir())
-}
 
 /// Build the certificate entry a lets-encrypt issuance is driven by.
 ///
@@ -1615,7 +1562,7 @@ fn acme_certificate_conf(
         acme: Some(format!("http://{}", ssl.acme_email)),
         ..Default::default()
     };
-    if ssl.acme_challenge_type != "AcmeDns01" {
+    if ssl.acme_challenge_type == "AcmeHttp01" {
         if wildcard {
             error!(target: LOG_TARGET,
                 domains = %domains,
@@ -1625,33 +1572,17 @@ fn acme_certificate_conf(
         }
         return Some(cert);
     }
-    let provider = match normalize_dns_provider(&ssl.acme_dns_provider) {
-        // Unknown provider: stay on HTTP-01 rather than emit an entry the
-        // config validation rejects outright.
-        Some(provider) => provider,
-        None if wildcard => {
-            error!(target: LOG_TARGET,
-                domains = %domains,
-                "wildcard hostnames need a configured DNS provider for dns-01; skipping issuance"
-            );
-            return None;
-        },
-        None => return Some(cert),
-    };
-    if provider == "manual" {
-        // Manual mode renders no dns fields, i.e. the order falls back to
-        // HTTP-01, which a wildcard can never pass.
-        if wildcard {
-            error!(target: LOG_TARGET,
-                domains = %domains,
-                "the manual dns-01 provider cannot validate a wildcard automatically; skipping issuance"
-            );
-            return None;
-        }
-        return Some(cert);
+    if ssl.acme_challenge_type != "AcmeDns01" {
+        error!(target: LOG_TARGET, %domains, "unknown ACME challenge type; skipping issuance");
+        return None;
     }
+    let Some(provider) = normalize_dns_provider(&ssl.acme_dns_provider) else {
+        error!(target: LOG_TARGET, %domains, "DNS-01 has no supported provider; skipping automatic issuance");
+        return None;
+    };
     cert.dns_challenge = Some(true);
     cert.dns_provider = Some(provider.to_string());
+    if provider == "manual" { return Some(cert); }
     if let Some(url) = acme_dns_service_url(provider, &ssl.acme_dns_config) {
         cert.dns_service_url = Some(url);
     }
@@ -1794,30 +1725,12 @@ async fn start_legacy_data_plane(
     rule_cache: Arc<RuleCache>,
     _host: IngressHost,
 ) -> anyhow::Result<()> {
-    // Wait for the agent to receive initial config from the control plane
-    for i in 0..30 {
-        let cached = rule_cache.all_sites();
-        if !cached.sites.is_empty() {
-            break;
-        }
-        if i == 0 {
-            info!(target: LOG_TARGET, "data plane: waiting for control plane configuration...");
+    let (config, initial_hash) = loop {
+        let snapshot = rule_cache.all_sites();
+        if let Some(config) = cached_rules_to_pingap_config(&snapshot, rule_cache.cache_dir()) {
+            break (config, snapshot.config_hash.clone());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    let config = match build_pingap_config(&rule_cache) {
-        Some(config) => config,
-        None => {
-            warn!(target: LOG_TARGET, "data plane: no sites configured, proxy not started");
-            // Keep waiting — the agent may receive config later
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if let Some(config) = build_pingap_config(&rule_cache) {
-                    break config;
-                }
-            }
-        },
     };
 
     let site_count = config
@@ -1883,6 +1796,7 @@ async fn start_legacy_data_plane(
     // Activate the WAF plugin: without it the data plane forwards traffic
     // uninspected and no access/security events are ever emitted.
     let (updated_plugins, plugin_errors) = try_init_plugins(&config.plugins);
+    let mut initial_errors = Vec::new();
     if !updated_plugins.is_empty() {
         info!(target: LOG_TARGET,
             plugins = updated_plugins.join(","),
@@ -1891,6 +1805,7 @@ async fn start_legacy_data_plane(
     }
     if !plugin_errors.is_empty() {
         error!(target: LOG_TARGET, error = plugin_errors, "data plane: plugin init errors");
+        initial_errors.push(format!("plugins: {plugin_errors}"));
     }
 
     // Initialize certificates
@@ -1902,6 +1817,7 @@ async fn start_legacy_data_plane(
         }
         if !errors.is_empty() {
             error!(target: LOG_TARGET, error = errors, "data plane: certificate parse errors");
+            initial_errors.push(format!("certificates: {errors}"));
         }
     }
 
@@ -2039,8 +1955,7 @@ async fn start_legacy_data_plane(
         );
     }
 
-    for server_conf in server_conf_list {
-        let ctx = AppContext {
+    let proxy_context = AppContext {
             server_locations_provider: new_server_locations_provider(),
             location_provider: new_location_provider(),
             upstream_provider: new_upstream_provider(),
@@ -2048,8 +1963,9 @@ async fn start_legacy_data_plane(
             certificate_provider: cert_provider.clone(),
             config_manager: config_manager.clone(),
             logger: None,
-        };
-        let mut ps = ProxyServer::new(&server_conf, ctx)?;
+    };
+    let make_proxy = move |server_conf: &ServerConf| -> anyhow::Result<ProxyServer> {
+        let mut ps = ProxyServer::new(server_conf, proxy_context.clone())?;
         // The HTTP-01 challenge must be reachable on port 80, so every
         // data-plane server whose address list includes :80 intercepts
         // /.well-known/acme-challenge before proxying.
@@ -2061,6 +1977,12 @@ async fn start_legacy_data_plane(
         {
             ps.enable_lets_encrypt();
         }
+        Ok(ps)
+    };
+    #[cfg(target_os = "linux")]
+    let runtime_conf = my_server.configuration.clone();
+    for server_conf in server_conf_list {
+        let ps = make_proxy(&server_conf)?;
         #[cfg(target_os = "linux")]
         if let Some(host) = &_host {
             let port = match server_conf.addr.as_str() {
@@ -2142,11 +2064,20 @@ async fn start_legacy_data_plane(
     // key) and set as current, so the ACME renewal task keeps working.
     let watcher_cache = Arc::clone(&rule_cache);
     let watcher_config_manager = Arc::clone(&config_manager);
-    let mut tracker = ReloadTracker::new(watcher_cache.config_hash());
+    let mut tracker = ReloadTracker::new(initial_hash.clone());
+    if initial_errors.is_empty() {
+        watcher_cache.set_config_apply_error(None);
+        #[cfg(target_os = "linux")]
+        if let Some(host) = &_host { host.default_routes_applied(initial_hash.clone()); }
+    } else {
+        tracker.failed(initial_hash, Instant::now());
+        watcher_cache.set_config_apply_error(Some(initial_errors.join("; ")));
+    }
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
-            let hash = watcher_cache.config_hash();
+            let snapshot = watcher_cache.all_sites();
+            let hash = snapshot.config_hash.clone();
             if !tracker.is_due(&hash, Instant::now()) {
                 continue;
             }
@@ -2156,9 +2087,26 @@ async fn start_legacy_data_plane(
                 retry = tracker.failure.is_some(),
                 "data plane: rule change detected, reloading"
             );
-            let converted = build_reload_config(&watcher_cache);
-            let errors = apply_reload(&watcher_config_manager, converted).await;
+            let converted = convert_cached_rules(&snapshot, watcher_cache.cache_dir());
+            #[cfg(target_os = "linux")]
+            let handlers = _host.as_ref().map(|_| parse_from_conf(converted.clone()));
+            let mut errors = apply_reload(&watcher_config_manager, converted).await;
+            #[cfg(target_os = "linux")]
+            if errors.is_empty() && let (Some(host), Some(handlers)) = (&_host, handlers) {
+                for conf in handlers {
+                    let port = match conf.name.as_str() {
+                        "pingwaf" => 80, "pingwaf_tls" => 443, _ => continue,
+                    };
+                    if let Err(error) = make_proxy(&conf).and_then(|server| host.register_default(port, server, runtime_conf.clone())) {
+                        errors.push(format!("listener {port}: {error}"));
+                    }
+                }
+            }
             if errors.is_empty() {
+                #[cfg(target_os = "linux")]
+                if let Some(host) = &_host {
+                    host.default_routes_applied(hash.clone());
+                }
                 tracker.succeeded(hash);
                 watcher_cache.set_config_apply_error(None);
                 continue;
@@ -2191,10 +2139,9 @@ type IngressHost = Option<()>;
 
 async fn start_data_plane_agent(
     config: AgentConfig,
-    _embedded: bool,
 ) -> anyhow::Result<(Arc<pingwaf_agent::PingWafAgent>, IngressHost)> {
     #[cfg(target_os = "linux")]
-    if _embedded || ingress::configured() {
+    {
         let mut host = None;
         let agent = pingwaf_agent::PingWafAgent::start_with_client(
             config,
@@ -2208,7 +2155,8 @@ async fn start_data_plane_agent(
         .await?;
         return Ok((agent, host));
     }
-    Ok((pingwaf_agent::start_agent(config).await?, None))
+    #[cfg(not(target_os = "linux"))]
+    return Ok((pingwaf_agent::start_agent(config).await?, None));
 }
 
 async fn run_data_plane(
@@ -2216,13 +2164,22 @@ async fn run_data_plane(
     control_ports: Vec<u16>,
     host: IngressHost,
 ) {
-    // Preconfigured ingress is independent of the legacy proxy, which may
-    // be waiting for a site (or fail configuration validation).
+    if host.is_none() { return; }
     tokio::join!(
         ingress::run(rule_cache.clone(), control_ports, host.clone()),
         async {
-            if let Err(error) = start_legacy_data_plane(rule_cache, host).await {
-                error!(target: LOG_TARGET, %error, "data plane proxy exited with error");
+            let mut failures = 0u32;
+            loop {
+                match start_legacy_data_plane(rule_cache.clone(), host.clone()).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        failures = failures.saturating_add(1);
+                        let delay = reload_retry_delay(failures);
+                        rule_cache.set_config_apply_error(Some(error.to_string()));
+                        error!(target: LOG_TARGET, %error, retry_in_secs = delay.as_secs(), "default proxy initialization failed");
+                        tokio::time::sleep(delay).await;
+                    }
+                }
             }
         }
     );
@@ -2444,7 +2401,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
 
             // Start the agent in the background first.
             // It will retry connecting to the server until it comes up.
-            let (agent, host) = match start_data_plane_agent(*agent_config, true)
+            let (agent, host) = match start_data_plane_agent(*agent_config)
                 .await
             {
                 Ok((agent, host)) => (Some(agent), host),
@@ -2457,14 +2414,7 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
             // Start the data plane proxy if the agent is running
             let proxy_handle = if let Some(ref agent) = agent {
                 let rule_cache = Arc::clone(&agent.rule_cache);
-                let control_ports =
-                    [&server_config.http_addr, &server_config.grpc_addr]
-                        .into_iter()
-                        .filter_map(|addr| {
-                            addr.parse::<std::net::SocketAddr>().ok()
-                        })
-                        .map(|addr| addr.port())
-                        .collect();
+                let control_ports = server_config.infrastructure_ports();
                 Some(tokio::spawn(run_data_plane(
                     rule_cache,
                     control_ports,
@@ -2501,7 +2451,7 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
         cache_dir = %config.cache_dir,
         "starting PingWAF in Agent mode (data plane only)"
     );
-    let (agent, host) = start_data_plane_agent(config, false).await?;
+    let (agent, host) = start_data_plane_agent(config).await?;
     // Opt-in self-upgrade: follows the control plane's build, then re-execs
     // this process (see `pingwaf_agent::upgrade`).
     let upgrade = pingwaf_agent::upgrade::spawn(Arc::clone(&agent));
@@ -4946,8 +4896,7 @@ mod tests {
             .is_none()
         );
 
-        // dns-01 with a provider that resolves to no endpoint falls back to
-        // http-01, so a wildcard is dropped there too.
+        // An unusable DNS provider cannot authorize a different challenge.
         let mut ssl = acme_ssl();
         ssl.acme_challenge_type = "AcmeDns01".to_string();
         ssl.acme_dns_provider = "not-a-provider".to_string();
@@ -4955,11 +4904,9 @@ mod tests {
             acme_certificate_conf(&ssl, "*.example.com".to_string()).is_none()
         );
 
-        // Manual mode renders no DNS challenge either.
+        // The manual DNS task supplies the TXT record for the operator.
         ssl.acme_dns_provider = "manual".to_string();
-        assert!(
-            acme_certificate_conf(&ssl, "*.example.com".to_string()).is_none()
-        );
+        assert_eq!(acme_certificate_conf(&ssl, "*.example.com".into()).unwrap().dns_challenge, Some(true));
 
         // A real provider issues the wildcard through dns-01.
         ssl.acme_dns_provider = "ali".to_string();
@@ -4968,11 +4915,11 @@ mod tests {
         assert_eq!(cert.dns_challenge, Some(true));
         assert_eq!(cert.dns_provider.as_deref(), Some("ali"));
 
-        // The unknown-provider fallback still serves plain hostnames.
+        // The selected challenge also applies to ordinary hostnames.
         ssl.acme_challenge_type = "AcmeDns01".to_string();
         ssl.acme_dns_provider = "not-a-provider".to_string();
         assert!(
-            acme_certificate_conf(&ssl, "a.example.com".to_string()).is_some()
+            acme_certificate_conf(&ssl, "a.example.com".to_string()).is_none()
         );
     }
 
@@ -4999,15 +4946,13 @@ mod tests {
     }
 
     #[test]
-    fn acme_dns01_unknown_provider_stays_on_http01() {
+    fn acme_manual_dns01_never_schedules_an_http01_order() {
         let mut ssl = acme_ssl();
         ssl.acme_challenge_type = "AcmeDns01".to_string();
-        ssl.acme_dns_provider = "not-a-provider".to_string();
-
-        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string())
-            .expect("unknown providers fall back to http-01");
-        assert_eq!(cert.dns_challenge, None);
-        assert_eq!(cert.dns_provider, None);
+        ssl.acme_dns_provider = "manual".to_string();
+        let cert = acme_certificate_conf(&ssl, "a.example.com".to_string()).unwrap();
+        assert_eq!(cert.dns_challenge, Some(true));
+        assert_eq!(cert.dns_provider.as_deref(), Some("manual"));
     }
 
     #[test]
@@ -5139,36 +5084,4 @@ tls_key = \"NEWKEY\"
         assert!(!all_addrs_ipv6(""));
     }
 
-    #[test]
-    fn public_listen_addr_defaults_to_the_ipv4_wildcard() {
-        // `std::env` is process-global; hold the lock while switching keys so
-        // no other test observes a half-configured environment.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        const KEYS: [&str; 2] =
-            ["PINGWAF_LISTEN_HTTP_ADDR", "PINGWAF_ANALYSIS_HTTP_ADDR"];
-        fn clear() {
-            for key in KEYS {
-                unsafe { std::env::remove_var(key) };
-            }
-        }
-        clear();
-
-        let default = public_listen_addr(KEYS[0], KEYS[1], 80);
-        assert_eq!(default, "0.0.0.0:80");
-
-        unsafe { std::env::set_var(KEYS[0], "127.0.0.1:8080") };
-        assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "127.0.0.1:8080");
-
-        // The older analysis spelling still works, and the newer key wins.
-        clear();
-        unsafe { std::env::set_var(KEYS[1], "0.0.0.0:8000") };
-        assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "0.0.0.0:8000");
-        unsafe { std::env::set_var(KEYS[0], "[::1]:8001") };
-        assert_eq!(public_listen_addr(KEYS[0], KEYS[1], 80), "[::1]:8001");
-
-        clear();
-    }
 }

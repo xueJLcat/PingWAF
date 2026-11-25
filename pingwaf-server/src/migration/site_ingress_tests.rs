@@ -49,6 +49,20 @@ async fn upgrade_local55_preserves_certificate_selection() {
     assert!(scalar::<bool>(&db, "SELECT self_signed FROM site_ssl WHERE domain='empty.test'").await);
     assert!(scalar::<bool>(&db, "SELECT EXISTS(SELECT FROM site_ssl s JOIN site_certificate_links l
         ON (s.site_id,s.certificate_id)=(l.site_id,l.certificate_id) WHERE s.domain='selected.test' AND NOT s.self_signed)").await);
+    let id = scalar::<uuid::Uuid>(&db, "SELECT id FROM sites WHERE domain='selected.test'").await;
+    db.execute_unprepared("UPDATE site_certificates SET auto_renew=true, acme_email='ops@example.test',
+        domain='www.selected.test,selected.test' WHERE domain='selected.test'").await.unwrap();
+    let names = vec!["selected.test".to_string(), "www.selected.test".to_string()];
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf = rcgen::CertificateParams::new(names).unwrap().self_signed(&key).unwrap().pem();
+    let key_pem = key.serialize_pem();
+    let order = "SELECTED.test,www.selected.test";
+    use crate::acme_state_sync::sync_certificate;
+    assert!(!sync_certificate(&db, id, "other.test", &leaf, &key_pem).await.unwrap());
+    assert!(!sync_certificate(&db, id, order, &leaf, &rcgen::KeyPair::generate().unwrap().serialize_pem()).await.unwrap());
+    assert!(scalar::<bool>(&db, "SELECT cert_pem IS NULL FROM site_certificates").await);
+    assert!(sync_certificate(&db, id, order, &leaf, &key_pem).await.unwrap());
+    assert!(!sync_certificate(&db, id, order, &leaf, &key_pem).await.unwrap());
 }
 
 fn legacy_insert(domain: &str) -> String {
@@ -208,8 +222,15 @@ async fn site_ingress_migration_postgres() {
     Migrator::up(&db, Some(3)).await.unwrap();
     assert_eq!(scalar::<i64>(&db, "SELECT count(*) FROM sites WHERE ingress_port IS NULL AND ingress_protocol IS NULL").await, 1);
     let scope = config_catalog::VersionScope::Deployment;
-    let legacy_snapshot =
-        config_catalog::capture(&db, scope, true).await.unwrap();
+    // Capture precisely what a schema-2 producer knew before the listener migration.
+    let mut tables = serde_json::Map::new();
+    for spec in config_catalog::tables_for(scope) {
+        if !matches!(spec.name, "node_listener_policies" | "node_listener_overrides") {
+            tables.insert(spec.name.into(), config_catalog::query_rows(&db, spec, None).await.unwrap().into());
+        }
+    }
+    let legacy_snapshot = serde_json::json!({"schema":2,"scope":"deployment","site_id":null,
+        "secret_policy":"encrypted_payload","tables":tables});
     let legacy_site = &legacy_snapshot["tables"]["sites"][0];
     assert!(legacy_site.is_object());
     assert!(legacy_site.get("ingress_port").is_none());
@@ -509,7 +530,7 @@ async fn site_ingress_migration_postgres() {
         (
             "ingress_protocol",
             serde_json::json!("https"),
-            "site.ingress_invalid",
+            crate::api::sites::INGRESS_PROTOCOL_CONFLICT,
         ),
         (
             "status",

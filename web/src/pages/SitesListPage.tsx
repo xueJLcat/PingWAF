@@ -388,7 +388,7 @@ export function SitesListPage() {
     refetchInterval: dialogOpen || urlCreateOpen || cloneOpen ? 20_000 : false,
   })
   const draftPortError = (ingress: typeof form.ingress) =>
-    ingressPortError(ingress, ingressInventory.data?.admin_port, ingressInventory.data?.port_protocols)
+    ingressPortError(ingress, ingressInventory.data?.admin_port, ingressInventory.data?.port_protocols, ingressInventory.data?.reserved_ports)
   const wantsNewSite = canWrite && searchParams.get('new') === '1'
   if (wantsNewSite && !urlCreateOpen) setUrlCreateOpen(true)
   useEffect(() => {

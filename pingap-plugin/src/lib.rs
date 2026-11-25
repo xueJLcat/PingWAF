@@ -257,6 +257,7 @@ mod csrf;
 mod directory;
 mod error_page;
 mod fallback_page;
+pub use fallback_page::FallbackPagePlugin;
 mod forward_auth;
 #[cfg(feature = "geo")]
 mod geo_restriction;

@@ -170,9 +170,9 @@ pub enum SiteStatus {
 impl SiteStatus {
     pub fn from_proto(value: i32) -> Self {
         match value {
+            0 => Self::Active,
             1 => Self::Paused,
-            2 => Self::Pending,
-            _ => Self::Active,
+            _ => Self::Pending,
         }
     }
 
@@ -558,12 +558,7 @@ fn default_site_status() -> SiteStatus {
 /// control-plane counterpart is `grpc::config::site_status_proto`, which must
 /// stay in sync.
 pub fn site_status_str(value: i32) -> String {
-    match value {
-        1 => site_status::PAUSED,  // SITE_STATUS_PAUSED
-        2 => site_status::PENDING, // SITE_STATUS_PENDING
-        _ => site_status::ACTIVE,
-    }
-    .to_string()
+    SiteStatus::from_proto(value).as_str().to_string()
 }
 
 // ─── WAF ────────────────────────────────────────────────────
@@ -3562,16 +3557,13 @@ impl RuleCache {
     }
 
     fn convert_ssl_config(s: &proto::SslConfig) -> SslConfig {
+        let challenge = proto::AcmeChallengeType::try_from(s.acme_challenge_type).ok();
         SslConfig {
             cert_pem: s.cert_pem.clone(),
             key_pem: s.key_pem.clone(),
-            acme_enabled: s.acme_enabled,
+            acme_enabled: s.acme_enabled && challenge.is_some(),
             acme_email: s.acme_email.clone(),
-            acme_challenge_type: format!(
-                "{:?}",
-                proto::AcmeChallengeType::try_from(s.acme_challenge_type)
-                    .unwrap_or(proto::AcmeChallengeType::AcmeHttp01)
-            ),
+            acme_challenge_type: challenge.map(|v| format!("{v:?}")).unwrap_or_default(),
             acme_dns_provider: s.acme_dns_provider.clone(),
             acme_dns_config: s.acme_dns_config.clone().into_iter().collect(),
             min_tls_version: s.min_tls_version.clone(),
@@ -4935,7 +4927,7 @@ mod tests {
         assert_eq!(rules.routes[0].ip_ranges, vec!["10.0.0.0/8"]);
         assert_eq!(site_status_str(0), site_status::ACTIVE);
         assert_eq!(site_status_str(2), site_status::PENDING);
-        assert_eq!(site_status_str(7), site_status::ACTIVE);
+        assert_eq!(site_status_str(7), site_status::PENDING);
     }
 
     #[test]

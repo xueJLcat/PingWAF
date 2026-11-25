@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set, TransactionTrait};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -102,19 +102,20 @@ async fn sync_once(
     let text = std::fs::read_to_string(path)?;
     let parsed: AcmeState = match toml::from_str(&text) {
         Ok(parsed) => parsed,
-        Err(err) => {
+        Err(_) => {
             // The data plane writes atomically, but a malformed file must not
             // take the control plane down or retry in a tight loop. Wait for
             // the next write before trying again.
             *last_modified = modified;
             return Err(anyhow::anyhow!(
-                "cannot parse {}: {err}",
+                "invalid ACME state TOML in {}",
                 path.display()
             ));
         },
     };
 
     let mut updated = 0;
+    let mut failure = None;
     for (name, cert) in &parsed.certificates {
         let Some(site_id) = site_id_from_key(name) else {
             continue;
@@ -125,20 +126,24 @@ async fn sync_once(
         {
             continue;
         }
-        if sync_certificate(
-            state,
+        match sync_certificate(
+            &state.db,
             site_id,
             &cert.domains,
             &cert.tls_cert,
             &cert.tls_key,
         )
-        .await?
-        {
-            updated += 1;
+        .await {
+            Ok(true) => updated += 1,
+            Ok(false) => {},
+            Err(error) => {
+                warn!(%site_id, %error, "could not synchronize site certificate");
+                failure = Some(error);
+            }
         }
     }
 
-    *last_modified = modified;
+    if failure.is_none() { *last_modified = modified; }
     if updated > 0 {
         // The PEM is now in the row `build_site_config` reads, so every agent
         // gets it on the next push. Without this, agents only see it on the
@@ -146,32 +151,42 @@ async fn sync_once(
         crate::grpc::notify_all_config_changed(state, Some("acme-state-sync"))
             .await;
     }
-    Ok(updated)
+    failure.map_or(Ok(updated), Err)
 }
 
-async fn sync_certificate(
-    state: &AppState,
+fn domain_set(domains: &str) -> Vec<String> {
+    let mut names: Vec<_> = domains.split(',').map(str::trim).filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub(crate) async fn sync_certificate(
+    db: &sea_orm::DatabaseConnection,
     site_id: Uuid,
     domains: &str,
     cert_pem: &str,
     key_pem: &str,
 ) -> anyhow::Result<bool> {
-    let row = site_certificates::Entity::find()
+    let tx = db.begin().await?;
+    let posture_row = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(site_id)).lock_exclusive().one(&tx).await?;
+    let names = domain_set(domains);
+    let rows = site_certificates::Entity::find()
         .filter(site_certificates::Column::SiteId.eq(site_id))
-        .filter(site_certificates::Column::Domain.eq(domains.to_string()))
-        .one(&state.db)
+        .filter(site_certificates::Column::AutoRenew.eq(true))
+        .lock_exclusive().all(&tx)
         .await?;
-    // Older rows may have the domains in another order or the alternate
-    // domain as the primary string. Fall back to the site's row only when the
-    // exact domain match found nothing.
-    let row = match row {
-        Some(row) => Some(row),
+    let selected = posture_row.as_ref().and_then(|p| p.certificate_id);
+    let mut matching = rows.iter().filter(|r| domain_set(&r.domain) == names &&
+        r.acme_email.as_deref().is_some_and(|email| !email.trim().is_empty()));
+    let row = match selected {
+        Some(id) => matching.find(|row| row.id == id),
         None => {
-            site_certificates::Entity::find()
-                .filter(site_certificates::Column::SiteId.eq(site_id))
-                .one(&state.db)
-                .await?
-        },
+            let first = matching.next();
+            if matching.next().is_some() { None } else { first }
+        }
     };
     let Some(row) = row else {
         // The file can outlive a deleted certificate row. Not an error: the
@@ -183,44 +198,38 @@ async fn sync_certificate(
     // Only ACME-managed rows are this file's to update. A manual upload (or a
     // row whose auto-renew was turned off) must never be replaced by an old
     // ACME PEM that happens to share the site id.
-    if !row.auto_renew
-        || row
-            .acme_email
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(str::is_empty)
-    {
-        return Ok(false);
-    }
     if row.cert_pem.as_deref() == Some(cert_pem)
         && row.key_pem.as_deref() == Some(key_pem)
     {
         return Ok(false);
     }
 
+    let now = Utc::now();
+    let Some(meta) = parse_certificate_meta(cert_pem).filter(|m| m.not_before <= now && m.expires_at > now) else {
+        warn!(%site_id, "ACME state has no currently valid certificate");
+        return Ok(false);
+    };
+    if !site_cert::covers(cert_pem, &names) || crate::pki::tls::certified_key(cert_pem, key_pem).is_err() ||
+        row.cert_pem.as_deref().and_then(parse_certificate_meta).is_some_and(|previous| previous.not_before > meta.not_before) {
+        warn!(%site_id, "ACME material does not match the current order or is superseded");
+        return Ok(false);
+    }
     let mut active: site_certificates::ActiveModel = row.clone().into();
     active.cert_pem = Set(Some(cert_pem.to_string()));
     active.key_pem = Set(Some(key_pem.to_string()));
     active.status = Set(cert_status::ACTIVE.to_string());
     active.failure_reason = Set(None);
     active.updated_at = Set(Utc::now());
-    let meta = parse_certificate_meta(cert_pem);
-    if let Some(meta) = &meta {
-        active.issuer = Set(Some(meta.issuer.clone()));
-        active.not_before = Set(Some(meta.not_before));
-        active.expires_at = Set(Some(meta.expires_at));
-    }
+    active.issuer = Set(Some(meta.issuer.clone()));
+    active.not_before = Set(Some(meta.not_before));
+    active.expires_at = Set(Some(meta.expires_at));
     let certificate_id = row.id;
-    active.update(&state.db).await?;
+    active.update(&tx).await?;
 
     // The issued PEM is the site's certificate now. A generated self-signed
     // leaf would otherwise keep winning — the data plane prefers an inline PEM
     // over an ACME order — so the site would serve the wrong certificate
     // forever. Point the posture at this row and drop our generated material.
-    let posture_row = site_ssl::Entity::find()
-        .filter(site_ssl::Column::SiteId.eq(site_id))
-        .one(&state.db)
-        .await?;
     if let Some(ssl) = posture_row {
         if ssl.self_signed || site_cert::is_generated(ssl.issuer.as_deref()) {
             let mut posture: site_ssl::ActiveModel = ssl.into();
@@ -228,11 +237,9 @@ async fn sync_certificate(
             posture.certificate_id = Set(Some(certificate_id));
             posture.cert_pem = Set(None);
             posture.key_pem = Set(None);
-            if let Some(meta) = &meta {
-                posture.issuer = Set(Some(meta.issuer.clone()));
-                posture.expires_at = Set(Some(meta.expires_at));
-            }
-            posture.update(&state.db).await?;
+            posture.issuer = Set(Some(meta.issuer.clone()));
+            posture.expires_at = Set(Some(meta.expires_at));
+            posture.update(&tx).await?;
             info!(
                 site_id = %site_id,
                 cert_id = %certificate_id,
@@ -241,6 +248,7 @@ async fn sync_certificate(
         }
     }
 
+    tx.commit().await?;
     info!(
         site_id = %site_id,
         domain = %row.domain,

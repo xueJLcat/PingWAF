@@ -921,7 +921,6 @@ the agent log settings with a dash in the `Environment` column are
 | `--log-batch-size` | — | `100` | Log entries per flush |
 | `--log-flush-interval-secs` | — | `5` | Maximum time between log flushes |
 | `--max-body-log-size` | — | `8192` | Maximum request body bytes to log |
-| — | `PINGWAF_INGRESS_LISTENERS` | unset | Experimental managed ingress listeners on Linux. See the [deployment guide](./deployment.md#experimental-tcp-listener-diagnostics). |
 
 Flags that default to true (`--fail-open`, `--serve-frontend`,
 `--tls-enabled`) take an optional value, so they are turned off with

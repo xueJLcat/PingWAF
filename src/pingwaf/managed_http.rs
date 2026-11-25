@@ -5,7 +5,7 @@ use std::{cmp::Reverse, collections::HashMap, path::Path, sync::Arc};
 
 use pingap_core::{ManagedSiteContext, ProxyTrust};
 use pingap_location::ServerLocationRoute;
-use pingap_proxy::{ManagedRequestSite, ManagedSiteSelector, Server};
+use pingap_proxy::{ManagedRequestSite, ManagedRouteMiss, ManagedSiteSelector, Server};
 use pingora::{
     apps::{HttpServerApp, HttpServerOptions, ReusedHttpStream},
     protocols::http::{ServerSession, v2::server::H2Options},
@@ -35,22 +35,67 @@ pub(super) struct Host {
     state: pingwaf_agent::managed::AppliedState<Arc<View>>,
     cache: Arc<pingwaf_agent::cache::RuleCache>,
     defaults: std::sync::Mutex<Option<pingwaf_proto::SiteConfig>>,
+    default_routes: std::sync::RwLock<DefaultRoutes>,
     worker: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
+#[derive(Default)]
+struct DefaultRoutes {
+    expected_hash: String,
+    expected: HashMap<Uuid, String>,
+    applied_hash: Option<Arc<str>>,
+    applied: HashMap<Uuid, String>,
+}
+
+impl DefaultRoutes {
+    fn expect(&mut self, candidate: &Candidate, hash: &str) {
+        self.expected = candidate.sites().iter()
+            .filter(|(_, envelope)| envelope.ingress.is_none() && envelope.site.as_ref().is_some_and(|site| site.status == pingwaf_proto::SiteStatusEnum::SiteStatusActive as i32))
+            .map(|(id, envelope)| (*id, envelope.site_revision.clone())).collect();
+        self.applied.retain(|id, revision| self.expected.get(id) == Some(revision));
+        self.expected_hash = hash.to_owned();
+    }
+}
+
 impl Host {
-    pub(super) fn shared_ports(&self) -> Vec<u16> {
-        self.shared.read().unwrap_or_else(|e| e.into_inner()).keys().copied().collect()
+    pub(super) fn default_routes_applied(&self, hash: Arc<str>) {
+        let mut routes = self.default_routes.write().unwrap_or_else(|e| e.into_inner());
+        if routes.expected_hash == hash.as_ref() {
+            routes.applied = routes.expected.clone();
+            routes.applied_hash = Some(hash);
+        }
     }
 
-    pub(super) fn register_default(&self, port: u16, server: Server, conf: Arc<pingora::server::configuration::ServerConf>) -> anyhow::Result<()> {
-        let app = Arc::new(shared::DefaultApp::new(port, server, conf)?);
+    fn default_routes_ready(&self) -> bool {
+        self.default_routes.read().unwrap_or_else(|e| e.into_inner()).applied_hash.as_ref() == Some(&self.cache.config_hash())
+    }
+
+    fn has_default_routes(&self) -> bool {
+        !self.default_routes.read().unwrap_or_else(|e| e.into_inner()).applied.is_empty()
+    }
+    pub(super) fn register_default(self: &Arc<Self>, port: u16, server: Server, conf: Arc<pingora::server::configuration::ServerConf>) -> anyhow::Result<()> {
+        let listener = Listener::Custom { port, protocol: if port == 443 { pingwaf_proto::IngressProtocol::Https } else { pingwaf_proto::IngressProtocol::Http } };
+        let selector = StandardSelector { host: Arc::downgrade(self), listener };
+        let app = Arc::new(shared::DefaultApp::new(port, server.with_managed_selector(Arc::new(selector)), conf)?);
         self.shared.write().unwrap_or_else(|e| e.into_inner()).insert(port, app);
         Ok(())
     }
 
-    pub(super) fn live_listeners(&self) -> Vec<Listener> {
-        self.state.live_listeners()
+    pub(super) fn live_endpoints(&self) -> (pingwaf_proto::PanelListenerReport, Vec<(std::net::SocketAddr, pingwaf_proto::IngressProtocol)>) {
+        let shared = self.shared.read().unwrap_or_else(|e| e.into_inner());
+        let (mut report, live) = self.state.live_endpoints();
+        let mut endpoints = Vec::new();
+        for (addr, protocol, listener) in live {
+            if listener == Listener::Default && !self.default_routes_ready() {
+                report.applied_generation = 0;
+            }
+            if listener == Listener::Default && (!shared.contains_key(&addr.port()) || !self.has_default_routes()) {
+                report.applied_generation = 0;
+            } else {
+                endpoints.push((addr, protocol));
+            }
+        }
+        (report, endpoints)
     }
 
     pub(super) fn new(
@@ -61,6 +106,7 @@ impl Host {
             state: Default::default(),
             cache,
             defaults: Default::default(),
+            default_routes: Default::default(),
             worker: Default::default(),
         })
     }
@@ -100,7 +146,8 @@ impl Host {
         })
         .await??;
         view.check_upstreams().await?;
-        if self.state.publish(pending, view)?
+        let failures = view.tls_failures.clone();
+        if self.state.publish_with_failures(pending, view, failures)?
             && let Some(forwarding) = self.state.forwarding()
         {
             forwarding.run(|view| view.refresh_upstreams()).await;
@@ -120,16 +167,27 @@ impl Host {
         };
         let mut stream = super::ingress::downstream_stream(tcp);
         let forwarding = self.state.forwarding_for(listener);
-        if let Some(fallback) = fallback {
-            let managed = match &forwarding {
-                None => false,
-                Some(handle) => {
-                    let Ok(Ok(hostname)) = tokio::time::timeout(std::time::Duration::from_secs(10), fallback.hostname(&mut stream)).await else { return; };
-                    handle.run(|view| async move { view.rules.select(listener, &hostname).is_some() }).await.unwrap_or(false)
-                }
-            };
+        if let Some(fallback) = fallback
+            && self.has_default_routes()
+            && let Some(default_authorization) = self.state.scoped_forwarding(Listener::Default)
+        {
+            if !matches!(listener, Listener::Custom { port: 443, .. }) {
+                let _ = fallback.serve(stream, shutdown, default_authorization, TlsIdentity::Plain).await;
+                return;
+            }
+            let Ok(Ok(sni)) = tokio::time::timeout(std::time::Duration::from_secs(10), tls::read_sni(&mut stream)).await else { return; };
+            let hostname = sni.as_deref().unwrap_or("");
+            let managed = forwarding.as_ref().and_then(|f| f.request_view(listener))
+                .is_some_and(|view| view.rules.select(listener, hostname).is_some());
             if !managed {
-                let _ = fallback.serve(stream, shutdown).await;
+                if let Some((id, grant)) = default_authorization.site_grant(Listener::Default, hostname) {
+                    if !self.default_routes.read().unwrap_or_else(|e| e.into_inner()).applied.contains_key(&id) {
+                        return;
+                    }
+                    grant.run(|_| fallback.serve(stream, shutdown, default_authorization, TlsIdentity::Known(id))).await;
+                } else {
+                    let _ = fallback.serve(stream, shutdown, default_authorization, TlsIdentity::Unknown).await;
+                }
                 return;
             }
         }
@@ -154,7 +212,7 @@ impl pingwaf_agent::client::ManagedHost for HostCallbacks {
     fn application_report(&self) -> Option<pingwaf_proto::ManagedApplyReport> {
         self.0
             .state
-            .application_report(&self.0.cache.ingress_listeners()?)
+            .application_report(&self.0.cache.ingress_listeners()?, self.0.default_routes_ready())
     }
 
     fn session_started(&self, session: Uuid) {
@@ -182,6 +240,7 @@ impl pingwaf_agent::client::ManagedHost for HostCallbacks {
             let mut config = defaults.clone();
             config.config_hash =
                 hex::encode(pending.candidate().version().hash);
+            host.default_routes.write().unwrap_or_else(|e| e.into_inner()).expect(pending.candidate(), &config.config_hash);
             if let Err(error) = host.cache.update_from_site_config(&config) {
                 tracing::warn!(%error, "default configuration update failed");
                 return;
@@ -203,6 +262,8 @@ impl pingwaf_agent::client::ManagedHost for HostCallbacks {
 }
 
 struct View {
+    unmatched: Option<pingap_plugin::FallbackPagePlugin>,
+    tls_failures: HashMap<Uuid, &'static str>,
     rules: Compiled,
     sites: HashMap<Uuid, ManagedRequestSite>,
     #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
@@ -238,6 +299,11 @@ impl View {
 
     fn with_policies(candidate: &Candidate, cache_dir: &Path, mut policies: HashMap<Uuid, Arc<pingwaf_content::protection::Policy>>) -> anyhow::Result<Self> {
         let rules = candidate.compile()?;
+        let unmatched = if candidate.unmatched_pages.is_empty() { None } else {
+            let pages = candidate.unmatched_pages.iter().map(|p|
+                (i64::from(p.status_code), p.content_type.as_str(), p.body_template.as_str(), p.name.as_str()));
+            Some(pingap_plugin::FallbackPagePlugin::new(&super::unmatched_plugin_config(pages))?)
+        };
         let sites = rules
             .sites()
             .filter_map(|(id, site)| {
@@ -249,6 +315,7 @@ impl View {
                 Ok((id, build_site(site, oidc, cache_dir, envelope.handler.as_ref(), policies.remove(&id))?))
             })
             .collect::<anyhow::Result<_>>()?;
+        let mut tls_failures = HashMap::new();
         #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
         let tls = candidate
             .sites()
@@ -258,25 +325,23 @@ impl View {
                     ingress.protocol() == pingwaf_proto::IngressProtocol::Https
                 })
             })
-            .map(|(id, _)| {
-                use anyhow::Context;
+            .filter_map(|(id, _)| {
                 let ssl = rules
                     .site(*id)
-                    .and_then(|site| site.rules.ssl_config.as_ref())
-                    .with_context(|| {
-                        format!(
-                            "missing TLS configuration for managed site {id}"
-                        )
-                    })?;
-                Ok((
-                    *id,
-                    tls::TlsSite::build(ssl).with_context(|| {
-                        format!("TLS configuration for managed site {id}")
-                    })?,
-                ))
+                    .and_then(|site| site.rules.ssl_config.as_ref());
+                match ssl.context("missing TLS configuration").and_then(tls::TlsSite::build) {
+                    Ok(tls) => Some((*id, tls)),
+                    Err(error) => {
+                        tracing::warn!(site_id = %id, %error, "HTTPS configuration could not be loaded");
+                        tls_failures.insert(*id, "tls_config");
+                        None
+                    }
+                }
             })
-            .collect::<anyhow::Result<_>>()?;
+            .collect();
         Ok(Self {
+            unmatched,
+            tls_failures,
             rules,
             sites,
             #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
@@ -482,18 +547,81 @@ struct Selector {
     tls_site: Option<Uuid>,
 }
 
+type SiteGrant = Forwarding<Arc<View>>;
+#[derive(Clone, Copy)]
+enum TlsIdentity { Plain, Known(Uuid), Unknown }
+
+tokio::task_local! {
+    static REQUEST_GRANT: std::cell::RefCell<Option<tokio::sync::oneshot::Sender<SiteGrant>>>;
+    static TLS_IDENTITY: TlsIdentity;
+}
+
+fn pin_request(grant: SiteGrant) -> Result<(), ManagedRouteMiss> {
+    REQUEST_GRANT.try_with(|slot| {
+        slot.borrow_mut().take().ok_or(ManagedRouteMiss::Unavailable)?
+            .send(grant).map_err(|_| ManagedRouteMiss::Unavailable)
+    }).map_err(|_| ManagedRouteMiss::Unavailable)?
+}
+
+struct StandardSelector {
+    host: std::sync::Weak<Host>,
+    listener: Listener,
+}
+
+impl ManagedSiteSelector for StandardSelector {
+    fn select(&self, session: &Session, hostname: &str) -> Result<Option<ManagedRequestSite>, ManagedRouteMiss> {
+        let host = self.host.upgrade().ok_or(ManagedRouteMiss::Unavailable)?;
+        let tls = TLS_IDENTITY.try_with(|id| *id).map_err(|_| ManagedRouteMiss::Unavailable)?;
+        let default = host.state.scoped_forwarding(Listener::Default);
+        let custom = host.state.scoped_forwarding(self.listener);
+        for (listener, handle) in [(self.listener, custom.as_ref()), (Listener::Default, default.as_ref())] {
+            let Some(handle) = handle else { continue };
+            let Some(view) = handle.request_view(listener) else { return Err(ManagedRouteMiss::Unavailable) };
+            let Some((id, _)) = view.rules.select(listener, hostname) else { continue };
+            if matches!(tls, TlsIdentity::Unknown) || matches!(tls, TlsIdentity::Known(sni) if sni != id) {
+                return Err(ManagedRouteMiss::Misdirected);
+            }
+            let (selected, grant) = handle.site_grant(listener, hostname).ok_or(ManagedRouteMiss::Unavailable)?;
+            if selected != id { return Err(ManagedRouteMiss::Unavailable); }
+            let site = if listener == Listener::Default {
+                if !host.default_routes.read().unwrap_or_else(|e| e.into_inner()).applied.contains_key(&id) {
+                    return Err(ManagedRouteMiss::Unavailable);
+                }
+                None
+            } else {
+                Some(grant.view().sites.get(&id).cloned().ok_or(ManagedRouteMiss::Unavailable)?)
+            };
+            pin_request(grant)?;
+            return Ok(site);
+        }
+        if matches!(tls, TlsIdentity::Known(_)) { return Err(ManagedRouteMiss::Misdirected); }
+        let active = host.state.forwarding().ok_or(ManagedRouteMiss::Unavailable)?;
+        let response = active.view().unmatched.as_ref().and_then(|p| p.unmatched_response(hostname, session.req_header().uri.path()));
+        Err(ManagedRouteMiss::Unmatched(response))
+    }
+}
+
 impl ManagedSiteSelector for Selector {
     fn select(
         &self,
-        _: &Session,
+        session: &Session,
         hostname: &str,
-    ) -> Option<ManagedRequestSite> {
-        let view = self.forwarding.request_view(self.listener)?;
-        let (id, _) = view.rules.select(self.listener, hostname)?;
+    ) -> Result<Option<ManagedRequestSite>, ManagedRouteMiss> {
+        let view = self.forwarding.request_view(self.listener).ok_or(ManagedRouteMiss::Unavailable)?;
+        let Some((id, _)) = view.rules.select(self.listener, hostname) else {
+            if self.tls_site.is_some() { return Err(ManagedRouteMiss::Misdirected); }
+            let page = view.unmatched.as_ref().and_then(|p| p.unmatched_response(hostname, session.req_header().uri.path()));
+            return Err(ManagedRouteMiss::Unmatched(page));
+        };
         if self.tls_site.is_some_and(|selected| selected != id) {
-            return None;
+            return Err(ManagedRouteMiss::Misdirected);
         }
-        view.sites.get(&id).cloned()
+        let (granted_id, grant) = self.forwarding.site_grant(self.listener, hostname)
+            .ok_or(ManagedRouteMiss::Unavailable)?;
+        if granted_id != id { return Err(ManagedRouteMiss::Unavailable); }
+        let site = grant.view().sites.get(&id).cloned().ok_or(ManagedRouteMiss::Unavailable)?;
+        pin_request(grant)?;
+        Ok(Some(site))
     }
 }
 
@@ -503,6 +631,7 @@ impl ManagedSiteSelector for Selector {
 struct AuthorizedProxy {
     forwarding: Arc<Forwarding<Arc<View>>>,
     app: Arc<HttpProxy<Server>>,
+    tls: TlsIdentity,
 }
 
 #[async_trait::async_trait]
@@ -512,10 +641,19 @@ impl HttpServerApp for AuthorizedProxy {
         session: ServerSession,
         shutdown: &ShutdownWatch,
     ) -> Option<ReusedHttpStream> {
-        self.forwarding
-            .run(|_| self.app.process_new_http(session, shutdown))
-            .await
-            .flatten()
+        self.forwarding.run(|_| async {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let request = REQUEST_GRANT.scope(std::cell::RefCell::new(Some(sender)),
+                TLS_IDENTITY.scope(self.tls, self.app.process_new_http(session, shutdown)));
+            tokio::pin!(request);
+            tokio::select! {
+                result = &mut request => result,
+                grant = receiver => match grant {
+                    Ok(grant) => grant.run(|_| request).await.flatten(),
+                    Err(_) => request.await,
+                },
+            }
+        }).await.flatten()
     }
 
     fn h2_options(&self) -> Option<H2Options> {
@@ -540,7 +678,7 @@ async fn serve_http(
 
 async fn serve_http_stream(
     forwarding: Forwarding<Arc<View>>,
-    stream: pingora::protocols::l4::stream::Stream,
+    mut stream: pingora::protocols::l4::stream::Stream,
     listener: Listener,
     shutdown: ShutdownWatch,
     h2c: bool,
@@ -554,20 +692,21 @@ async fn serve_http_stream(
     };
     let forwarding = Arc::new(forwarding);
     forwarding
-        .run(|view| async {
-            let (stream, tls_site): (pingora::protocols::Stream, _) =
+        .run(|_| async {
+            let (stream, tls_site, tls_grant): (pingora::protocols::Stream, _, Option<SiteGrant>) =
                 match protocol {
                     pingwaf_proto::IngressProtocol::Http => {
-                        (Box::new(stream), None)
+                        (Box::new(stream), None, None)
                     },
                     #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
                     pingwaf_proto::IngressProtocol::Https => {
-                        let (stream, id) = tokio::time::timeout(
-                            std::time::Duration::from_secs(10),
-                            tls::accept(stream, view, listener),
-                        )
-                        .await??;
-                        (stream, Some(id))
+                        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                            let sni = tls::read_sni(&mut stream).await?.context("managed HTTPS requires SNI")?;
+                            let (id, grant) = forwarding.site_grant(listener, &sni).context("SNI is not assigned to this listener")?;
+                            let stream = grant.run(|view| tls::accept(stream, view, id, &sni))
+                                .await.context("site authorization withdrawn")??;
+                            Ok::<_, anyhow::Error>((stream, Some(id), Some(grant)))
+                        }).await??
                     },
                     _ => anyhow::bail!("unsupported managed ingress transport"),
                 };
@@ -585,8 +724,14 @@ async fn serve_http_stream(
             let app = AuthorizedProxy {
                 forwarding: forwarding.clone(),
                 app: Arc::new(app),
+                tls: tls_site.map_or(TlsIdentity::Plain, TlsIdentity::Known),
             };
-            Service::handle_event(stream, Arc::new(app), shutdown).await;
+            let service = Service::handle_event(stream, Arc::new(app), shutdown);
+            if let Some(grant) = tls_grant {
+                grant.run(|_| service).await;
+            } else {
+                service.await;
+            }
             Ok(())
         })
         .await
@@ -660,6 +805,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn invalid_tls_material_only_fails_its_own_site() {
+        let origin = "127.0.0.1:8123".parse().unwrap();
+        let healthy = site(Some(81), origin);
+        let mut invalid = site(Some(83), origin);
+        let identity = invalid.site.as_mut().unwrap();
+        identity.id = Uuid::new_v4().to_string();
+        identity.rules.as_mut().unwrap().site_id = identity.id.clone();
+        let id = identity.id.clone();
+        invalid.ingress.as_mut().unwrap().protocol = IngressProtocol::Https as i32;
+        let (session, incoming) = receive(vec![healthy, invalid]);
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppliedState::default();
+        state.start_session(session);
+        let pending = state.prepare(incoming).unwrap().unwrap();
+        let view = View::build(pending.candidate(), temp.path()).unwrap();
+        assert!(view.rules.select(listener(81), "alias.example").is_some());
+        assert_eq!(view.tls_failures.len(), 1);
+        assert_eq!(view.tls_failures[&Uuid::parse_str(&id).unwrap()], "tls_config");
+        assert!(!view.tls.contains_key(&Uuid::parse_str(&id).unwrap()));
+        let failures = view.tls_failures.clone();
+        assert!(state.publish_with_failures(pending, view, failures).unwrap());
+        let report = state.application_report(&Default::default(), true).unwrap();
+        assert_eq!(report.received_sites.len(), 1);
+        assert_eq!(report.received_sites[0].site_id, id);
+        assert_eq!(report.received_sites[0].failure_code, "tls_config");
+    }
+
     fn receive(
         sites: Vec<ManagedSite>,
     ) -> (Uuid, pingwaf_agent::managed::Received) {
@@ -670,7 +843,7 @@ mod tests {
     }
 
     fn receive_version(receiver: &mut Receiver, session: Uuid, authority: Uuid, generation: i64, sites: Vec<ManagedSite>) -> pingwaf_agent::managed::Received {
-        let config = ManagedSiteConfig { sites }.encode_to_vec();
+        let config = ManagedSiteConfig::from_sites(sites).encode_to_vec();
         PullWindow::start(receiver)
             .unwrap()
             .receive(
@@ -704,11 +877,19 @@ mod tests {
             let state = AppliedState::default();
             state.start_session(session);
             let directory = tempfile::tempdir().unwrap();
+            let mut neighbor = item.clone();
+            let identity = neighbor.site.as_mut().unwrap();
+            identity.id = Uuid::new_v4().to_string();
+            identity.rules.as_mut().unwrap().site_id = identity.id.clone();
+            identity.domain = "neighbor.example".into();
+            identity.alternate_domains.clear();
             let mut prepare = |generation, status| {
                 item.handler = Some(pingwaf_proto::managed_site::Handler::Redirect(pingwaf_proto::SiteRedirect {
                     target: "https://destination.example/".into(), status, ..Default::default()
                 }));
-                let incoming = receive_version(&mut receiver, session, authority, generation, vec![item.clone()]);
+                neighbor.handler = item.handler.clone();
+                let sites = if generation < 3 { vec![item.clone(), neighbor.clone()] } else { vec![item.clone()] };
+                let incoming = receive_version(&mut receiver, session, authority, generation, sites);
                 let pending = state.prepare(incoming).unwrap().unwrap();
                 let view = Arc::new(View::build(pending.candidate(), directory.path()).unwrap());
                 (pending, view)
@@ -735,10 +916,16 @@ mod tests {
             let (mut h2, connection) = h2::client::handshake(tcp).await.unwrap();
             let driver = tokio::spawn(connection);
             let mut staged = None;
-            for (phase, expected) in [302, 302, 307].into_iter().enumerate() {
+            let (_, old_neighbor) = state.forwarding_for(ingress).unwrap().site_grant(ingress,"neighbor.example").unwrap();
+            for (phase, expected) in [302, 302, 307, 307].into_iter().enumerate() {
                 if phase == 1 { staged = Some(prepare(2, 307)); }
                 if phase == 2 {
                     let (pending, view) = staged.take().unwrap();
+                    assert!(state.publish(pending, view).unwrap());
+                }
+                if phase == 3 {
+                    let (pending, view) = prepare(3, 307);
+                    assert!(old_neighbor.run(|_| std::future::ready(())).await.is_none());
                     assert!(state.publish(pending, view).unwrap());
                 }
                 h1.write_all(b"HEAD /route HTTP/1.1\r\nHost: alias.example\r\n\r\n").await.unwrap();
@@ -1083,6 +1270,14 @@ mod tests {
                 site.site_revision = "ab".repeat(32);
             }
             rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
+                panel: Some(pingwaf_proto::PanelListenerReport {
+                    desired_generation: 1, applied_generation: 1, policy_revision: 0,
+                    sockets: endpoints.iter().filter(|(_,_,marker)| marker.is_some()).map(|(addr,_,_)|
+                        pingwaf_proto::PanelSocketStatus { address: "0.0.0.0".into(), error: String::new(),
+                            listener: Some(pingwaf_proto::IngressListenerStatus { port: addr.port().into(),
+                                protocol: IngressProtocol::Http as i32, state: pingwaf_proto::IngressBindState::Bound as i32 })
+                        }).collect(),
+                }),
                 supports_site_handlers: false,
                 supports_site_archives: false,
                 static_directories: Default::default(),
@@ -1159,7 +1354,8 @@ mod tests {
                         "{response}"
                     );
                 } else {
-                    assert!(response.starts_with("HTTP/1.1 421"), "{response}");
+                    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+                    assert!(response.split_once("\r\n\r\n").is_some_and(|(_,body)| body.contains("<html")));
                 }
             }
             callbacks.session_ended(session);

@@ -10,6 +10,11 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- HTTP-01 responses now require a current challenge record for the requested domain. Unknown challenge types disable issuance. Manual DNS orders added after startup follow the per-certificate retry schedule.
+- Shared standard ports select a site for each request. Restoring error pages now checks their scope, status, content type and template together. HTML site error pages escape interpolated request values by default.
+- Linux managed agents reconcile business sockets from versioned control-plane assignments. The agent listener dialog displays saved addresses and reports actual sockets. Review existing node addresses on upgrade before enabling traffic.
+- Managed HTTP listeners now distinguish unknown hosts from TLS authority conflicts. Error pages retain built-in gateway defaults for unconfigured statuses and discard origin encoding and validators when replacing bodies.
+
 - Site creation, editing and cloning now show the protocol claimed by other sites on each ingress port. The API and restore validation identify cross-site protocol conflicts.
 
 - Improve the six console maintenance entries. Empty reports and dashboards guide users to site setup, node directory edits preserve search and pagination, directory validation follows the configured root, and ASN imports apply the exact bytes of the latest successful preview.

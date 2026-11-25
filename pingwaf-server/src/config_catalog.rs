@@ -11,7 +11,7 @@ use sea_orm::{ConnectionTrait, DbErr, Statement, Value as DbValue};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub const SNAPSHOT_SCHEMA: i64 = 2;
+pub const SNAPSHOT_SCHEMA: i64 = 3;
 pub const INSTANCE_SETTING_KEYS: [&str; 3] =
     ["notification_settings", "login_security", "passkey_enabled"];
 
@@ -239,6 +239,8 @@ pub static GLOBAL_TABLES: &[TableSpec] = &[
 ];
 
 pub static DEPLOYMENT_ONLY_TABLES: &[TableSpec] = &[
+    deployment("node_listener_policies", 3, "id"),
+    deployment("node_listener_overrides", 4, "id"),
     TableSpec {
         secrets: &["source_url"],
         ..deployment("ip_groups", 1, "id")
@@ -551,13 +553,13 @@ mod tests {
         // log_retention_settings moved from deployment-only to global: the
         // static-asset access-log filter rides inside every rule bundle.
         assert_eq!(GLOBAL_TABLES.len(), 5);
-        assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 9);
-        assert_eq!(tables_for(VersionScope::Deployment).len(), 40);
+        assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 11);
+        assert_eq!(tables_for(VersionScope::Deployment).len(), 42);
         let names: BTreeSet<_> = tables_for(VersionScope::Deployment)
             .into_iter()
             .map(|table| table.name)
             .collect();
-        assert_eq!(names.len(), 40, "table names must be unique");
+        assert_eq!(names.len(), 42, "table names must be unique");
     }
 
     #[test]

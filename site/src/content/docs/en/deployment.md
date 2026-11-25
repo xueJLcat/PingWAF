@@ -21,7 +21,7 @@ minutes: 10
 
 `GET /healthz` answers on both HTTP and HTTPS, which is what the compose health check and most load balancers should probe. Everything else redirects to HTTPS.
 
-The Linux all-in-one node supports dynamic listeners. On standalone agents, enable managed snapshots with a valid `PINGWAF_INGRESS_LISTENERS` configuration. Under Sites, add HTTP or HTTPS ports alongside the domain and select a certificate for HTTPS. Dynamic ports bind to all IPv4 interfaces. The management port is reserved.
+Linux agents and all-in-one nodes bind the addresses and ports authorized by active site assignments. In Agents, open the listener address dialog to review the node policy and current socket report. Removing the last site using a port closes its socket.
 
 The legacy agent protocol delivers default-ingress sites only. A TCP bind report does not authorize custom-ingress traffic.
 Migration 000107 enables custom site creation. To return to the previous binary and schema after using custom sites, restore a pre-upgrade backup.

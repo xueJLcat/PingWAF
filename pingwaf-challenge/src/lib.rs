@@ -94,3 +94,4 @@ impl std::str::FromStr for ChallengeLevel {
         })
     }
 }
+pub mod templates;

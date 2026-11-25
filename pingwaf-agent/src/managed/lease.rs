@@ -153,13 +153,14 @@ mod tests {
         generation: i64,
         lease_seconds: u32,
     ) -> ManagedSnapshot {
+        let config = prost::Message::encode_to_vec(&pingwaf_proto::ManagedSiteConfig::from_sites(vec![]));
         ManagedSnapshot {
             session_id: session.to_string(),
             authority_epoch: authority.to_string(),
             generation,
             lease_seconds,
-            config: Vec::new(),
-            config_hash: hex::encode(Sha256::digest([])),
+            config_hash: hex::encode(Sha256::digest(&config)),
+            config,
         }
     }
 

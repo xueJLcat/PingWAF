@@ -35,6 +35,7 @@ export function ingressRequest(draft: IngressDraft, original: string, clone = fa
 
 export function validIngressPort(listener: string, adminPort?: number) {
   if (!listener) return true
+  if (!/^(http|https):[1-9]\d{0,4}$/.test(listener)) return false
   const port = Number(listener.split(':')[1])
   return Number.isInteger(port) && port > 0 && port <= 65535 &&
     (port !== 80 || listener === 'http:80') && (port !== 443 || listener === 'https:443') && port !== adminPort
@@ -44,8 +45,9 @@ export function claimedProtocol(port: string, claims?: PortProtocol[]) {
   return claims?.find(claim => claim.port === Number(port))?.protocol
 }
 
-export function ingressPortError(draft: IngressDraft, adminPort?: number, claims?: PortProtocol[]) {
-  const rows = [draft.listener, ...(draft.additional ?? [])]
+export function ingressPortError(draft: IngressDraft, adminPort?: number, claims?: PortProtocol[], reservedPorts?: number[]) {
+  const rows = draft.listener ? [draft.listener, ...(draft.additional ?? [])] : ['http:80', 'https:443']
+  if (rows.some(row => reservedPorts?.includes(Number(row.split(':')[1])))) return 'pages.sites.infrastructurePort'
   if (!rows.every(row => validIngressPort(row, adminPort))) return 'pages.sites.ingressPortInvalid'
   if (new Set(rows.map(row => Number(row.split(':')[1]))).size !== rows.length) return 'pages.sites.duplicatePort'
   for (const row of rows) {

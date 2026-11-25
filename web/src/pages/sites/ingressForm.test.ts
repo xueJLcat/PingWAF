@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { defaultIngress, ingressPortError, ingressRequest } from './ingressForm'
 
 describe('ingress form payload', () => {
+  it('checks infrastructure ports for primary, additional and implicit listeners', () => {
+    const check = (listener: string, additional: string[] = [], reserved = [5432, 9091]) =>
+      ingressPortError({ ...defaultIngress, listener, additional }, 9080, [], reserved)
+    expect(check('https:5432')).toBe('pages.sites.infrastructurePort')
+    expect(check('http:81', ['http:9091'])).toBe('pages.sites.infrastructurePort')
+    expect(check('', [], [80])).toBe('pages.sites.infrastructurePort')
+    expect(check('other:81')).toBe('pages.sites.ingressPortInvalid')
+    expect(check('http:81:82')).toBe('pages.sites.ingressPortInvalid')
+    expect(check('http:81')).toBeUndefined()
+  })
+
   it('checks primary and additional ports against other sites while allowing HTTP sharing', () => {
     const claims = [{ port: 8080, protocol: 'http' as const }]
     const draft = { ...defaultIngress, listener: 'http:8080' }

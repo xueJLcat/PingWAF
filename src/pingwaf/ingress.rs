@@ -1,16 +1,14 @@
-//! Preconfigured ingress socket lifecycle, independent of the default proxy.
+//! Socket lifecycle for endpoints authorized by the current panel snapshot.
 
-use super::{LOG_TARGET, public_listen_addr};
+use super::LOG_TARGET;
 use pingap_proxy::{AppContext, Server, ServerConf, ServerLocationsProvider};
 use pingora::apps::HttpServerOptions;
 use pingora::protocols::{GetSocketDigest, SocketDigest, l4::stream::Stream};
 use pingora::proxy::HttpProxy;
 use pingora::server::{ShutdownWatch, configuration};
-use pingora::services::listening::Service;
 use pingwaf_agent::cache::RuleCache;
 use pingwaf_proto::{
     IngressBindState, IngressListenerStatus, IngressListeners, IngressProtocol,
-    MAX_INGRESS_LISTENERS,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,7 +25,6 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-const LISTENERS_ENV: &str = "PINGWAF_INGRESS_LISTENERS";
 const MAX_CONNECTIONS_PER_LISTENER: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,25 +34,6 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    fn parse(value: &str) -> Option<Self> {
-        let (protocol, addr) = value.trim().split_once('@')?;
-        let protocol = match protocol {
-            "http" => IngressProtocol::Http,
-            "https" => IngressProtocol::Https,
-            _ => return None,
-        };
-        let addr = match addr.parse::<u16>() {
-            Ok(port) => SocketAddr::from(([0, 0, 0, 0], port)),
-            Err(_) => addr.parse::<SocketAddr>().ok()?,
-        };
-        if addr.port() == 0
-            || matches!(addr, SocketAddr::V6(v6) if v6.ip().to_ipv4_mapped().is_some())
-        {
-            return None;
-        }
-        Some(Self { addr, protocol })
-    }
-
     fn status(self, state: IngressBindState) -> IngressListenerStatus {
         IngressListenerStatus {
             port: u32::from(self.addr.port()),
@@ -65,64 +43,14 @@ impl Endpoint {
     }
 }
 
-fn parse_list(value: &str) -> Vec<Endpoint> {
-    if value.trim().is_empty() {
-        return Vec::new();
-    }
-    if value.split(',').take(MAX_INGRESS_LISTENERS + 1).count()
-        > MAX_INGRESS_LISTENERS
-    {
-        warn!(target: LOG_TARGET, limit = MAX_INGRESS_LISTENERS, "custom ingress list exceeds limit; no custom sockets opened");
-        return Vec::new();
-    }
-    let mut by_port = BTreeMap::new();
-    for (index, entry) in value.split(',').enumerate() {
-        if let Some(endpoint) = Endpoint::parse(entry) {
-            let port = endpoint.addr.port();
-            by_port.entry(port).and_modify(|value| {
-                *value = None;
-                warn!(target: LOG_TARGET, port, "duplicate custom ingress port; no socket opened for this port");
-            }).or_insert(Some(endpoint));
-        } else {
-            warn!(target: LOG_TARGET, entry = index + 1, "invalid custom ingress; expected http@port or https@port, optionally with an explicit IP address");
-        }
-    }
-    by_port.into_values().flatten().collect()
-}
-
-fn reserved_ports(control_ports: Vec<u16>) -> BTreeSet<u16> {
-    let mut ports = BTreeSet::from([80, 443]);
-    ports.extend(control_ports);
-    for addr in [
-        public_listen_addr(
-            "PINGWAF_LISTEN_HTTP_ADDR",
-            "PINGWAF_ANALYSIS_HTTP_ADDR",
-            80,
-        ),
-        public_listen_addr(
-            "PINGWAF_LISTEN_HTTPS_ADDR",
-            "PINGWAF_ANALYSIS_HTTPS_ADDR",
-            443,
-        ),
-    ] {
-        // The default listener accepts a list and DNS names. Port ownership
-        // does not depend on the resolved family/address or on DNS being up.
-        ports.extend(addr.split(',').filter_map(|part| {
-            let (_, port) = part.trim().rsplit_once(':')?;
-            port.parse::<u16>().ok()
-        }));
-    }
-    ports
-}
-
 fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     let socket = Socket::new(
         Domain::for_address(addr),
         Type::STREAM,
         Some(Protocol::TCP),
     )?;
-    if let SocketAddr::V6(v6) = addr {
-        socket.set_only_v6(!v6.ip().is_unspecified())?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
     }
     // No SO_REUSEPORT, including when an unrelated service already owns it.
     #[cfg(unix)]
@@ -160,10 +88,6 @@ impl ServerLocationsProvider for Unassigned {
     ) -> Option<Arc<pingap_location::ServerLocationRoute>> {
         None
     }
-}
-
-fn unassigned_http(port: u16) -> anyhow::Result<HttpProxy<Server>> {
-    http_proxy(port, std::convert::identity)
 }
 
 pub(super) fn http_proxy(
@@ -206,7 +130,6 @@ async fn serve(
     listener: TcpListener,
     _endpoint: Endpoint,
     _host: super::IngressHost,
-    app: Option<Arc<HttpProxy<Server>>>,
     shutdown: ShutdownWatch,
 ) {
     let mut connections = JoinSet::new();
@@ -229,11 +152,6 @@ async fn serve(
                         connections.spawn(async move { host.serve(tcp, identity, shutdown).await });
                         continue;
                     }
-                    if let Some(app) = &app {
-                        connections.spawn(Service::handle_event(
-                            Box::new(downstream_stream(tcp)), app.clone(), shutdown.clone(),
-                        ));
-                    }
                 },
                 Err(error) => {
                     warn!(target: LOG_TARGET, addr = ?listener.local_addr(), %error, "custom ingress accept failed");
@@ -244,24 +162,16 @@ async fn serve(
     }
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn configured() -> bool {
-    std::env::var(LISTENERS_ENV)
-        .is_ok_and(|value| !parse_list(&value).is_empty())
-}
-
 pub(super) async fn run(
     cache: Arc<RuleCache>,
     control_ports: Vec<u16>,
     host: super::IngressHost,
 ) {
-    let fixed: BTreeMap<_, _> = parse_list(&std::env::var(LISTENERS_ENV).unwrap_or_default())
-        .into_iter().map(|endpoint| (endpoint.addr.port(), endpoint)).collect();
-    if fixed.is_empty() && host.is_none() { return; }
-    let management_ports: BTreeSet<_> = control_ports.iter().copied().collect();
-    let reserved = reserved_ports(control_ports);
+    if host.is_none() { return; }
+    let management_ports: BTreeSet<_> = control_ports.into_iter().collect();
     let (_shutdown, watch) = watch::channel(false);
-    let mut running = BTreeMap::<u16, (Endpoint, JoinSet<()>)>::new();
+    let mut running = BTreeMap::<SocketAddr, (Endpoint, JoinSet<()>)>::new();
+    let mut retries = BTreeMap::<SocketAddr, (Endpoint, tokio::time::Instant, Duration, String)>::new();
     let mut previous = None;
     let (directory_updates, directories) = watch::channel((std::collections::HashMap::new(), Vec::<String>::new(), None));
     #[cfg(target_os = "linux")]
@@ -289,34 +199,17 @@ pub(super) async fn run(
         });
     }
     loop {
-        let mut desired = fixed.clone();
-        let shared_ports: Vec<u16>;
-        #[cfg(target_os = "linux")]
-        { shared_ports = host.as_ref().map(|host| host.shared_ports()).unwrap_or_default(); }
-        #[cfg(not(target_os = "linux"))]
-        { shared_ports = Vec::new(); }
+        let mut desired = BTreeMap::<SocketAddr, Endpoint>::new();
+        let mut panel = pingwaf_proto::PanelListenerReport::default();
         #[cfg(target_os = "linux")]
         if let Some(host) = &host {
-            for &port in &shared_ports {
-                desired.insert(port, Endpoint {
-                    addr: SocketAddr::from(([0, 0, 0, 0], port)),
-                    protocol: if port == 443 { IngressProtocol::Https } else { IngressProtocol::Http },
-                });
-            }
-            let mut dynamic = host.live_listeners();
-            dynamic.sort_by_key(|listener| match listener {
-                pingwaf_agent::managed::Listener::Custom { port, .. } => *port,
-                _ => 0,
-            });
-            for listener in dynamic {
-                if let pingwaf_agent::managed::Listener::Custom { port, protocol } = listener {
-                    if desired.len() >= MAX_INGRESS_LISTENERS { break; }
-                    desired.entry(port).or_insert(Endpoint {
-                        addr: SocketAddr::from(([0, 0, 0, 0], port)), protocol,
-                    });
-                }
+            let (version, endpoints) = host.live_endpoints();
+            panel = version;
+            for (addr, protocol) in endpoints {
+                desired.insert(addr, Endpoint { addr, protocol });
             }
         }
+        retries.retain(|addr, (endpoint, _, _, _)| desired.get(addr) == Some(endpoint));
         // Join retired accept loops before reusing their ports with a different protocol.
         let retired: Vec<_> = running.iter().filter_map(|(port, (endpoint, _))|
             (desired.get(port) != Some(endpoint)).then_some(*port)).collect();
@@ -326,28 +219,49 @@ pub(super) async fn run(
             }
         }
         let (static_directories, prepared_directories, static_root_registry) = directories.borrow().clone();
-        let mut report = IngressListeners { dynamic_bind: host.is_some(), supports_site_handlers: host.is_some(), supports_site_archives: host.is_some(), listeners: Vec::new(), static_directories, prepared_directories, static_root_registry };
-        for (port, endpoint) in desired {
-            let assigned_standard = (!fixed.contains_key(&port) || shared_ports.contains(&port)) && matches!(
-                (port, endpoint.protocol),
-                (80, IngressProtocol::Http) | (443, IngressProtocol::Https)
-            );
-            let state = if management_ports.contains(&port) || (reserved.contains(&port) && !assigned_standard) {
+        let mut report = IngressListeners { panel: None, dynamic_bind: host.is_some(), supports_site_handlers: host.is_some(), supports_site_archives: host.is_some(), listeners: Vec::new(), static_directories, prepared_directories, static_root_registry };
+        let mut by_port = BTreeMap::new();
+        for (addr, endpoint) in desired {
+            let port = addr.port();
+            let state = if management_ports.contains(&port) {
                 IngressBindState::Reserved
+            } else if retries.get(&addr).is_some_and(|(_, next, _, _)| *next > tokio::time::Instant::now()) {
+                IngressBindState::BindFailed
             } else {
-                let (_, tasks) = running.entry(port).or_insert_with(|| (endpoint, JoinSet::new()));
+                let (_, tasks) = running.entry(addr).or_insert_with(|| (endpoint, JoinSet::new()));
                 let _ = tasks.try_join_next();
                 if tasks.is_empty() {
                     match start(endpoint, watch.clone(), tasks, host.clone()) {
-                        Ok(()) => IngressBindState::Bound,
-                        Err(_) => IngressBindState::BindFailed,
+                        Ok(()) => {
+                            retries.remove(&addr);
+                            IngressBindState::Bound
+                        }
+                        Err(error) => {
+                            let delay = retries.get(&addr).map_or(Duration::from_secs(1), |(_, _, delay, _)| {
+                                (*delay * 2).min(Duration::from_secs(30))
+                            });
+                            warn!(target: LOG_TARGET, %addr, %error, ?delay, "unable to bind panel listener");
+                            retries.insert(addr, (endpoint, tokio::time::Instant::now() + delay, delay, error.to_string()));
+                            IngressBindState::BindFailed
+                        }
                     }
                 } else {
                     IngressBindState::Bound
                 }
             };
-            report.listeners.push(endpoint.status(state));
+            let entry = by_port.entry(port).or_insert_with(|| endpoint.status(state));
+            if state != IngressBindState::Bound { entry.state = state as i32; }
+            let error = if state == IngressBindState::Reserved { "infrastructure port".into() }
+                else { retries.get(&addr).map(|v| v.3.clone()).unwrap_or_default() };
+            panel.sockets.push(pingwaf_proto::PanelSocketStatus {
+                address: addr.ip().to_string(), listener: Some(endpoint.status(state)), error,
+            });
         }
+        if panel.sockets.iter().any(|s| s.listener.as_ref().is_none_or(|l| l.state() != IngressBindState::Bound)) {
+            panel.applied_generation = 0;
+        }
+        report.panel = Some(panel);
+        report.listeners = by_port.into_values().collect();
         if previous.as_ref() != Some(&report) {
             info!(target: LOG_TARGET, listeners = ?report.listeners, "ingress inventory changed");
             previous = Some(report.clone());
@@ -363,13 +277,8 @@ fn start(
     tasks: &mut JoinSet<()>,
     host: super::IngressHost,
 ) -> anyhow::Result<()> {
-    let app = if host.is_none() && endpoint.protocol == IngressProtocol::Http {
-        Some(Arc::new(unassigned_http(endpoint.addr.port())?))
-    } else {
-        None
-    };
     let listener = bind(endpoint.addr)?;
-    tasks.spawn(serve(listener, endpoint, host, app, shutdown));
+    tasks.spawn(serve(listener, endpoint, host, shutdown));
     Ok(())
 }
 
@@ -390,32 +299,5 @@ mod tests {
         assert_eq!(client.local_addr().unwrap(), peer);
         assert_eq!(digest.peer_addr().unwrap().as_inet(), Some(&peer));
         assert_eq!(digest.local_addr().unwrap().as_inet(), Some(&local));
-    }
-
-    #[test]
-    fn list_accepts_ip_literals_only_and_rejects_every_duplicate() {
-        let endpoints = parse_list(
-            "http@127.0.0.1:81,https@[::]:82, http@[::1]:83,https@127.0.0.1:83,http@127.0.0.1:83,http@localhost:84,http@127.0.0.1:0,http@127.0.0.1:65536,http@[::ffff:127.0.0.1]:85,ftp@127.0.0.1:86",
-        );
-        assert_eq!(
-            endpoints,
-            [
-                Endpoint::parse("http@127.0.0.1:81").unwrap(),
-                Endpoint::parse("https@[::]:82").unwrap()
-            ]
-        );
-        assert!(parse_list(" \t").is_empty());
-    }
-
-    #[test]
-    fn list_over_budget_opens_nothing() {
-        let entries: Vec<_> = (1..=MAX_INGRESS_LISTENERS + 1)
-            .map(|port| format!("http@127.0.0.1:{port}"))
-            .collect();
-        assert_eq!(
-            parse_list(&entries[..MAX_INGRESS_LISTENERS].join(",")).len(),
-            MAX_INGRESS_LISTENERS
-        );
-        assert!(parse_list(&entries.join(",")).is_empty());
     }
 }

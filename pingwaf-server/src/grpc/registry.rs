@@ -166,6 +166,26 @@ fn repush_cooldown(repushes: u32) -> Duration {
 }
 
 fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
+    if let Some(panel) = &report.panel {
+        if panel.sockets.len() > MAX_INGRESS_LISTENERS || !(0..=panel.desired_generation).contains(&panel.applied_generation)
+            || panel.policy_revision < -1 { return None; }
+        let mut states = HashMap::new();
+        let mut addresses = std::collections::HashSet::new();
+        for socket in &panel.sockets {
+            let ip = socket.address.parse::<std::net::IpAddr>().ok()?;
+            let listener = socket.listener.as_ref()?;
+            let bound = listener.state() == IngressBindState::Bound;
+            if socket.error.len() > 1024 || !addresses.insert((ip, listener.port))
+                || listener.state() == IngressBindState::Unspecified || (bound && !socket.error.is_empty())
+                || (!bound && panel.applied_generation > 0) { return None; }
+            let all_bound = states.entry((listener.port, listener.protocol)).or_insert(true);
+            *all_bound &= bound;
+        }
+        if states.len() != report.listeners.len() || report.listeners.iter().any(|l|
+            states.get(&(l.port,l.protocol)) != Some(&(l.state() == IngressBindState::Bound))) {
+            return None;
+        }
+    }
     if let Some(registry) = &report.static_root_registry {
         if registry.paths.len() > 16 || registry.public_root.len() > 4096
             || registry.last_command.len() > 64 || registry.last_error.len() > 8192
@@ -204,6 +224,7 @@ fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
 #[derive(Clone)]
 pub struct AgentRegistry {
     pub(crate) admin_port: u16,
+    pub(crate) reserved_ports: Vec<u16>,
     inner: Arc<RwLock<Inner>>,
 }
 
@@ -261,8 +282,22 @@ impl AgentRegistry {
     pub(crate) fn with_admin_port(admin_port: u16) -> Self {
         Self {
             admin_port,
+            reserved_ports: vec![admin_port],
             inner: Default::default(),
         }
+    }
+
+    pub(crate) fn validate_site_ports(&self, primary: Option<i32>, additional: &[String]) -> Result<(),crate::api::error::ApiError> {
+        let primary_ports = primary.map_or_else(|| vec![80,443], |p| vec![p as u16]);
+        let ports = primary_ports.into_iter().chain(additional.iter().filter_map(|v|
+            crate::models::site::parse_listener(v).map(|(port,_)| port)));
+        for port in ports {
+            if self.reserved_ports.contains(&port) {
+                return Err(crate::api::error::ApiError::BadRequest(format!("port {port} is reserved for infrastructure"))
+                    .with_code("site.ingress_invalid"));
+            }
+        }
+        Ok(())
     }
 
     /// Attaches a freshly opened heartbeat stream and returns everything that
@@ -439,7 +474,16 @@ impl AgentRegistry {
         generation: u64,
         report: Option<&IngressListeners>,
     ) {
-        let report = report.and_then(validated_ingress);
+        let report = match report {
+            Some(raw) => match validated_ingress(raw) {
+                Some(valid) => Some(valid),
+                None => {
+                    tracing::warn!(%agent_id, generation, listeners = raw.listeners.len(), "invalid ingress inventory; previous report retains its original expiry");
+                    return;
+                }
+            },
+            None => None,
+        };
         let mut inner = self.inner.write().await;
         let Some(connection) = inner.connected.get_mut(&agent_id) else {
             return;
@@ -530,7 +574,7 @@ impl AgentRegistry {
                 };
                 let failure_code = match row.failure_code.as_str() {
                     "" => None,
-                    "content_download" | "content_validation" | "config_apply" if receiving => Some(row.failure_code.clone()),
+                    "content_download" | "content_validation" | "config_apply" | "tls_config" if receiving => Some(row.failure_code.clone()),
                     _ => return None,
                 };
                 destination.push(SiteApplication {
@@ -651,36 +695,6 @@ impl AgentRegistry {
             .filter(|connection| connection.session == Some(session))?
             .ingress.as_ref()?;
         (at.elapsed() < Duration::from_secs(60)).then(|| report.clone())
-    }
-
-    pub(super) async fn bound_ingresses(
-        &self,
-        id: Uuid,
-        session: Uuid,
-    ) -> Vec<(i32, &'static str)> {
-        let inner = self.inner.read().await;
-        let Some((_, report)) = inner
-            .connected
-            .get(&id)
-            .filter(|connection| connection.session == Some(session))
-            .and_then(|connection| connection.ingress.as_ref())
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
-        else {
-            return Vec::new();
-        };
-        report
-            .listeners
-            .iter()
-            .filter(|l| {
-                l.state() == IngressBindState::Bound
-                    && l.port != u32::from(self.admin_port)
-            })
-            .filter_map(|l| match l.protocol() {
-                IngressProtocol::Http => Some((l.port as i32, "http")),
-                IngressProtocol::Https => Some((l.port as i32, "https")),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Latest validated TCP inventory on this stream. Callers must supply a
@@ -1437,6 +1451,7 @@ mod tests {
         let (stream, _) =
             registry.connect_session(agent, sender, Some(session)).await;
         let bound = IngressListeners {
+            panel: None,
             supports_site_handlers: false,
                 supports_site_archives: false,
             static_directories: Default::default(),
@@ -1504,6 +1519,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let (first, _) = registry.connect(agent, sender).await;
         let mut report = IngressListeners {
+            panel: None,
             supports_site_handlers: false,
                 supports_site_archives: false,
             static_directories: Default::default(),
@@ -1539,8 +1555,9 @@ mod tests {
 
         report.listeners.push(report.listeners[0]);
         registry.record_ingress(agent, current, Some(&report)).await;
-        assert_eq!(registry.ingress_listeners(agent, fresh).await, None);
         report.listeners.pop();
+        assert_eq!(registry.ingress_listeners(agent, fresh).await, Some(report.clone()));
+        assert_eq!(registry.ingress_listeners(agent, Duration::ZERO).await, None);
         registry.record_ingress(agent, current, Some(&report)).await;
         registry.record_ingress(agent, current, None).await;
         assert_eq!(registry.ingress_listeners(agent, fresh).await, None);

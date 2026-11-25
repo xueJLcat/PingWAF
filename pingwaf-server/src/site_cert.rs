@@ -150,7 +150,7 @@ fn cert_hostnames(cert_pem: &str) -> Option<Vec<String>> {
 /// An exact set comparison, not a wildcard match: this module only ever
 /// generates the hostnames themselves, so a mismatch means the site's domains
 /// changed and the certificate has to be reissued.
-fn covers(cert_pem: &str, names: &[String]) -> bool {
+pub(crate) fn covers(cert_pem: &str, names: &[String]) -> bool {
     let Some(stored) = cert_hostnames(cert_pem) else {
         return false;
     };

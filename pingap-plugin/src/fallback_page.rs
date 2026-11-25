@@ -48,7 +48,7 @@ use tracing::{debug, warn};
 pub const CATEGORY: &str = "fallback_page";
 /// Hard ceiling for a single page, applied to the configured template and to
 /// the rendered output alike.
-pub const MAX_PAGE_BYTES: usize = 256 * 1024;
+pub use pingwaf_challenge::templates::MAX_PAGE_BYTES;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -233,13 +233,19 @@ impl FallbackPagePlugin {
         status: StatusCode,
         body: String,
         content_type: &str,
-    ) -> RequestPluginResult {
-        let response = HttpResponse::builder(status)
+    ) -> HttpResponse {
+        HttpResponse::builder(status)
             .body(body)
             .header((header::CONTENT_TYPE, content_type_value(content_type)))
             .no_store()
-            .finish();
-        RequestPluginResult::Respond(response)
+            .finish()
+    }
+
+    pub fn unmatched_response(&self, host: &str, path: &str) -> Option<HttpResponse> {
+        let page = self.pages.get(&self.default_status)?;
+        let (body, content_type) = self.render_page(page, host, &generate_request_id(), path);
+        let status = StatusCode::from_u16(page.status_code).unwrap_or(StatusCode::NOT_FOUND);
+        Some(self.respond(status, body, &content_type))
     }
 }
 
@@ -317,35 +323,11 @@ impl Plugin for FallbackPagePlugin {
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();
-        let request_id = generate_request_id();
-
-        // Pages are selected by configuration: the lowest configured status
-        // wins. Without any compiled page the plugin behaves like the edge
-        // default — a plain, no-store 404.
-        let Some(page) = self.pages.get(&self.default_status) else {
-            let (body, content_type) = plain_fallback(404, &request_id);
-            return Ok(self.respond(
-                StatusCode::NOT_FOUND,
-                body,
-                &content_type,
-            ));
-        };
-
-        let (body, content_type) = self.render_page(
-            page,
-            &host,
-            &request_id,
-            session.req_header().uri.path(),
-        );
-        let status = StatusCode::from_u16(page.status_code)
-            .unwrap_or(StatusCode::NOT_FOUND);
-        debug!(
-            page = %page.name,
-            status = page.status_code,
-            host = %host,
-            "fallback_page served unmatched host"
-        );
-        Ok(self.respond(status, body, &content_type))
+        let response = self.unmatched_response(&host, session.req_header().uri.path()).unwrap_or_else(|| {
+            let (body, content_type) = plain_fallback(404, &generate_request_id());
+            self.respond(StatusCode::NOT_FOUND, body, &content_type)
+        });
+        Ok(RequestPluginResult::Respond(response))
     }
 }
 

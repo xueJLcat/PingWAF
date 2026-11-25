@@ -1440,6 +1440,7 @@ struct PortProtocol {
 struct IngressOptions {
     port_protocols: Vec<PortProtocol>,
     admin_port: u16,
+    reserved_ports: Vec<u16>,
     writes_enabled: bool,
     agents: Vec<crate::grpc::IngressAgentOption>,
     assigned_agent_ids: Vec<Uuid>,
@@ -1504,6 +1505,7 @@ async fn ingress_options(
     Ok(Json(IngressOptions {
         port_protocols,
         admin_port: state.agents.admin_port,
+        reserved_ports: state.agents.reserved_ports.clone(),
         writes_enabled,
         agents,
         assigned_agent_ids,
@@ -1757,6 +1759,7 @@ async fn create(
     .await
     .map_err(map_site_domain_conflict)?;
 
+    state.agents.validate_site_ports(model.ingress_port, &model.additional_ingresses)?;
     if model.ingress_port.is_some() {
         check_final_listeners(&txn).await?;
     }
@@ -2186,6 +2189,7 @@ async fn clone_site(
         .insert(&txn)
         .await
         .map_err(map_site_domain_conflict)?;
+    state.agents.validate_site_ports(model.ingress_port, &model.additional_ingresses)?;
 
     if model.site_handler.as_ref().is_some_and(|v| v["kind"] == "static") {
         super::static_drafts::bind_version(&txn, new_id, current.id, model.site_handler.as_ref(), None).await?;
@@ -2622,6 +2626,7 @@ async fn update(
         state.agents.admin_port,
     )?;
     let additional = payload.ingress.additional(Some(&model), port, current.is_admin(), state.agents.admin_port)?;
+    state.agents.validate_site_ports(port, &additional)?;
     let ingress_changed = port != model.ingress_port || protocol != model.ingress_protocol || additional != model.additional_ingresses;
     let activating =
         payload.status.as_deref().map(str::trim) == Some(site_status::ACTIVE);

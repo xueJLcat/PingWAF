@@ -40,11 +40,26 @@ pub enum Listener {
 /// A verified and indexed candidate, not evidence that any site is applied.
 pub struct Candidate {
     version: Version,
+    endpoints: Vec<pingwaf_proto::PanelEndpoint>,
+    pub unmatched_pages: Vec<pingwaf_proto::CustomErrorPage>,
+    pub policy_revision: i64,
     sites: HashMap<Uuid, ManagedSite>,
     routes: HashMap<Listener, HashMap<String, Uuid>>,
 }
 
 impl Candidate {
+    pub fn endpoints(&self) -> &[pingwaf_proto::PanelEndpoint] {
+        &self.endpoints
+    }
+
+    fn endpoint_applies(&self, endpoint: &pingwaf_proto::PanelEndpoint, listener: Listener) -> bool {
+        let Some(ingress) = &endpoint.ingress else { return false };
+        match listener {
+            Listener::Default => matches!(ingress.port, 80 | 443) && endpoint.site_ids.iter().any(|id|
+                Uuid::parse_str(id).ok().and_then(|id| self.sites.get(&id)).is_some_and(|site| site.ingress.is_none())),
+            Listener::Custom { port, protocol } => ingress.port == u32::from(port) && ingress.protocol == protocol as i32,
+        }
+    }
     pub fn version(&self) -> Version {
         self.version
     }
@@ -61,7 +76,9 @@ impl Candidate {
             .values()
             .filter(|item| item.ingress.is_none())
             .filter_map(|item| {
-                Some((item.site.as_ref()?.clone(), item.failover_mode))
+                let site = item.site.as_ref()?;
+                (site.status() == SiteStatusEnum::SiteStatusActive)
+                    .then(|| (site.clone(), item.failover_mode))
             })
             .collect();
         rows.sort_by(|a, b| a.0.id.cmp(&b.0.id));
@@ -88,29 +105,35 @@ impl Candidate {
     /// Compare decoded policy, not protobuf bytes or legacy fingerprints.
     #[cfg(target_os = "linux")]
     fn same_policy(&self, other: &Self) -> bool {
-        self.sites == other.sites
+        self.sites == other.sites && self.endpoints == other.endpoints && self.unmatched_pages == other.unmatched_pages && self.policy_revision == other.policy_revision
     }
 
     #[cfg(target_os = "linux")]
     fn same_transport(&self, other: &Self, listener: Listener) -> bool {
-        let Some(routes) = self.routes.get(&listener) else {
-            return false;
-        };
-        other.routes.get(&listener) == Some(routes)
-            && routes
-                .values()
-                .all(|id| {
-                    let (Some(before), Some(after)) = (self.sites.get(id), other.sites.get(id)) else { return false };
-                    let (Some(a), Some(b)) = (&before.site, &after.site) else { return false };
-                    a.status == b.status && before.failover_mode == after.failover_mode
-                        && a.rules.as_ref().and_then(|r| r.ssl.as_ref()) == b.rules.as_ref().and_then(|r| r.ssl.as_ref())
-                })
+        let sockets = |policy: &Self| policy.endpoints.iter()
+            .filter(|endpoint| policy.endpoint_applies(endpoint, listener))
+            .map(|endpoint| (endpoint.ingress.clone(), endpoint.addresses.clone()))
+            .collect::<Vec<_>>();
+        sockets(self) == sockets(other) && self.routes.get(&listener).is_some_and(|routes|
+            routes.values().any(|id| self.same_site_transport(other, listener, *id)))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn same_site_transport(&self, other: &Self, listener: Listener, id: Uuid) -> bool {
+        let (Some(before), Some(after)) = (self.sites.get(&id), other.sites.get(&id)) else { return false };
+        let (Some(a), Some(b)) = (&before.site, &after.site) else { return false };
+        let Some(routes) = self.routes.get(&listener) else { return false };
+        let Some(next) = other.routes.get(&listener) else { return false };
+        routes.iter().filter(|(_,owner)| **owner == id).all(|(name,_)| next.get(name) == Some(&id))
+            && a.status == b.status && before.failover_mode == after.failover_mode
+            && a.rules.as_ref().and_then(|r| r.ssl.as_ref()) == b.rules.as_ref().and_then(|r| r.ssl.as_ref())
     }
 
     /// During static content preparation the previous content is still authorized
     /// only while the entire listener routing table and every security setting match.
     #[cfg(target_os = "linux")]
     fn can_prepare_content(&self, other: &Self, listener: Listener) -> bool {
+        if !self.same_transport(other, listener) { return false; }
         let Some(routes) = self.routes.get(&listener) else { return false };
         if other.routes.get(&listener) != Some(routes) { return false; }
         routes.values().all(|id| {
@@ -328,8 +351,26 @@ fn index(
     data: ManagedSiteConfig,
     version: Version,
 ) -> anyhow::Result<Candidate> {
+    let manifest = data.listeners.context("control plane did not provide a listener manifest")?;
+    let endpoints = manifest.endpoints;
+    ensure!(manifest.unmatched_pages.iter().all(|page| page.enabled && page.scope == "unmatched_host"
+        && matches!(page.status_code, 404 | 421 | 503)), "invalid unmatched-host page scope or status");
+    let expected = pingwaf_proto::PanelListeners::for_sites(&data.sites);
+    ensure!(expected.endpoints.len() == endpoints.len(), "incomplete listener manifest");
+    let sockets: usize = endpoints.iter().map(|e| e.addresses.len()).sum();
+    ensure!(sockets <= pingwaf_proto::MAX_INGRESS_LISTENERS, "listener manifest exceeds socket limit");
+    for (endpoint, expected) in endpoints.iter().zip(expected.endpoints) {
+        ensure!(endpoint.ingress == expected.ingress && endpoint.site_ids == expected.site_ids,
+            "listener owners do not match the authorized sites");
+        let canonical = pingwaf_proto::normalize_bind_addresses(&endpoint.addresses)
+            .map_err(anyhow::Error::msg)?;
+        ensure!(canonical == endpoint.addresses, "noncanonical listener addresses");
+    }
     let mut candidate = Candidate {
         version,
+        endpoints,
+        unmatched_pages: manifest.unmatched_pages,
+        policy_revision: manifest.policy_revision,
         sites: HashMap::new(),
         routes: HashMap::new(),
     };
@@ -421,6 +462,7 @@ fn index(
                 })
         });
     }
+    candidate.routes.retain(|_, names| !names.is_empty());
     Ok(candidate)
 }
 
@@ -507,7 +549,7 @@ mod tests {
             session_id: session.to_string(),
             authority_epoch: epoch.to_string(),
             generation,
-            config: ManagedSiteConfig { sites }.encode_to_vec(),
+            config: ManagedSiteConfig::from_sites(sites).encode_to_vec(),
             ..Default::default()
         };
         seal(&mut snapshot);
@@ -586,6 +628,9 @@ mod tests {
             candidate.site_id(Listener::Default, "paused.example"),
             None
         );
+        let published = candidate.default_config();
+        assert_eq!(published.sites.len(),1);
+        assert_eq!(published.sites[0].id,default_id.to_string());
     }
 
     #[test]
@@ -688,8 +733,8 @@ mod tests {
         large.config.resize(MAX_MANAGED_CONFIG_BYTES + 1, 0);
         assert!(receiver.receive(large).is_err());
         let mut unknown_field = valid;
-        // Field 2 (not known to this proto), varint 1. Re-encoding drops it.
-        unknown_field.config = vec![0x10, 1];
+        // An unknown field is covered by the raw-byte hash even if decoding drops it.
+        unknown_field.config.extend_from_slice(&[0x78, 1]);
         seal(&mut unknown_field);
         assert!(receiver.receive(unknown_field).unwrap().is_some());
     }

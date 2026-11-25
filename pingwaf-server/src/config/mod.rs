@@ -314,6 +314,21 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    pub fn infrastructure_ports(&self) -> Vec<u16> {
+        use std::net::{IpAddr, SocketAddr};
+        let mut ports: Vec<_> = [&self.http_addr, &self.grpc_addr].into_iter()
+            .filter_map(|address| address.parse::<SocketAddr>().ok()).map(|addr| addr.port()).collect();
+        if let Some(url) = reqwest::Url::parse(&self.db_url).ok().filter(|url|
+            url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("localhost")
+                || host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))){
+            ports.push(url.port().unwrap_or(5432));
+        }
+        ports.retain(|port| *port != 0);
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
     /// Default configuration with `PINGWAF_*` environment variables applied.
     ///
     /// Unknown or unparsable variables are ignored so a typo in the environment

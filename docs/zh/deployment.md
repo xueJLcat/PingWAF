@@ -99,7 +99,6 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9080/healthz   # 期
 | `PINGWAF_SECRET_KEY` | 未设置（密封功能必需） | 静态加密主密钥：加密通知渠道口令、AI Provider Key、备份目标凭据。**必须设为 32 字节随机值**；不设置则这些字段明文入库。安装器会生成（compose → `.env`；二进制 → `/etc/pingwaf/pingwaf.env` 0600）。无在线轮换，备份与轮换步骤见 [SECURITY.md](../../SECURITY.md#credentials-and-secrets) |
 | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥，至少 16 字符（建议 `openssl rand -hex 32`）；占位符会在首启时替换为随机持久化值 |
 | `PINGWAF_ALLOW_REGISTRATION` | 代码默认 `true`（Compose 设为 `false`） | 是否允许自助注册；生产务必设为 `false` |
-| `PINGWAF_INGRESS_LISTENERS` | 未设置 | Linux 受管入口，要求控制面支持受管快照。详见[英文部署指南](../deployment.md#experimental-tcp-listener-diagnostics) |
 
 旧版 Agent 协议仅下发默认入口的站点。TCP 绑定上报不表示节点获得自定义入口的转发授权。
 Linux 节点配置有效监听后消费受管全量快照，按会话和租约转发。迁移 000107 开放自定义入口写入。库中有自定义站点时降级会被拒绝；回到旧版须恢复事先验证的升级前备份。
@@ -131,6 +130,10 @@ Linux 节点配置有效监听后消费受管全量快照，按会话和租约�
 7. MCP `write` key 等同管理员凭据；AI 助手会把站点/日志/WAF 事件发送给第三方 provider，按需启用。
 
 ## 8. 备份与恢复
+
+部署配置快照从 schema 3 开始包含节点绑定地址及各站点的地址覆盖。恢复 schema 2 的快照时沿用目标节点的地址策略；恢复 schema 3 快照时按快照中的节点更新地址覆盖。恢复后在节点页面核对站点分派和实际监听回执。
+
+选择 DNS-01 后，手动 DNS 任务提供需要管理员发布的 TXT 记录；服务商无法识别时，节点记录原因并跳过该订单。
 
 > 数据库是密钥库：`site_certificates` 含私钥、`site_basic_auth` 含明文口令、`site_oidc` 含 cookie secret。备份必须加密并限制读取。
 

@@ -41,6 +41,11 @@ pub struct ErrorTemplate {
 
 impl ErrorTemplate {
     pub fn new(template: &str) -> Self {
+        let template = if template.is_empty() {
+            super::server_conf::ERROR_TEMPLATE
+        } else {
+            template
+        };
         let mut segments = vec![];
         let mut literal_len = 0;
         let mut rest = template;
@@ -178,10 +183,8 @@ mod tests {
             "plain",
             ErrorTemplate::new("plain").render("v", "c", "t", "r", "500")
         );
-        assert_eq!(
-            "",
-            ErrorTemplate::new("").render("v", "c", "t", "r", "500")
-        );
+        let default_page = ErrorTemplate::new("").render("v", "c", "t", "r", "500");
+        assert!(default_page.contains("500") && default_page.contains("<html"));
         // The request id placeholder renders the id it is given.
         assert_eq!(
             "id=r9",

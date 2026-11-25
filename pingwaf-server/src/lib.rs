@@ -26,6 +26,7 @@ pub mod frontend;
 pub mod grpc;
 pub mod mcp;
 pub mod migration;
+mod listener_policy;
 pub mod models;
 pub mod monitoring;
 pub mod notify;
@@ -197,7 +198,10 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     })?;
     let admin_port = http_listener.local_addr()?.port();
     check_dashboard_ingress(&db, admin_port).await?;
-    let agents = AgentRegistry::with_admin_port(admin_port);
+    let mut agents = AgentRegistry::with_admin_port(admin_port);
+    agents.reserved_ports.extend(config.infrastructure_ports());
+    agents.reserved_ports.sort_unstable();
+    agents.reserved_ports.dedup();
     if let Some(choice) = es::directory::load(&db).await? {
         let setting = config.elasticsearch.get_or_insert_with(Default::default);
         // A restart may follow a final failed bulk flush: check the old WAL again.

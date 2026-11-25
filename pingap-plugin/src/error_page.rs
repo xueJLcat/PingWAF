@@ -42,7 +42,7 @@ use http::{HeaderValue, StatusCode};
 use pingap_config::PluginConf;
 use pingap_core::{
     Ctx, HTTP_HEADER_CONTENT_HTML, HTTP_HEADER_NO_STORE,
-    HTTP_HEADER_TRANSFER_CHUNKED, ModifyResponseBody, Plugin,
+    ModifyResponseBody, Plugin,
     ResponseBodyPluginResult, ResponsePluginResult, ensure_client_ip, get_host,
     get_req_header_value,
 };
@@ -67,6 +67,16 @@ const CATEGORY: &str = "error_page";
 /// Name of the shared style partial registered into every [`Tera`] instance so
 /// pages can `{% include "_pw_style" %}` it.
 const STYLE_PARTIAL: &str = "_pw_style";
+const DEFAULT_GATEWAY_TEMPLATE: &str = "pw_default_5xx.html";
+
+fn template_suffix(content_type: &str) -> &'static str {
+    let mime = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if mime == "text/html" || mime == "text/xml" || mime == "application/xml" || mime.ends_with("+xml") {
+        ".html"
+    } else {
+        ""
+    }
+}
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -88,61 +98,7 @@ fn invalid(message: impl Into<String>) -> Error {
 /// `pub(crate)` so the challenge plugin's short-circuit pages (WAF block,
 /// rate limit, …) render in the same visual family — those responses bypass
 /// the response-phase plugin pipeline entirely.
-pub(crate) const PW_STYLE: &str = r##"<style>
-:root{
-  --bg:#f6f7f9;--card:#ffffff;--fg:#141417;--muted:#6b6b73;--border:#e7e7ea;
-  --accent:#f6821f;--code-bg:#fafafb;--shadow:0 24px 60px rgba(20,20,25,.10);
-}
-@media (prefers-color-scheme:dark){
-  :root{
-    --bg:#0d0d10;--card:#16161a;--fg:#f3f3f5;--muted:#9a9aa4;--border:#26262d;
-    --accent:#ff9440;--code-bg:#101014;--shadow:0 24px 60px rgba(0,0,0,.5);
-  }
-}
-*{box-sizing:border-box}
-body{
-  margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-  padding:24px;color:var(--fg);background-color:var(--bg);
-  background-image:
-    radial-gradient(60rem 40rem at 12% 15%,rgba(246,130,31,.10),transparent 60%),
-    radial-gradient(50rem 40rem at 88% 85%,rgba(246,130,31,.08),transparent 60%);
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  -webkit-font-smoothing:antialiased;
-}
-.card{
-  width:100%;max-width:560px;background:var(--card);border:1px solid var(--border);
-  border-radius:18px;padding:44px 36px;box-shadow:var(--shadow);text-align:center;
-  animation:rise .5s cubic-bezier(.2,.8,.2,1) both;
-}
-@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-.icon{
-  width:68px;height:68px;margin:0 auto 18px;border-radius:18px;display:flex;
-  align-items:center;justify-content:center;background:rgba(246,130,31,.12);
-}
-.icon svg{width:36px;height:36px;stroke:var(--accent);fill:none;stroke-width:1.7;
-  stroke-linecap:round;stroke-linejoin:round}
-.code{
-  font-size:15px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;
-  color:var(--accent);margin-bottom:6px;
-}
-h1{font-size:24px;margin:0 0 10px;letter-spacing:-.015em;font-weight:650}
-.msg{color:var(--muted);margin:0 0 26px;line-height:1.65;font-size:14.5px}
-.details{
-  background:var(--code-bg);border:1px solid var(--border);border-radius:12px;
-  padding:14px 16px;text-align:left;font-size:13px;
-}
-.row{display:flex;justify-content:space-between;gap:16px;padding:6px 0}
-.row+.row{border-top:1px solid var(--border)}
-.k{color:var(--muted);white-space:nowrap}
-.v{
-  color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  word-break:break-all;text-align:right;
-}
-.brand{margin-top:26px;font-size:12px;color:var(--muted);letter-spacing:.02em}
-.brand a{text-decoration:none}
-.brand a:hover{text-decoration:underline}
-.brand b{color:var(--accent);font-weight:700}
-</style>"##;
+pub(crate) use pingwaf_challenge::templates::PW_STYLE;
 
 // NOTE: there are deliberately no built-in 403/404/408/413/429 pages. An
 // origin-returned 403 used to be replaced with a WAF-style "Access Denied"
@@ -226,6 +182,7 @@ type CompiledSitePages = (Arc<Tera>, CompiledErrorPageMap);
 
 /// Compiled agent pages and the rule revision they were built from.
 struct CachedSitePages {
+    site_id: String,
     revision: crate::RuleRevision,
     tera: Arc<Tera>,
     pages: CompiledErrorPageMap,
@@ -301,13 +258,14 @@ impl ErrorPagePlugin {
             .unwrap_or_else(|_| HTTP_HEADER_CONTENT_HTML.1.clone())
     }
 
-    /// Resolve the active page set for `host`: agent pages when available,
-    /// otherwise the locally configured pages.
+    /// Keep each template paired with the renderer that compiled it.
     fn resolve(
         &self,
         session: &Session,
         host: &str,
+        status: u16,
     ) -> pingora::Result<CompiledSitePages> {
+        let local = || (self.tera.clone(), self.templates.load_full());
         if let Some(crate::RequestRules {
             key,
             revision,
@@ -323,30 +281,46 @@ impl ErrorPagePlugin {
                 && cached.revision == revision
             {
                 touch(&cached.last_used, now);
-                return Ok((cached.tera.clone(), cached.pages.clone()));
+                return Ok(if cached.pages.contains_key(&status) {
+                    (cached.tera.clone(), cached.pages.clone())
+                } else {
+                    local()
+                });
             }
             match build_site_pages(&site.error_pages) {
                 Ok((tera, pages)) => {
                     self.site_pages.insert(
                         key,
                         CachedSitePages {
+                            site_id: site.site_id.to_string(),
                             revision,
                             tera: tera.clone(),
                             pages: pages.clone(),
                             last_used: AtomicU64::new(now),
                         },
                     );
-                    return Ok((tera, pages));
+                    return Ok(if pages.contains_key(&status) { (tera, pages) } else { local() });
                 },
                 Err(e) => {
-                    debug!(
+                    warn!(
                         error = e.to_string(),
                         "compile agent error pages failed"
                     );
+                    let Some(page) = site.error_pages.iter().find(|p| p.enabled
+                        && (p.scope.is_empty() || p.scope == "site") && p.status_code == u32::from(status))
+                    else { return Ok(local()); };
+                    if let Ok(valid) = build_site_pages(std::slice::from_ref(page)) {
+                        return Ok(valid);
+                    }
+                    if let Some(cached) = self.site_pages.get(&key)
+                        && cached.site_id.as_str() == site.site_id.as_ref() && cached.pages.contains_key(&status)
+                    {
+                        return Ok((cached.tera.clone(), cached.pages.clone()));
+                    }
                 },
             }
         }
-        Ok((self.tera.clone(), self.templates.load_full()))
+        Ok(local())
     }
 
     /// Build the Tera render context for the current request.
@@ -411,7 +385,7 @@ impl ErrorPagePlugin {
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();
-        let (tera, pages) = self.resolve(session, &host)?;
+        let (tera, pages) = self.resolve(session, &host, status)?;
         let Some(page) = pages.get(&status) else {
             return Ok(ResponsePluginResult::Unchanged);
         };
@@ -457,11 +431,14 @@ impl ErrorPagePlugin {
         };
 
         // Rewrite the response headers for the new body.
-        upstream_response.remove_header(&header::CONTENT_LENGTH);
-        let _ = upstream_response.insert_header(
-            header::TRANSFER_ENCODING,
-            HTTP_HEADER_TRANSFER_CHUNKED.1.clone(),
-        );
+        upstream_response.remove_header(&header::TRANSFER_ENCODING);
+        upstream_response.remove_header(&header::CONTENT_ENCODING);
+        upstream_response.remove_header(&header::ETAG);
+        upstream_response.remove_header(&header::LAST_MODIFIED);
+        for name in ["content-md5", "digest", "content-digest", "repr-digest", "trailer"] {
+            upstream_response.remove_header(name);
+        }
+        upstream_response.insert_header(header::CONTENT_LENGTH, body.len().to_string())?;
         let _ = upstream_response.insert_header(
             header::CONTENT_TYPE,
             Self::content_type_value(&content_type),
@@ -526,7 +503,7 @@ fn build_site_pages(pages: &[CustomErrorPage]) -> Result<CompiledSitePages> {
         let Ok(status_code) = u16::try_from(page.status_code) else {
             continue;
         };
-        let template_name = format!("pw_agent_{status_code}_{i}");
+        let template_name = format!("pw_agent_{status_code}_{i}{}", template_suffix(&page.content_type));
         tera.add_raw_template(&template_name, &page.body_template)
             .map_err(|e| {
                 invalid(format!(
@@ -635,9 +612,9 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
         // responses pass through untouched (see the note above PAGE_5XX).
         if use_defaults {
             let defaults: [(u16, &str, &str, &str); 3] = [
-                (502, "pw_default_5xx", PAGE_5XX, "PingWAF Bad Gateway"),
-                (503, "pw_default_5xx", PAGE_5XX, "PingWAF Unavailable"),
-                (504, "pw_default_5xx", PAGE_5XX, "PingWAF Gateway Timeout"),
+                (502, DEFAULT_GATEWAY_TEMPLATE, PAGE_5XX, "PingWAF Bad Gateway"),
+                (503, DEFAULT_GATEWAY_TEMPLATE, PAGE_5XX, "PingWAF Unavailable"),
+                (504, DEFAULT_GATEWAY_TEMPLATE, PAGE_5XX, "PingWAF Gateway Timeout"),
             ];
             let mut registered: HashMap<&str, &str> = HashMap::new();
             for (status, name, body, label) in defaults {
@@ -666,7 +643,7 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
             if !page.enabled {
                 continue;
             }
-            let template_name = format!("pw_custom_{}_{i}", page.status_code);
+            let template_name = format!("pw_custom_{}_{i}{}", page.status_code, template_suffix(&page.content_type));
             tera.add_raw_template(&template_name, &page.template)
                 .map_err(|e| {
                     invalid(format!(
@@ -789,7 +766,7 @@ use_defaults = true
         ctx.insert("method", "GET");
         ctx.insert("path", "/");
         ctx.insert("host", "example.com");
-        let out = plugin.tera.render("pw_default_5xx", &ctx).unwrap();
+        let out = plugin.tera.render(DEFAULT_GATEWAY_TEMPLATE, &ctx).unwrap();
         assert_eq!(true, out.contains("Origin Server Error"));
         // The copy must rule out a security block: that ambiguity is exactly
         // what made origin failures indistinguishable from WAF blocks.
@@ -822,7 +799,7 @@ use_defaults = true
         ctx.insert("host", "example.com");
         ctx.insert("upstream_name", "origin-pool");
         ctx.insert("upstream_addr", "10.0.0.9:8080");
-        let out = plugin.tera.render("pw_default_5xx", &ctx).unwrap();
+        let out = plugin.tera.render(DEFAULT_GATEWAY_TEMPLATE, &ctx).unwrap();
         // A gateway-class failure names the upstream group and the
         // backend that was tried — that is what operators need when the
         // 503 is an upstream outage rather than a bad request.
@@ -859,14 +836,14 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
         assert_eq!("Custom WAF Block", page.name);
 
         let mut ctx = Context::new();
-        ctx.insert("request_id", "abc");
+        ctx.insert("request_id", "A&B");
         let html = plugin.tera.render(&page.template_name, &ctx).unwrap();
         assert_eq!(true, html.contains("403 - Blocked"));
-        assert_eq!(true, html.contains("abc"));
+        assert!(html.contains("A&amp;B"));
         let page429 = map.get(&429).unwrap();
         let json = plugin.tera.render(&page429.template_name, &ctx).unwrap();
         assert_eq!(true, json.contains("rate_limit_exceeded"));
-        assert_eq!(true, json.contains("abc"));
+        assert!(json.contains("A&B"));
     }
 
     #[tokio::test]
@@ -958,7 +935,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             s.req_header_mut()
                 .insert_header("host", "origin.example")
                 .unwrap();
-            let (tera, pages) = plugin.resolve(&s, "origin.example").unwrap();
+            let (tera, pages) = plugin.resolve(&s, "origin.example", 503).unwrap();
             let page = pages.get(&503).unwrap();
             assert_eq!(
                 tera.render(&page.template_name, &Context::new()).unwrap(),
@@ -1034,7 +1011,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             assert_eq!(ResponsePluginResult::Modified, result);
             // The compiled agent page renders with the documented variables
             // filled in.
-            let (tera, pages) = plugin.resolve(&s, "example.com").unwrap();
+            let (tera, pages) = plugin.resolve(&s, "example.com", 503).unwrap();
             let page = pages.get(&503).expect("agent page compiled");
             let mut c = Context::new();
             c.insert("error_code", &503u16);
@@ -1047,10 +1024,9 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             assert!(rendered.contains("req-1"));
         }
 
-        /// A status without an agent page is passed through untouched — agent
-        /// pages replace the built-in defaults for that host.
+        /// A site override affects only its own status code.
         #[tokio::test]
-        async fn agent_pages_shadow_defaults_per_host() {
+        async fn agent_pages_overlay_defaults_per_status() {
             let (_guard, agent, _dir) = install_test_agent().await;
             agent
                 .rule_cache
@@ -1092,7 +1068,7 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             )
             .unwrap();
 
-            // 404 has no agent page: untouched despite the built-in default.
+            // The origin's unconfigured 404 still passes through.
             let mut s = session("GET", "/x", "example.com").await;
             let mut resp = ResponseHeader::build_no_case(404, None).unwrap();
             let result = plugin
@@ -1100,6 +1076,17 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                 .await
                 .unwrap();
             assert_eq!(ResponsePluginResult::Unchanged, result);
+
+            let mut resp = ResponseHeader::build_no_case(503, None).unwrap();
+            resp.insert_header("content-encoding", "gzip").unwrap();
+            resp.insert_header("etag", "\"origin\"").unwrap();
+            let result = plugin
+                .handle_response(&mut s, &mut Ctx::default(), &mut resp)
+                .await
+                .unwrap();
+            assert_eq!(ResponsePluginResult::Modified, result);
+            assert!(resp.headers.get("content-encoding").is_none());
+            assert!(resp.headers.get("etag").is_none());
 
             // Another host (no agent pages) still gets the built-in defaults
             // — but only for gateway-class statuses; an origin 403 passes

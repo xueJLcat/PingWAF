@@ -251,7 +251,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
 | `9090` | gRPC 控制面（Agent 连接此端口） |
 | `80` / `443` | 代理流量（创建首个站点后绑定；`443` 在签发或上传证书后才会开启——此前仅 `80` 端口提供 HTTP 服务） |
 
-Linux 的 Agent 和 all-in-one 配置有效的 `PINGWAF_INGRESS_LISTENERS` 后使用受管快照，自定义 HTTP/HTTPS 入口仅在已应用快照的租约有效时转发分派站点。默认未设置。
+Linux 独立节点和一体化节点按面板已启用站点的分派监听。管理员在「节点 → 监听地址」维护节点绑定范围，查看各站点使用的端口和实际绑定回执；移除最后一个使用该端口的站点后关闭套接字。
 
 👉 完整配置参考：**[docs/deployment.md](./docs/deployment.md)** 与 **[docs/api.md](./docs/api.md)**。
 

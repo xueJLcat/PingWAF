@@ -255,7 +255,6 @@ fn retry_delay(failures: u32) -> Duration {
 /// minute. Failed certificate/domain pairs are skipped until their own
 /// exponential-backoff deadline, so retries stay bounded.
 async fn do_update_certificates(
-    count: u32,
     config_manager: Arc<ConfigManager>,
     params: &[UpdateCertificateParams],
     provider: Arc<dyn CertificateProvider>,
@@ -280,11 +279,6 @@ async fn do_update_certificates(
                 domains = domains.join(","),
                 "certificate retry is backing off"
             );
-            continue;
-        }
-        let is_manual = item.dns_provider == DNS_PROVIDER_MANUAL;
-        // manual dns challenge is only run once
-        if item.dns_challenge && is_manual && count > 0 {
             continue;
         }
 
@@ -510,7 +504,6 @@ impl BackgroundTask for LetsEncryptTask {
         }
         let mut retries = self.retries.lock().await;
         do_update_certificates(
-            count,
             self.config_manager.clone(),
             &params,
             self.certificate_provider.clone(),
@@ -725,7 +718,7 @@ pub async fn handle_lets_encrypt(
         }
 
         let value: Option<StorageConf> = config_manager
-            .get(Category::Storage, token)
+            .get(Category::Storage, &http_token_key(token))
             .await
             .map_err(|e| {
                 error!(
@@ -745,7 +738,8 @@ pub async fn handle_lets_encrypt(
         let remote_addr = pingap_core::get_remote_addr(session)
             .map(|(addr, port)| format!("{addr}:{port}"))
             .unwrap_or_default();
-        let Some(value) = value else {
+        let host = pingap_core::get_host(session.req_header()).unwrap_or_default();
+        let Some(value) = value.filter(|record| public_http_challenge(record, token, &host, pingap_core::now_sec())) else {
             // A token this instance never stored (or stored by a previous
             // order). Serving an empty 200 here - the old behaviour - could
             // never pass validation anyway, but it logged "success" and left
@@ -972,6 +966,18 @@ fn is_valid_challenge_token(token: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn http_token_key(token: &str) -> String {
+    format!("acme-http01-{token}")
+}
+
+fn public_http_challenge(record: &StorageConf, token: &str, host: &str, now: u64) -> bool {
+    record.remark.as_deref() == Some(HTTP_01_TOKEN_REMARK)
+        && record.category.strip_prefix("acme-http01:").is_some_and(|owner|
+            !owner.is_empty() && owner.eq_ignore_ascii_case(host))
+        && record.created_at.and_then(|at| now.checked_sub(at)).is_some_and(|age| age <= ACME_ORDER_LIFETIME_SECS)
+        && record.value.split_once('.').is_some_and(|(stored, proof)| stored == token && is_valid_challenge_token(proof))
+}
+
 /// Generates a new certificate from Let's Encrypt for the given domains.
 /// A fresh order is `Pending`. Let's Encrypt answers `Ready` directly when
 /// every authorization of the order is still valid (< 30 days old): the
@@ -1049,6 +1055,7 @@ async fn new_lets_encrypt(
     let need_challenge = state.status == OrderStatus::Pending;
 
     let mut dns_tasks = vec![];
+    let mut http_tokens = Vec::new();
     // Built on the first DNS-01 challenge and shared by the order's others.
     let mut resolver = None;
 
@@ -1225,18 +1232,17 @@ async fn new_lets_encrypt(
 
                 let identifier = challenge.identifier().to_string();
                 let key_auth = challenge.key_authorization();
+                let storage_key = http_token_key(&challenge.token);
                 config_manager
                     .update(
                         Category::Storage,
-                        &challenge.token,
+                        &storage_key,
                         &StorageConf {
                             value: key_auth.as_str().to_string(),
-                            category: "config".to_string(),
+                            category: format!("acme-http01:{identifier}"),
                             secret: None,
                             remark: Some(HTTP_01_TOKEN_REMARK.to_string()),
-                            // Tokens are never deleted on completion (another
-                            // process may still be serving them); the age
-                            // based cleanup keys off this instead.
+                            // Age also bounds a token left by an interrupted order.
                             created_at: Some(pingap_core::now_sec()),
                         },
                     )
@@ -1245,6 +1251,7 @@ async fn new_lets_encrypt(
                         category: "save_token".to_string(),
                         message: e.to_string(),
                     })?;
+                http_tokens.push(storage_key);
                 // The identifier ties the token to its authorization: an
                 // order for apex + wildcard runs several of these, and a
                 // later validation failure names the domain, not the token.
@@ -1293,6 +1300,11 @@ async fn new_lets_encrypt(
             );
         }
     }
+    for key in http_tokens {
+        if let Err(error) = config_manager.delete(Category::Storage, &key).await {
+            warn!(target: LOG_TARGET, %error, "could not remove completed HTTP-01 challenge");
+        }
+    }
     result?;
 
     let private_key_pem =
@@ -1311,6 +1323,19 @@ async fn new_lets_encrypt(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_live_challenges_for_the_selected_host_are_public() {
+        use super::{public_http_challenge, StorageConf, HTTP_01_TOKEN_REMARK, ACME_ORDER_LIFETIME_SECS};
+        let mut row = StorageConf { category: "acme-http01:example.test".into(),
+            value: "token.proof".into(), created_at: Some(100),
+            remark: Some(HTTP_01_TOKEN_REMARK.into()), ..Default::default() };
+        assert!(public_http_challenge(&row, "token", "EXAMPLE.test", 101));
+        assert!(!public_http_challenge(&row, "token", "unassigned.test", 101));
+        assert!(!public_http_challenge(&row, "other", "example.test", 101));
+        assert!(!public_http_challenge(&row, "token", "example.test", 101 + ACME_ORDER_LIFETIME_SECS));
+        row.category = "config".into();
+        assert!(!public_http_challenge(&row, "token", "example.test", 101));
+    }
     use super::is_valid_challenge_token;
     use super::{UpdateCertificateParams, update_certificate_lets_encrypt};
     use pingap_config::new_file_config_manager;

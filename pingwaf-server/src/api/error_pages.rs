@@ -12,8 +12,8 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -132,6 +132,9 @@ fn validate_content_type(
     scope: &str,
     content_type: &str,
 ) -> Result<(), ApiError> {
+    if content_type.trim().is_empty() || axum::http::HeaderValue::from_str(content_type).is_err() {
+        return Err(ApiError::BadRequest("invalid page content_type".to_string()));
+    }
     if scope == crate::models::error_pages::SCOPE_CHALLENGE
         && content_type != "text/html"
     {
@@ -144,7 +147,7 @@ fn validate_content_type(
 
 /// Whether another row already occupies `(scope, status_code)`.
 async fn scope_status_taken(
-    state: &AppState,
+    db: &impl ConnectionTrait,
     scope: &str,
     status_code: i32,
     exclude_id: Option<Uuid>,
@@ -155,7 +158,15 @@ async fn scope_status_taken(
     if let Some(id) = exclude_id {
         query = query.filter(error_pages::Column::Id.ne(id));
     }
-    Ok(query.one(&state.db).await?.is_some())
+    Ok(query.one(db).await?.is_some())
+}
+
+pub(crate) fn validate_definition(scope: &str, code: i32, content_type: &str, body: &str) -> Result<(), ApiError> {
+    validate_scope(scope)?;
+    validate_status_code(scope, code)?;
+    validate_content_type(scope, content_type)?;
+    pingwaf_challenge::templates::validate(scope, code, body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid page template: {e}")))
 }
 
 /// `GET /api/v1/error-pages` — administrators only.
@@ -190,20 +201,13 @@ async fn create(
 ) -> Result<Response, ApiError> {
     current.require_admin().map_err(ApiError::from)?;
 
-    validate_scope(&payload.scope)?;
-    validate_status_code(&payload.scope, payload.status_code)?;
-    validate_content_type(&payload.scope, &payload.content_type)?;
+    validate_definition(&payload.scope, payload.status_code, &payload.content_type, &payload.body_template)?;
     if payload.name.trim().is_empty() || payload.name.len() > 200 {
         return Err(ApiError::BadRequest(
             "name must be 1-200 characters".to_string(),
         ));
     }
-    if payload.body_template.trim().is_empty() {
-        return Err(ApiError::BadRequest(
-            "body_template must not be empty".to_string(),
-        ));
-    }
-    if scope_status_taken(&state, &payload.scope, payload.status_code, None)
+    if scope_status_taken(&state.db, &payload.scope, payload.status_code, None)
         .await?
     {
         return Err(ApiError::Conflict(format!(
@@ -243,7 +247,11 @@ async fn update(
     current.require_admin().map_err(ApiError::from)?;
     let target = parse_uuid(&page_id, "error page id")?;
 
-    let row = find(&state, target).await?;
+    let tx = state.db.begin().await?;
+    let row = error_pages::Entity::find_by_id(target)
+        .lock_exclusive()
+        .one(&tx).await?
+        .ok_or_else(|| ApiError::NotFound(format!("error page {target} not found")))?;
     // The effective scope after this update decides which status codes are
     // allowed, so it is computed before any validation.
     let effective_scope =
@@ -254,6 +262,11 @@ async fn update(
         .clone()
         .unwrap_or_else(|| row.content_type.clone());
     validate_content_type(&effective_scope, &effective_content_type)?;
+    if payload.body_template.is_some() || payload.scope.is_some() || payload.status_code.is_some() || payload.enabled == Some(true) {
+        pingwaf_challenge::templates::validate(&effective_scope, effective_status,
+            payload.body_template.as_deref().unwrap_or(&row.body_template))
+            .map_err(|e| ApiError::BadRequest(format!("invalid page template: {e}")))?;
+    }
     let mut active: error_pages::ActiveModel = row.into();
 
     if let Some(scope) = &payload.scope {
@@ -263,7 +276,7 @@ async fn update(
     validate_status_code(&effective_scope, effective_status)?;
     if (payload.status_code.is_some() || payload.scope.is_some())
         && scope_status_taken(
-            &state,
+            &tx,
             &effective_scope,
             effective_status,
             Some(target),
@@ -291,11 +304,6 @@ async fn update(
         active.content_type = Set(ct);
     }
     if let Some(body) = payload.body_template {
-        if body.trim().is_empty() {
-            return Err(ApiError::BadRequest(
-                "body_template must not be empty".to_string(),
-            ));
-        }
         active.body_template = Set(body);
     }
     if let Some(enabled) = payload.enabled {
@@ -303,7 +311,8 @@ async fn update(
     }
     active.updated_at = Set(chrono::Utc::now());
 
-    let updated = active.update(&state.db).await?;
+    let updated = active.update(&tx).await?;
+    tx.commit().await?;
     tracing::info!(page_id = %target, "error page updated");
     notify_all_config_changed(&state, Some(&current.email)).await;
 

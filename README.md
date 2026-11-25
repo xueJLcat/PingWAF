@@ -274,7 +274,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | `9090` | gRPC control plane (agents connect here) |
 | `80` / `443` | Proxied traffic (bound once the first site exists; `443` opens only after a certificate is issued or uploaded — until then only port `80` serves HTTP) |
 
-On Linux, a valid `PINGWAF_INGRESS_LISTENERS` configuration enables managed snapshots for the agent and all-in-one process. A custom HTTP or HTTPS listener serves an assigned site only while its applied snapshot has a live lease. The default is unset.
+Linux agents and all-in-one nodes bind the addresses and ports authorized by active site assignments. In Agents, open the listener address dialog to review the node policy and current socket report. Removing the last site using a port closes its socket.
 
 👉 Full configuration reference: **[docs/deployment.md](./docs/deployment.md)** and **[docs/api.md](./docs/api.md)**.
 

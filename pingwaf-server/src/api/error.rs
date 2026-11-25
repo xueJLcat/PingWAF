@@ -210,6 +210,9 @@ impl From<DbErr> for ApiError {
         )) = &err
         {
             let message = match db.constraint() {
+                Some("panel_override_scope") => Some("address override requires a site and port assigned to this node"),
+                Some("panel_shared_addresses") => Some("sites sharing this port on the node require identical bind addresses"),
+                Some("panel_socket_limit") => Some("the node would exceed its limit of 32 listening sockets"),
                 Some("sites_ingress_hsts_conflict") => {
                     Some("HSTS overlaps a custom HTTP ingress hostname")
                 },
