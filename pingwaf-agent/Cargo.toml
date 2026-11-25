@@ -17,6 +17,8 @@ tls-rustls = ["pingap-upstream/tls-rustls"]
 
 [dependencies]
 pingwaf-proto = { path = "../pingwaf-proto" }
+# Tunnel target normalization and the live session registry the heartbeat reports.
+pingwaf-tunnel = { workspace = true }
 # Self-accounting for configuration sync; atomics only, no allocator hook.
 pingwaf-profiler = { path = "../pingwaf-profiler" }
 pingap-cache = { workspace = true }

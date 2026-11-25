@@ -34,9 +34,24 @@ pub(super) struct Host {
     shared: std::sync::RwLock<HashMap<u16, Arc<shared::DefaultApp>>>,
     state: pingwaf_agent::managed::AppliedState<Arc<View>>,
     cache: Arc<pingwaf_agent::cache::RuleCache>,
-    defaults: std::sync::Mutex<Option<pingwaf_proto::SiteConfig>>,
+    defaults: std::sync::Mutex<Option<DefaultProjection>>,
     default_routes: std::sync::RwLock<DefaultRoutes>,
     worker: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    session: std::sync::Mutex<HostSession>,
+}
+
+#[derive(Default)]
+struct HostSession {
+    id: Option<Uuid>,
+    version: Option<pingwaf_agent::managed::Version>,
+    tunnel_timer: Option<tokio::task::AbortHandle>,
+}
+
+impl HostSession {
+    fn revoke_tunnels(&mut self) {
+        if let Some(timer) = self.tunnel_timer.take() { timer.abort(); }
+        if let Some(registry) = pingwaf_tunnel::installed_registry() { registry.apply_policies(Vec::new()); }
+    }
 }
 
 #[derive(Default)]
@@ -45,6 +60,13 @@ struct DefaultRoutes {
     expected: HashMap<Uuid, String>,
     applied_hash: Option<Arc<str>>,
     applied: HashMap<Uuid, String>,
+}
+
+#[derive(PartialEq)]
+struct DefaultProjection {
+    config: pingwaf_proto::SiteConfig,
+    tunnels: Vec<pingwaf_proto::TunnelConfig>,
+    settings: Option<pingwaf_proto::TunnelSettings>,
 }
 
 impl DefaultRoutes {
@@ -108,6 +130,7 @@ impl Host {
             defaults: Default::default(),
             default_routes: Default::default(),
             worker: Default::default(),
+            session: Default::default(),
         })
     }
     fn cancel_worker(&self) {
@@ -216,37 +239,78 @@ impl pingwaf_agent::client::ManagedHost for HostCallbacks {
     }
 
     fn session_started(&self, session: Uuid) {
+        let mut current = self.0.session.lock().unwrap_or_else(|e| e.into_inner());
+        current.revoke_tunnels();
+        current.id = Some(session);
+        current.version = None;
+        self.0.cancel_worker();
         self.0.state.start_session(session);
     }
     fn session_ended(&self, session: Uuid) {
+        let mut current = self.0.session.lock().unwrap_or_else(|e| e.into_inner());
+        if current.id != Some(session) { return; }
+        current.id = None;
+        current.version = None;
+        current.revoke_tunnels();
         self.0.state.end_session(session);
         self.0.cancel_worker();
     }
     fn candidate_received(&self, received: pingwaf_agent::managed::Received) {
         let host = self.0.clone();
+        let mut current = self.0.session.lock().unwrap_or_else(|e| e.into_inner());
+        let version = received.candidate.version();
+        if current.id != Some(version.session) || current.version.is_some_and(|last|
+            last.authority != version.authority || last.generation >= version.generation) { return; }
+        current.version = Some(version);
+        let lease = received.lease.clone();
         let pending = match host.state.prepare(received) {
-            Ok(Some(pending)) => pending,
-            Ok(None) => return,
+            Ok(pending) => pending,
             Err(error) => {
+                current.revoke_tunnels();
                 tracing::warn!(%error, "managed authorization failed");
                 return;
             },
         };
+        if !lease.permits(version) {
+            current.revoke_tunnels();
+            return;
+        }
+        if pingwaf_tunnel::installed_registry().is_some() {
+            if let Some(timer) = current.tunnel_timer.take() { timer.abort(); }
+            let weak = Arc::downgrade(&host);
+            current.tunnel_timer = Some(tokio::spawn(async move {
+                let _ = lease.wait_for_expiry().await;
+                if let Some(host) = weak.upgrade() {
+                    let mut current = host.session.lock().unwrap_or_else(|e| e.into_inner());
+                    if current.version == Some(version) { current.revoke_tunnels(); }
+                }
+            }).abort_handle());
+        }
+        let Some(pending) = pending else { return; };
         host.cancel_worker();
-        let defaults = pending.candidate().default_config();
+        let policy = pending.candidate().sites().values().filter_map(|s| s.site.as_ref())
+            .filter(|s| s.status == pingwaf_proto::SiteStatusEnum::SiteStatusActive as i32)
+            .min_by(|a, b| a.id.cmp(&b.id)).and_then(|s| s.rules.as_ref());
+        let defaults = DefaultProjection {
+            config: pending.candidate().default_config(),
+            tunnels: policy.map(|p| p.tunnels.clone()).unwrap_or_default(),
+            settings: policy.and_then(|p| p.tunnel_settings),
+        };
         let mut previous =
             host.defaults.lock().unwrap_or_else(|e| e.into_inner());
         if previous.as_ref() != Some(&defaults) {
-            let mut config = defaults.clone();
+            let mut config = defaults.config.clone();
             config.config_hash =
                 hex::encode(pending.candidate().version().hash);
             host.default_routes.write().unwrap_or_else(|e| e.into_inner()).expect(pending.candidate(), &config.config_hash);
-            if let Err(error) = host.cache.update_from_site_config(&config) {
+            if let Err(error) = host.cache.update_from_site_config_with_policy(&config, policy) {
+                current.revoke_tunnels();
                 tracing::warn!(%error, "default configuration update failed");
                 return;
             }
             *previous = Some(defaults);
         }
+        super::apply_tunnel_policies(&host.cache.all_sites());
         drop(previous);
         let task = tokio::spawn(async move {
             let version = pending.candidate().version();
@@ -266,11 +330,41 @@ struct View {
     tls_failures: HashMap<Uuid, &'static str>,
     rules: Compiled,
     sites: HashMap<Uuid, ManagedRequestSite>,
+    tunnel_sites: HashMap<Uuid, Option<u16>>,
+    cache_dir: std::path::PathBuf,
+    tunnel_routes: std::sync::RwLock<(u64, HashMap<Uuid, ManagedRequestSite>)>,
     #[cfg(any(feature = "openssl", feature = "tls-rustls"))]
     tls: HashMap<Uuid, tls::TlsSite>,
 }
 
 impl View {
+    fn tunnel_generation() -> u64 {
+        pingwaf_tunnel::installed_registry().map_or(0, |registry| registry.generation())
+    }
+
+    fn request_site(&self, id: Uuid) -> Option<ManagedRequestSite> {
+        if !self.tunnel_sites.contains_key(&id) {
+            return self.sites.get(&id).cloned();
+        }
+        let current = self.tunnel_routes.read().ok()?;
+        (current.0 == Self::tunnel_generation()).then(|| current.1.get(&id).cloned()).flatten()
+    }
+
+    fn refresh_tunnel_routes(&self) -> anyhow::Result<()> {
+        let generation = Self::tunnel_generation();
+        if self.tunnel_sites.is_empty() || self.tunnel_routes.read().unwrap_or_else(|e| e.into_inner()).0 == generation {
+            return Ok(());
+        }
+        let mut next = HashMap::new();
+        for (&id, &oidc) in &self.tunnel_sites {
+            let rules = self.rules.site(id).context("missing tunnel site")?;
+            let site = build_site(rules, oidc, &self.cache_dir, None, self.sites[&id].policy.clone())?;
+            next.insert(id, site);
+        }
+        *self.tunnel_routes.write().unwrap_or_else(|e| e.into_inner()) = (generation, next);
+        Ok(())
+    }
+
     async fn refresh_upstreams(&self) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -281,8 +375,10 @@ impl View {
     }
 
     async fn check_upstreams(&self) -> anyhow::Result<()> {
+        self.refresh_tunnel_routes()?;
         let mut seen = std::collections::HashSet::new();
-        for site in self.sites.values() {
+        for id in self.sites.keys() {
+            let Some(site) = self.request_site(*id) else { continue };
             for (_, upstream) in site.upstreams.list() {
                 if seen.insert(Arc::as_ptr(&upstream) as usize) {
                     upstream.run_health_check().await?;
@@ -304,7 +400,9 @@ impl View {
                 (i64::from(p.status_code), p.content_type.as_str(), p.body_template.as_str(), p.name.as_str()));
             Some(pingap_plugin::FallbackPagePlugin::new(&super::unmatched_plugin_config(pages))?)
         };
-        let sites = rules
+        let generation = Self::tunnel_generation();
+        let mut tunnel_sites = HashMap::new();
+        let sites: HashMap<_, _> = rules
             .sites()
             .filter_map(|(id, site)| {
                 Some((id, site, candidate.sites().get(&id)?.ingress.as_ref()?))
@@ -312,6 +410,9 @@ impl View {
             .map(|(id, site, ingress)| {
                 let oidc = managed_oidc(&rules, id, site, ingress)?;
                 let envelope = &candidate.sites()[&id];
+                if envelope.handler.is_none() && site.rules.upstreams.iter().any(|pool| !pool.tunnel_id.is_empty()) {
+                    tunnel_sites.insert(id, oidc);
+                }
                 Ok((id, build_site(site, oidc, cache_dir, envelope.handler.as_ref(), policies.remove(&id))?))
             })
             .collect::<anyhow::Result<_>>()?;
@@ -340,6 +441,10 @@ impl View {
             })
             .collect();
         Ok(Self {
+            tunnel_routes: std::sync::RwLock::new((generation, tunnel_sites.keys()
+                .map(|id| (*id, sites[id].clone())).collect())),
+            tunnel_sites,
+            cache_dir: cache_dir.to_path_buf(),
             unmatched,
             tls_failures,
             rules,
@@ -589,7 +694,7 @@ impl ManagedSiteSelector for StandardSelector {
                 }
                 None
             } else {
-                Some(grant.view().sites.get(&id).cloned().ok_or(ManagedRouteMiss::Unavailable)?)
+                Some(grant.view().request_site(id).ok_or(ManagedRouteMiss::Unavailable)?)
             };
             pin_request(grant)?;
             return Ok(site);
@@ -619,7 +724,7 @@ impl ManagedSiteSelector for Selector {
         let (granted_id, grant) = self.forwarding.site_grant(self.listener, hostname)
             .ok_or(ManagedRouteMiss::Unavailable)?;
         if granted_id != id { return Err(ManagedRouteMiss::Unavailable); }
-        let site = grant.view().sites.get(&id).cloned().ok_or(ManagedRouteMiss::Unavailable)?;
+        let site = grant.view().request_site(id).ok_or(ManagedRouteMiss::Unavailable)?;
         pin_request(grant)?;
         Ok(Some(site))
     }
@@ -1271,6 +1376,7 @@ mod tests {
             }
             rules.set_ingress_listeners(pingwaf_proto::IngressListeners {
                 panel: Some(pingwaf_proto::PanelListenerReport {
+                    infrastructure_ports: Vec::new(),
                     desired_generation: 1, applied_generation: 1, policy_revision: 0,
                     sockets: endpoints.iter().filter(|(_,_,marker)| marker.is_some()).map(|(addr,_,_)|
                         pingwaf_proto::PanelSocketStatus { address: "0.0.0.0".into(), error: String::new(),

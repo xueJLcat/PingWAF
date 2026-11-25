@@ -48,6 +48,9 @@ struct AcmeState {
 #[derive(Debug, Default, Deserialize)]
 struct AcmeCertificate {
     #[serde(default)]
+    acme: String,
+    acme_certificate_id: Option<String>,
+    #[serde(default)]
     domains: String,
     #[serde(default)]
     tls_cert: String,
@@ -120,15 +123,20 @@ async fn sync_once(
         let Some(site_id) = site_id_from_key(name) else {
             continue;
         };
-        if cert.domains.trim().is_empty()
+        if cert.acme.trim().is_empty() || cert.domains.trim().is_empty()
             || cert.tls_cert.trim().is_empty()
             || cert.tls_key.trim().is_empty()
         {
             continue;
         }
+        let order_row = match cert.acme_certificate_id.as_deref().map(Uuid::parse_str).transpose() {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
         match sync_certificate(
             &state.db,
             site_id,
+            order_row,
             &cert.domains,
             &cert.tls_cert,
             &cert.tls_key,
@@ -165,6 +173,7 @@ fn domain_set(domains: &str) -> Vec<String> {
 pub(crate) async fn sync_certificate(
     db: &sea_orm::DatabaseConnection,
     site_id: Uuid,
+    order_row: Option<Uuid>,
     domains: &str,
     cert_pem: &str,
     key_pem: &str,
@@ -179,9 +188,12 @@ pub(crate) async fn sync_certificate(
         .lock_exclusive().all(&tx)
         .await?;
     let selected = posture_row.as_ref().and_then(|p| p.certificate_id);
+    if selected.is_some() && selected != order_row {
+        return Ok(false);
+    }
     let mut matching = rows.iter().filter(|r| domain_set(&r.domain) == names &&
         r.acme_email.as_deref().is_some_and(|email| !email.trim().is_empty()));
-    let row = match selected {
+    let row = match order_row {
         Some(id) => matching.find(|row| row.id == id),
         None => {
             let first = matching.next();

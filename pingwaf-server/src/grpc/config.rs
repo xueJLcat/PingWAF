@@ -764,13 +764,13 @@ fn ssl_to_proto(
     // `site_ssl`. Preferring the inline PEM made a switch look ignored on
     // installations that predate the certificate table (their `site_ssl` row
     // still carries the old material).
-    let mut cert_pem = selected
-        .and_then(|cert| cert.cert_pem.clone())
-        .or_else(|| row.cert_pem.clone())
-        .unwrap_or_default();
-    let mut key_pem = selected
-        .and_then(|cert| cert.key_pem.clone())
-        .or_else(|| row.key_pem.clone())
+    let material = match row.certificate_id {
+        Some(_) => selected.and_then(|cert| cert.cert_pem.as_ref().zip(cert.key_pem.as_ref())),
+        None => row.cert_pem.as_ref().zip(row.key_pem.as_ref()),
+    };
+    let (mut cert_pem, mut key_pem) = material
+        .filter(|(cert, key)| !cert.trim().is_empty() && !key.trim().is_empty())
+        .map(|(cert, key)| (cert.clone(), key.clone()))
         .unwrap_or_default();
     let acme_email = row
         .acme_email
@@ -832,7 +832,7 @@ fn ssl_to_proto(
     //
     // An injected certificate never creates an ACME order: `acme_enabled` stays
     // false, so a using site cannot renew a certificate it does not own.
-    if cert_pem.trim().is_empty() && !acme_enabled && !row.self_signed {
+    if row.certificate_id.is_none() && cert_pem.is_empty() && !acme_enabled && !row.self_signed {
         if let Some(cert) = pick_linked_certificate(site, &certs.linked) {
             cert_pem = cert.cert_pem.clone().unwrap_or_default();
             key_pem = cert.key_pem.clone().unwrap_or_default();
@@ -981,6 +981,12 @@ fn pools_to_proto(
             // values the data plane parses, and the CHECK constraint keeps
             // anything else out of the row.
             address_family: pool.address_family.clone(),
+            // Empty for a direct origin. When set, the data plane resolves
+            // the peers through the tunnel connector instead of dialing them.
+            tunnel_id: pool
+                .tunnel_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
         });
     }
     configs
@@ -1717,16 +1723,19 @@ fn error_page_to_proto(row: &error_pages::Model) -> CustomErrorPage {
 pub async fn build_rule_bundle(
     db: &DatabaseConnection,
     site_row: &site::Model,
+    visible_sites: &[Uuid],
 ) -> Result<RuleBundle, sea_orm::DbErr> {
     let settings = BundleSettings {
         cache: crate::api::cache_settings::load(db).await.ok(),
         origin: crate::api::origin_settings::load(db).await.ok(),
         log: crate::api::log_retention::load(db).await.ok(),
+        tunnels: crate::tunnel_policy::bundle_tunnels(db, visible_sites).await?,
     };
     build_rule_bundle_with_settings(db, site_row, &settings, None).await
 }
 
 struct BundleSettings {
+    tunnels: (Vec<pingwaf_proto::TunnelConfig>, pingwaf_proto::TunnelSettings),
     cache: Option<crate::models::cache_settings::Model>,
     origin: Option<crate::models::origin_settings::Model>,
     log: Option<crate::models::log_retention::Model>,
@@ -1853,6 +1862,11 @@ async fn build_rule_bundle_with_settings(
         .map(rule_to_proto)
         .collect();
 
+    // The complete tunnel policy rides in every bundle (like `site_policies`),
+    // so one per-site push is enough for the edge to learn a tunnel that was
+    // created after it connected.
+    let (tunnels, tunnel_settings) = settings.tunnels.clone();
+
     let mut bundle = RuleBundle {
         site_id: site_row.id.to_string(),
         // Filled in below, once every other field is final.
@@ -1912,6 +1926,8 @@ async fn build_rule_bundle_with_settings(
         oidc: oidc_to_proto(oidc.as_ref(), oidc_provider_row.as_ref()),
         log_settings,
         path_exceptions: path_exceptions_to_proto(&path_exceptions),
+        tunnels,
+        tunnel_settings: Some(tunnel_settings),
     };
 
     bundle.config_hash = fingerprint(&bundle);
@@ -2162,8 +2178,9 @@ async fn assemble_site_config(
 
     let mut sites = Vec::with_capacity(rows.len());
     let mut updated_at = Utc.timestamp_opt(0, 0).unwrap();
+    let visible_sites = rows.iter().filter(|r| r.status == "active").map(|r| r.id).collect::<Vec<_>>();
     for row in &rows {
-        let bundle = build_rule_bundle(db, row).await?;
+        let bundle = build_rule_bundle(db, row, &visible_sites).await?;
         if row.updated_at > updated_at {
             updated_at = row.updated_at;
         }
@@ -2262,6 +2279,8 @@ pub(super) async fn assemble_managed_config(
         cache: Some(crate::api::cache_settings::read_or_default(db).await?),
         origin: Some(crate::api::origin_settings::read_or_default(db).await?),
         log: Some(crate::api::log_retention::read_or_default(db).await?),
+        tunnels: crate::tunnel_policy::bundle_tunnels(db,
+            &rows.iter().filter(|r| r.status == "active").map(|r| r.id).collect::<Vec<_>>()).await?,
     };
     let ranges = load_trusted_proxy_group_ranges(db, rows).await?;
     let mut sites = Vec::with_capacity(rows.len());
@@ -2934,6 +2953,7 @@ mod tests {
         is_default: bool,
     ) -> site_upstream_pools::Model {
         site_upstream_pools::Model {
+            tunnel_id: None,
             id: Uuid::new_v4(),
             site_id: Uuid::nil(),
             name: name.into(),
@@ -3535,6 +3555,22 @@ mod tests {
         assert!(ssl.cert_pem.is_empty());
         assert!(ssl.key_pem.is_empty());
         assert!(ssl.certificate_id.is_empty());
+    }
+
+    #[test]
+    fn incomplete_or_unavailable_selection_never_uses_another_key_or_grant() {
+        let mut row = bare_ssl_row(Uuid::new_v4());
+        let mut selected = linked_cert("a.example.com", Some("selected"));
+        selected.key_pem = None;
+        row.certificate_id = Some(selected.id);
+        row.cert_pem = Some("old-cert".into());
+        row.key_pem = Some("old-key".into());
+        let other = linked_cert("a.example.com", Some("granted"));
+        for available in [vec![selected], vec![]] {
+            let ssl = ssl_to_proto(&row, &certs(available, vec![other.clone()]),
+                hosts("a.example.com", &[]), &MtlsPush::default());
+            assert!(ssl.cert_pem.is_empty() && ssl.key_pem.is_empty());
+        }
     }
 
     /// Several grants, one winner: the certificate that leaves the fewest site

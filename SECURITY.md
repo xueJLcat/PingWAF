@@ -99,6 +99,9 @@ The following are in scope for this policy:
 - **Control-plane protocol** — the gRPC channel between agents and the server:
   agent authentication and API keys, rule/config push integrity, command
   execution (block IP, purge cache, restart agent).
+- **Tunnel** — the connector-to-edge channel (`pingwaf-tunnel`): pairing-token
+  redemption, connector credential handling, certificate pinning, and the
+  target allowlist that decides which internal service a session may reach.
 - **Injection and traversal** — SQL injection via SeaORM/raw queries in the
   control plane, path traversal in dashboard asset serving or the local rule
   cache, template or log injection.
@@ -287,6 +290,53 @@ control.**
       header is ignored and the TCP peer is used, so sites upgraded from
       earlier releases must add their proxy ranges to keep CDN-aware rules
       (rate limiting, allowlists, geo) working.
+
+### Tunnels
+
+- [ ] Enable the tunnel listener (`agent.tunnel_addr`, default
+      `0.0.0.0:9443`) only on edges that are meant to be tunnel ingresses, and
+      firewall the port to the networks the connectors dial from. Every other
+      edge should leave it unset.
+- [ ] Pairing tokens are single use and expire
+      (`tunnel_settings.pairing_ttl_seconds`, 30 minutes by default). Mint them
+      from **Agents → Tunnels** and hand them over out of band; the console
+      shows the token exactly once and stores only its SHA-256.
+- [ ] **A tunnel ingress never receives the connector's credential.** The
+      control plane signs a short-lived Ed25519 session token (key derived from
+      the resolved instance `jwt_secret`, tunnel ID and current credential digest),
+      the connector presents it, and the edge verifies it against
+      the public key in its rule bundle. A compromised edge can capture a token,
+      which expires (one hour by default) and is bound to one tunnel — set
+      `session_token_ttl_seconds` shorter when revocation must converge faster
+      than the rule-bundle push. The credential itself only authenticates the
+      connector's control stream to the control plane.
+- [ ] Revoke a tunnel when a connector host is decommissioned or lost:
+      **Revoke** drops the credential and every edge refuses the session within
+      one rule-bundle reload (≤5s). Deleting the tunnel does the same and
+      unbinds its origin pools.
+- [ ] Set `allowed_targets` in the connector's `tunnel.toml` when the
+      control-plane target list is broader than that host should reach. It is
+      intersected with the policy, never merged.
+- [ ] Treat one tunnel as one trust domain: every edge that serves a site bound
+      to a tunnel can ask the connector for any of that tunnel's targets. Split
+      network segments across separate tunnels.
+- [ ] Revocation converges while the edge can reach the control plane: the
+      policy (including the token's public key) is cached on disk, so a
+      partitioned edge keeps accepting tokens it can verify until they expire,
+      exactly like the deployment's fail-open rule cache. A revoked tunnel stops
+      working as soon as that edge receives the next bundle.
+- [ ] Deleting a tunnel that origin pools still reference is refused (`409`)
+      unless `?force=true` is passed: falling back to direct origins means the
+      edge starts dialing the internal addresses itself, which may either fail
+      or reach a network the tunnel existed to isolate.
+- [ ] Bridge ports are loopback-only (`127.0.0.1`), so a process already running
+      on an edge host can reach them. The edge host is trusted — do not run
+      untrusted workloads on an edge.
+- [ ] The edge's tunnel certificate is self-signed and pinned by SHA-256; it is
+      regenerated on the edge when it is within 30 days of expiry, and the
+      connector picks up the new fingerprint on its next config refresh. A
+      connector that cannot verify an ingress fails closed rather than
+      downgrading.
 
 ### Availability trade-offs
 

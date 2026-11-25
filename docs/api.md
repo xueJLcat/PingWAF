@@ -2116,24 +2116,34 @@ Get agent details. The response carries the same `display_name` /
 
 ### PATCH /agents/{agent_id}
 
-Set or clear the operator-facing display name. Requires write access
-(non-viewer).
+Set or clear the operator-facing display name and/or the tunnel ingress
+address. Requires write access (non-viewer).
 
 **Request:**
 ```json
 {
-  "display_name": "edge-01 (backup)"
+  "display_name": "edge-01 (backup)",
+  "tunnel_ingress_addr": "edge1.example.com:9443"
 }
 ```
 
 **Response (200):** the updated agent object (same shape as the list
-items), with `display_name` reflecting the new value.
+items), with `display_name` / `tunnel_ingress_addr` reflecting the new values.
 
 Rules:
 
-- The value is trimmed; `null`, an omitted field, or a string that is empty
-  after trimming clears the name — the node displays its hostname again. The
-  endpoint is single-field, so omission has no other meaning to preserve.
+- `display_name` is tri-state: **absent leaves the stored label alone**,
+  `null` (or a string that is empty after trimming) clears it — the node
+  displays its hostname again — and a string sets it. Sending only
+  `tunnel_ingress_addr` therefore no longer clears the label.
+- `tunnel_ingress_addr` is the public `host:port` a tunnel connector dials to
+  reach this node's tunnel listener; it must parse as `host:port` (a `400`
+  otherwise) and an empty string clears it (the node stops being offered as a
+  tunnel ingress). `tunnel_listener_addr`, `tunnel_cert_sha256` and
+  `tunnel_listener_error` are **reported by the agent** on every heartbeat and
+  are read-only here; the last one explains a configured listener that could
+  not bind (for example the port is taken), so the console can tell "not
+  configured" apart from "configured but failing".
 - At most `100` characters; control characters are rejected (`display_name
   must be at most 100 characters` / `display_name must not contain control
   characters`).
@@ -2260,6 +2270,183 @@ Semantics worth knowing before you reach for it:
   own while storing others from the same batch.
 
 ---
+
+## Tunnels
+
+A tunnel lets a service inside a private network be served through the data
+plane without any inbound port. The connector (`pingwaf-tunnel`) dials out to
+the control plane and to the edge ingresses; the edge terminates the public
+side and proxies through a loopback bridge, so the whole request path (WAF,
+rate limiting, cache, logs, TLS to the origin) is unchanged.
+
+A tunnel object carries three independent states, and the console renders all
+three:
+
+| Field | Meaning |
+|-------|---------|
+| `paired` | a credential exists — the connector *can* connect |
+| `enabled` | the deployment switch is on and the row is not `disabled` |
+| `connector_online` | the connector holds the control stream right now |
+
+`targets` is **derived**: the distinct node addresses of the origin pools whose
+`tunnel_id` points at this tunnel. `sites` names the domains of those sites —
+the blast radius of disabling or deleting the tunnel. `sessions` lists the edges
+currently holding a connector session (one per edge).
+
+### GET /tunnels
+
+List tunnels. Query: `search` (name substring), `status`
+(`pending|active|disabled`), `page`, `page_size`.
+
+An administrator sees every tunnel. A non-admin sees only the tunnels at least
+one of their own sites has an origin pool bound to — the internal addresses a
+tunnel exposes are that site's configuration, and the rule mirrors the one
+`GET /agents` applies to a node. `GET /tunnels/{id}` and
+`GET /tunnels/{id}/sessions` hide an out-of-scope tunnel behind a `404`, like
+every other resource.
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": "0f1c…",
+      "name": "branch-office",
+      "description": "NAS and intranet app",
+      "status": "active",
+      "paired": true,
+      "enabled": true,
+      "connector_online": true,
+      "connector_version": "0.32.50",
+      "connector_hostname": "nas-01",
+      "last_seen_at": "2026-11-25T02:00:00Z",
+      "targets": ["10.0.0.5:8080"],
+      "sites": ["app.example.com"],
+      "sessions": [
+        {
+          "agent_id": "…",
+          "agent_name": "edge-1",
+          "agent_status": "online",
+          "connected_at": "2026-11-25T01:59:00Z",
+          "last_seen_at": "2026-11-25T02:00:00Z",
+          "streams_active": 3,
+          "rtt_ms": 12,
+          "version": "0.32.50",
+          "hostname": "nas-01"
+        }
+      ],
+      "created_at": "2026-11-25T00:00:00Z",
+      "updated_at": "2026-11-25T00:00:00Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 25
+}
+```
+
+### POST /tunnels
+
+Create a tunnel and mint its one-time pairing token. Requires write access.
+
+**Request:**
+```json
+{ "name": "branch-office", "description": "NAS and intranet app" }
+```
+
+**Response (201):**
+```json
+{
+  "tunnel": { "…": "as above" },
+  "pairing_token": "<64 hex chars>",
+  "pairing_command": "curl -fsSL …/install.sh | sudo bash -s -- --mode tunnel --server-url https://cp:9090 --token …",
+  "expires_at": "2026-11-25T02:30:00Z"
+}
+```
+
+`pairing_token` is returned **exactly once**; the control plane stores only its
+SHA-256. The token is redeemed over the `PairTunnel` gRPC RPC (not REST), is
+rate limited per peer, and expires after `tunnel_settings.pairing_ttl_seconds`.
+
+The redemption returns a long-lived **credential** (which authenticates the
+connector's control stream and never leaves the control plane/connector pair)
+and a short-lived **session token** the connector presents to the edges. Edges
+verify that token's Ed25519 signature against the public key in their rule
+bundle; they never receive the credential.
+
+### GET /tunnels/{tunnel_id}
+
+One tunnel, same shape as a list item.
+
+### PATCH /tunnels/{tunnel_id}
+
+Rename, re-describe, or enable/disable. Requires write access.
+
+```json
+{ "name": "branch-office-2", "description": null, "status": "disabled" }
+```
+
+`status` accepts `active` or `disabled` only (`pending` is managed by pairing).
+Disabling pushes a fresh rule bundle (edges drop the live session within one
+reload) and tells a connected connector it was disabled.
+
+### DELETE /tunnels/{tunnel_id}
+
+Deletes the tunnel. The connector is told to stop, its per-edge session rows are
+cleared, and the tunnel disappears from the next rule bundle.
+
+A tunnel that origin pools still reference is refused with `409` — silently
+turning those pools into **direct** origins means the edge starts dialing the
+internal addresses itself, which may either fail or reach a network the tunnel
+existed to isolate. Pass `?force=true` to clear the bindings and delete anyway;
+the response's `sites` field (from `GET /tunnels/{id}`) names what is affected.
+
+### POST /tunnels/{tunnel_id}/pairing
+
+Re-pair: rotates the credential (the running connector is disconnected) and
+mints a new pairing token. Same response shape as `POST /tunnels`.
+
+### POST /tunnels/{tunnel_id}/revoke
+
+Drops the credential and any pending pairing token; the tunnel returns to
+`pending`. Bound sites answer `503` until the connector is paired again.
+
+### GET /tunnels/{tunnel_id}/sessions
+
+The edge sessions currently serving this tunnel (`SessionView[]`, the same
+objects the list embeds).
+
+### GET /settings/tunnel
+
+Administrators only. The deployment-wide tunnel limits (single row):
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `enabled` | `true` | master switch; off refuses every new session |
+| `pairing_ttl_seconds` | `1800` | lifetime of a pairing token |
+| `max_streams_per_session` | `256` | concurrent data streams per connector session |
+| `max_targets_per_tunnel` | `256` | upper bound on a tunnel's derived target list |
+| `idle_timeout_seconds` | `300` | session liveness bound: a control stream silent for this long is closed |
+| `heartbeat_seconds` | `20` | control-frame heartbeat cadence |
+| `session_token_ttl_seconds` | `3600` | lifetime of a connector session token; also bounds how long a partitioned edge accepts a revoked tunnel |
+
+### PUT /settings/tunnel
+
+Administrators only. Accepts any subset of the fields above; values are clamped
+to what the data plane can honour (the token lifetime to 60 s – 24 h, the
+heartbeat to 5 – 300 s) and the change is pushed to every agent and connector
+immediately — a master-switch change also closes live sessions on the next
+reload.
+
+### Origin pool binding
+
+`POST /sites/{site_id}/upstream-pools` and `PUT …/upstream-pools/{pool_id}`
+accept `tunnel_id` (UUID or `null`). On update, **absent leaves the binding
+alone** and an empty string clears it. An unknown tunnel id is a `400`; the
+pool's node addresses are then resolved by the connector inside the private
+network instead of by the edge. `GET …/upstream-pools` returns `tunnel_id` on
+each pool.
+
 
 ## WAF Settings
 

@@ -364,6 +364,11 @@ impl PingWafAgent {
 
     /// Log an access entry (non-blocking, queued for batch shipping).
     pub fn log_access(&self, entry: AccessLogEntry) {
+        // A tunneled origin is reached through a loopback bridge, so the peer
+        // address pingora reports is `127.0.0.1:<port>`. Resolve it back to the
+        // tunnel and the internal target: the operator needs to see where the
+        // request actually went, and a loopback port is noise.
+        let upstream_addr = tunnel_upstream_label(&entry.upstream_addr);
         let request_headers = combine_headers(entry.request_headers);
         let response_headers = combine_headers(entry.response_headers);
         let log_entry = client::LogEntry {
@@ -385,7 +390,7 @@ impl PingWafAgent {
             response_body: entry.response_body,
             response_body_size: entry.response_body_size,
             response_body_truncated: entry.response_body_truncated,
-            upstream_addr: entry.upstream_addr,
+            upstream_addr,
             upstream_latency_ms: entry.upstream_latency_ms,
             upstream_status: entry.upstream_status,
             waf_score: 0,
@@ -520,6 +525,18 @@ pub async fn start_agent(
 /// Get the global agent instance (shorthand for [`PingWafAgent::instance`]).
 pub fn agent_instance() -> Option<Arc<PingWafAgent>> {
     PingWafAgent::instance()
+}
+
+/// Rewrites a loopback bridge address to `tunnel://<name>/<target>`.
+///
+/// Anything else (a direct origin, an empty address) is returned untouched.
+fn tunnel_upstream_label(addr: &str) -> String {
+    let Ok(addr) = addr.parse::<std::net::SocketAddr>() else {
+        return addr.to_string();
+    };
+    pingwaf_tunnel::installed_registry()
+        .and_then(|registry| registry.upstream_label(addr))
+        .unwrap_or_else(|| addr.to_string())
 }
 
 #[cfg(test)]

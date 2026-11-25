@@ -364,6 +364,6 @@ mod tests {
         assert_eq!(VersionScope::Site(id).column_value(), Some(id));
         assert_eq!(VersionScope::Global.column_value(), None);
         assert_eq!(VersionScope::Deployment.as_str(), "deployment");
-        assert_eq!(crate::config_catalog::SNAPSHOT_SCHEMA, 3);
+        assert_eq!(crate::config_catalog::SNAPSHOT_SCHEMA, 4);
     }
 }

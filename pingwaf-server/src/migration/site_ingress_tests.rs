@@ -19,7 +19,8 @@ impl MigratorTrait for Local55 {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         Migrator::migrations().into_iter()
             .take_while(|m| m.name() <= "m20240101_000115_dynamic_pages")
-            .filter(|m| m.name() != "m20240101_000104_site_ssl_self_signed_backfill")
+            .filter(|m| !matches!(m.name(), "m20240101_000104_site_ssl_self_signed_backfill"
+                | "m20240101_000105_tunnel_connectors" | "m20240101_000106_tunnel_sessions"))
             .collect()
     }
 }
@@ -52,17 +53,24 @@ async fn upgrade_local55_preserves_certificate_selection() {
     let id = scalar::<uuid::Uuid>(&db, "SELECT id FROM sites WHERE domain='selected.test'").await;
     db.execute_unprepared("UPDATE site_certificates SET auto_renew=true, acme_email='ops@example.test',
         domain='www.selected.test,selected.test' WHERE domain='selected.test'").await.unwrap();
+    crate::grpc::control_plane::check_certificate_report_ownership(&db, id,
+        scalar::<uuid::Uuid>(&db, "SELECT id FROM sites WHERE domain='empty.test'").await,
+        scalar::<uuid::Uuid>(&db, "SELECT id FROM site_certificates").await).await;
     let names = vec!["selected.test".to_string(), "www.selected.test".to_string()];
     let key = rcgen::KeyPair::generate().unwrap();
     let leaf = rcgen::CertificateParams::new(names).unwrap().self_signed(&key).unwrap().pem();
     let key_pem = key.serialize_pem();
     let order = "SELECTED.test,www.selected.test";
     use crate::acme_state_sync::sync_certificate;
-    assert!(!sync_certificate(&db, id, "other.test", &leaf, &key_pem).await.unwrap());
-    assert!(!sync_certificate(&db, id, order, &leaf, &rcgen::KeyPair::generate().unwrap().serialize_pem()).await.unwrap());
+    let row = Some(scalar::<uuid::Uuid>(&db, "SELECT id FROM site_certificates").await);
+    for wrong in [None, Some(uuid::Uuid::new_v4())] {
+        assert!(!sync_certificate(&db, id, wrong, order, &leaf, &key_pem).await.unwrap());
+    }
+    assert!(!sync_certificate(&db, id, row, "other.test", &leaf, &key_pem).await.unwrap());
+    assert!(!sync_certificate(&db, id, row, order, &leaf, &rcgen::KeyPair::generate().unwrap().serialize_pem()).await.unwrap());
     assert!(scalar::<bool>(&db, "SELECT cert_pem IS NULL FROM site_certificates").await);
-    assert!(sync_certificate(&db, id, order, &leaf, &key_pem).await.unwrap());
-    assert!(!sync_certificate(&db, id, order, &leaf, &key_pem).await.unwrap());
+    assert!(sync_certificate(&db, id, row, order, &leaf, &key_pem).await.unwrap());
+    assert!(!sync_certificate(&db, id, row, order, &leaf, &key_pem).await.unwrap());
 }
 
 fn legacy_insert(domain: &str) -> String {
@@ -225,7 +233,7 @@ async fn site_ingress_migration_postgres() {
     // Capture precisely what a schema-2 producer knew before the listener migration.
     let mut tables = serde_json::Map::new();
     for spec in config_catalog::tables_for(scope) {
-        if !matches!(spec.name, "node_listener_policies" | "node_listener_overrides") {
+        if !matches!(spec.name, "node_listener_policies" | "node_listener_overrides" | "tunnel_settings" | "tunnel_connectors") {
             tables.insert(spec.name.into(), config_catalog::query_rows(&db, spec, None).await.unwrap().into());
         }
     }

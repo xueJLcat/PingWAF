@@ -59,7 +59,7 @@ use pingwaf_agent::cache::{
 use pingwaf_agent::config::AgentConfig;
 #[cfg(not(feature = "edge"))]
 use pingwaf_server::ServerConfig;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod ingress;
 // Managed leases use Linux boottime so suspend cannot extend authorization.
@@ -172,7 +172,14 @@ pub(crate) fn agent_config_from_opts(opts: &AgentOpts) -> AgentConfig {
         metrics_ship_interval_secs: opts.metrics_ship_interval_secs,
         auto_upgrade: opts.auto_upgrade,
         upgrade_url: opts.upgrade_url.clone(),
+        tunnel_addr: non_empty_opt(&opts.tunnel_addr),
     }
+}
+
+/// `Some(trimmed)` for a non-empty value.
+fn non_empty_opt(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Convert CLI all-in-one options into an `AgentConfig`.
@@ -209,6 +216,7 @@ fn agent_config_from_all_in_one(opts: &AllInOneOpts) -> AgentConfig {
         // The embedded agent dials loopback, which the generated certificate
         // always covers.
         server_tls_name: None,
+        tunnel_addr: non_empty_opt(&opts.tunnel_addr),
         heartbeat_interval_secs: opts.heartbeat_interval_secs,
         cache_dir: opts.cache_dir.clone(),
         log_batch_size: opts.log_batch_size,
@@ -864,6 +872,119 @@ fn site_has_cache_policy(site: &pingwaf_agent::cache::SiteRules) -> bool {
 
 /// Startup view of the cache: `None` while there is nothing to serve, so the
 /// proxy is not started on an empty or unusable configuration.
+/// The loopback address a tunnel target is reached at, when a session is live.
+fn tunnel_bridge_addr(
+    tunnel_id: &str,
+    target: &str,
+) -> Option<std::net::SocketAddr> {
+    pingwaf_tunnel::installed_registry()
+        .and_then(|registry| registry.bridge_addr(tunnel_id, target))
+}
+
+/// Reconciles the tunnel registry with the policy in the rule cache.
+///
+/// Called before every configuration build: the registry is what the address
+/// substitution reads, so it has to reflect the cache the build is about to
+/// use.
+fn apply_tunnel_policies(cached: &CachedRules) {
+    let Some(registry) = pingwaf_tunnel::installed_registry() else {
+        return;
+    };
+    let settings = cached
+        .tunnel_settings
+        .map(|settings| pingwaf_tunnel::TunnelSettings {
+            max_streams: settings.max_streams.max(1),
+            idle_timeout_secs: settings.idle_timeout_secs.max(10),
+            heartbeat_secs: settings.heartbeat_secs.max(5),
+        })
+        .unwrap_or_default();
+    let policies: Vec<pingwaf_tunnel::TunnelPolicy> = cached
+        .tunnels
+        .iter()
+        .map(|tunnel| pingwaf_tunnel::TunnelPolicy {
+            tunnel_id: tunnel.tunnel_id.clone(),
+            name: tunnel.name.clone(),
+            enabled: tunnel.enabled,
+            session_public_key: tunnel.session_public_key.clone(),
+            targets: tunnel.targets.clone(),
+            settings: settings.clone(),
+        })
+        .collect();
+    registry.apply_policies(policies);
+}
+
+/// Starts the tunnel listener when the agent was configured for one.
+///
+/// Returns the registry so the caller can keep it alive; the process-wide
+/// handle is what the heartbeat and the configuration generator read.
+async fn start_tunnel_listener(
+    addr: &str,
+    cache_dir: &str,
+) -> Option<Arc<pingwaf_tunnel::TunnelRegistry>> {
+    let dir = std::path::Path::new(cache_dir).join("tunnel");
+    let names = tunnel_certificate_names();
+    let cert = match pingwaf_tunnel::TunnelCertificate::load_or_generate(
+        &dir, &names,
+    ) {
+        Ok(cert) => cert,
+        Err(error) => {
+            error!(target: LOG_TARGET, error = %error, "cannot prepare the tunnel certificate");
+            return None;
+        },
+    };
+    let registry = pingwaf_tunnel::TunnelRegistry::new();
+    let acceptor = match pingwaf_tunnel::TunnelAcceptor::bind(
+        addr,
+        &cert,
+        Arc::clone(&registry),
+    )
+    .await
+    {
+        Ok(acceptor) => acceptor,
+        Err(error) => {
+            error!(target: LOG_TARGET, addr, error = %error, "cannot start the tunnel listener");
+            // Report the failure instead of looking like "never configured":
+            // the console can then say why no edge is offering an ingress.
+            pingwaf_tunnel::install_runtime(pingwaf_tunnel::TunnelRuntime {
+                registry: Arc::clone(&registry),
+                listener_addr: None,
+                cert_fingerprint: cert.fingerprint_sha256.clone(),
+                listener_error: Some(error.to_string()),
+            });
+            return Some(registry);
+        },
+    };
+    let listener_addr = acceptor.local_addr();
+    let fingerprint = cert.fingerprint_sha256.clone();
+    drop(acceptor.spawn());
+    pingwaf_tunnel::install_runtime(pingwaf_tunnel::TunnelRuntime {
+        registry: Arc::clone(&registry),
+        listener_addr: Some(listener_addr),
+        cert_fingerprint: fingerprint.clone(),
+        listener_error: None,
+    });
+    info!(target: LOG_TARGET,
+        addr = %listener_addr,
+        fingerprint = %fingerprint,
+        "tunnel listener started"
+    );
+    Some(registry)
+}
+
+/// Subject alternative names for the tunnel certificate.
+///
+/// Cosmetic only: connectors pin the leaf's SHA-256, they do not check a name.
+/// The host name makes `openssl s_client` output explain what the listener is.
+fn tunnel_certificate_names() -> Vec<String> {
+    let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    if let Some(host) = sysinfo::System::host_name()
+        && !host.trim().is_empty()
+    {
+        names.push(host);
+    }
+    names
+}
+
 fn cached_rules_to_pingap_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -1078,22 +1199,49 @@ fn convert_proxy_config_with_handler(
                 up.pool_id.clone()
             };
 
+            // A pool bound to a tunnel is reached through the loopback bridge
+            // the tunnel registry owns; a pool with no live session on this
+            // edge has no upstream at all, which is what makes a probe report
+            // the truth instead of "port open, backend dead".
             let addrs: Vec<String> = up
                 .peers
                 .iter()
-                .map(|p| {
+                .filter_map(|p| {
                     let addr = p
                         .address
                         .strip_prefix("https://")
                         .or_else(|| p.address.strip_prefix("http://"))
                         .unwrap_or(&p.address);
-                    if p.weight > 1 {
+                    let addr = if up.tunnel_id.is_empty() {
+                        addr.to_string()
+                    } else {
+                        // Same normalization the control plane used to derive
+                        // the target list: a bare host gets the default port of
+                        // its TLS flag, or the lookup could never match.
+                        let target =
+                            pingwaf_tunnel::protocol::normalize_pool_target(
+                                addr, p.tls,
+                            )?;
+                        match tunnel_bridge_addr(&up.tunnel_id, &target) {
+                            Some(bridge) => bridge.to_string(),
+                            None => return None,
+                        }
+                    };
+                    Some(if p.weight > 1 {
                         format!("{} {}", addr, p.weight)
                     } else {
-                        addr.to_string()
-                    }
+                        addr
+                    })
                 })
                 .collect();
+            if addrs.is_empty() {
+                debug!(target: LOG_TARGET,
+                    tunnel = %up.tunnel_id,
+                    pool = %name,
+                    "tunnel has no session on this edge, pool has no upstream"
+                );
+                continue;
+            }
 
             // Multi-node pools get request-level protection by default:
             // without backend stats the circuit breaker can never observe
@@ -1271,7 +1419,24 @@ fn convert_proxy_config_with_handler(
             // Route only to pools this site actually built — an empty pool
             // has no upstream to receive traffic. Fall back to the site's
             // default pool instead of silently dropping the route.
+            //
+            // A *tunneled* pool is the exception: its absence means the
+            // connector is offline, not that the pool is empty. Falling back
+            // would send the request — Host, cookies, Authorization and all —
+            // to a different origin, so the route keeps pointing at the
+            // missing pool and answers 503 instead.
+            let tunneled = site.upstreams.iter().any(|up| {
+                up.pool_id == route.pool_id && !up.tunnel_id.is_empty()
+            });
             let target = if pool_keys.contains(&route.pool_id) {
+                route.pool_id.clone()
+            } else if tunneled {
+                warn!(target: LOG_TARGET,
+                    site = %site.domain,
+                    route = %route.id,
+                    pool = %route.pool_id,
+                    "route pool is bound to a tunnel with no live session; the route answers 503 instead of falling back"
+                );
                 route.pool_id.clone()
             } else {
                 match default_key.clone().or_else(|| pool_keys.first().cloned())
@@ -1363,18 +1528,15 @@ fn convert_proxy_config_with_handler(
                 );
                 d.join(",")
             };
-            let cert = if !ssl.cert_pem.is_empty() {
-                Some(CertificateConf {
-                    domains: Some(domains),
-                    tls_cert: Some(ssl.cert_pem.clone()),
-                    tls_key: Some(ssl.key_pem.clone()),
-                    ..Default::default()
-                })
-            } else if ssl.acme_enabled && !ssl.acme_email.is_empty() {
-                acme_certificate_conf(ssl, domains)
-            } else {
-                None
-            };
+            let mut cert = if ssl.acme_enabled && !ssl.acme_email.is_empty() {
+                acme_certificate_conf(ssl, domains.clone())
+            } else { None };
+            if !ssl.cert_pem.is_empty() && !ssl.key_pem.is_empty() {
+                let entry = cert.get_or_insert_with(CertificateConf::default);
+                entry.domains = Some(domains);
+                entry.tls_cert = Some(ssl.cert_pem.clone());
+                entry.tls_key = Some(ssl.key_pem.clone());
+            }
             if let Some(cert) = cert {
                 certificates.insert(format!("{site_id}_cert"), cert);
             }
@@ -1560,6 +1722,7 @@ fn acme_certificate_conf(
     let mut cert = CertificateConf {
         domains: Some(domains.clone()),
         acme: Some(format!("http://{}", ssl.acme_email)),
+        acme_certificate_id: (!ssl.certificate_id.is_empty()).then(|| ssl.certificate_id.clone()),
         ..Default::default()
     };
     if ssl.acme_challenge_type == "AcmeHttp01" {
@@ -1655,6 +1818,39 @@ fn acme_state_path(rule_cache: &RuleCache) -> PathBuf {
     rule_cache.cache_dir().join("acme_state.toml")
 }
 
+/// A generated section name identifies the site. Its domains, order owner
+/// and key pair must still match before restoring material after a reload.
+fn reusable_acme_pair<'a>(
+    current: &toml::Value,
+    previous: &'a toml::Value,
+) -> Option<(&'a str, &'a str)> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use std::collections::BTreeSet;
+
+    let account = current.get("acme")?.as_str()?;
+    if account.is_empty() || previous.get("acme")?.as_str()? != account
+        || current.get("acme_certificate_id") != previous.get("acme_certificate_id")
+        || ["tls_cert", "tls_key"].into_iter().any(|k| current.get(k).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()))
+    {
+        return None;
+    }
+    let normalize = |names: &str| -> BTreeSet<String> {
+        names.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_ascii_lowercase).collect()
+    };
+    let expected = normalize(current.get("domains")?.as_str()?);
+    if expected.is_empty() || expected != normalize(previous.get("domains")?.as_str()?) { return None; }
+    let pem = previous.get("tls_cert")?.as_str()?;
+    let key = previous.get("tls_key")?.as_str()?;
+    let (leaf, _) = pingap_certificate::parse_leaf_chain_certificates(pem, key).ok()?;
+    let now = pingap_core::now_sec() as i64;
+    if now < leaf.not_before || now >= leaf.not_after || normalize(&leaf.domains.join(",")) != expected { return None; }
+    let chain = CertificateDer::pem_slice_iter(pem.as_bytes()).collect::<Result<Vec<_>, _>>().ok()?;
+    let private = PrivateKeyDer::from_pem_slice(key.as_bytes()).ok()?;
+    let certified = rustls::sign::CertifiedKey::from_der(chain, private, &rustls::crypto::ring::default_provider()).ok()?;
+    certified.keys_match().ok()?;
+    Some((pem, key))
+}
+
 /// Merge a freshly converted config with a previous one, carrying over the
 /// state only the lets-encrypt task produces: issued PEMs (filled into
 /// certificate entries the new config left empty) and the whole `storages`
@@ -1679,31 +1875,13 @@ fn merge_config_state(new_toml: &str, prev_toml: &str) -> String {
             .or_insert(toml::Value::Table(toml::Table::new()));
         if let Some(certs) = certs.as_table_mut() {
             for (name, prev_cert) in prev_certs {
-                let pem = prev_cert
-                    .get("tls_cert")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if pem.is_empty() {
-                    continue;
-                }
                 let Some(cert) = certs.get_mut(name) else {
                     continue;
                 };
-                let has_pem = cert
-                    .get("tls_cert")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|v| !v.is_empty());
-                if has_pem {
-                    continue;
-                }
-                if let Some(cert) = cert.as_table_mut() {
-                    cert.insert(
-                        "tls_cert".to_string(),
-                        toml::Value::String(pem.to_string()),
-                    );
-                    if let Some(key) = prev_cert.get("tls_key") {
-                        cert.insert("tls_key".to_string(), key.clone());
-                    }
+                if let Some((pem, key)) = reusable_acme_pair(cert, prev_cert)
+                    && let Some(table) = cert.as_table_mut() {
+                    table.insert("tls_cert".into(), pem.into());
+                    table.insert("tls_key".into(), key.into());
                 }
             }
         }
@@ -1725,10 +1903,11 @@ async fn start_legacy_data_plane(
     rule_cache: Arc<RuleCache>,
     _host: IngressHost,
 ) -> anyhow::Result<()> {
-    let (config, initial_hash) = loop {
+    let (config, initial_hash, initial_key) = loop {
         let snapshot = rule_cache.all_sites();
+        if _host.is_none() { apply_tunnel_policies(&snapshot); }
         if let Some(config) = cached_rules_to_pingap_config(&snapshot, rule_cache.cache_dir()) {
-            break (config, snapshot.config_hash.clone());
+            break (config, snapshot.config_hash.clone(), reload_key(&snapshot));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     };
@@ -2064,20 +2243,20 @@ async fn start_legacy_data_plane(
     // key) and set as current, so the ACME renewal task keeps working.
     let watcher_cache = Arc::clone(&rule_cache);
     let watcher_config_manager = Arc::clone(&config_manager);
-    let mut tracker = ReloadTracker::new(initial_hash.clone());
+    let mut tracker = ReloadTracker::new(initial_key.clone());
     if initial_errors.is_empty() {
         watcher_cache.set_config_apply_error(None);
         #[cfg(target_os = "linux")]
         if let Some(host) = &_host { host.default_routes_applied(initial_hash.clone()); }
     } else {
-        tracker.failed(initial_hash, Instant::now());
+        tracker.failed(initial_key, Instant::now());
         watcher_cache.set_config_apply_error(Some(initial_errors.join("; ")));
     }
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
             let snapshot = watcher_cache.all_sites();
-            let hash = snapshot.config_hash.clone();
+            let hash = reload_key(&snapshot);
             if !tracker.is_due(&hash, Instant::now()) {
                 continue;
             }
@@ -2087,6 +2266,7 @@ async fn start_legacy_data_plane(
                 retry = tracker.failure.is_some(),
                 "data plane: rule change detected, reloading"
             );
+            if _host.is_none() { apply_tunnel_policies(&snapshot); }
             let converted = convert_cached_rules(&snapshot, watcher_cache.cache_dir());
             #[cfg(target_os = "linux")]
             let handlers = _host.as_ref().map(|_| parse_from_conf(converted.clone()));
@@ -2105,7 +2285,7 @@ async fn start_legacy_data_plane(
             if errors.is_empty() {
                 #[cfg(target_os = "linux")]
                 if let Some(host) = &_host {
-                    host.default_routes_applied(hash.clone());
+                    host.default_routes_applied(snapshot.config_hash.clone());
                 }
                 tracker.succeeded(hash);
                 watcher_cache.set_config_apply_error(None);
@@ -2191,6 +2371,52 @@ const RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// failure that will not go away on its own (a certificate that does not
 /// parse) then costs one reload every five minutes, not one every poll.
 const RELOAD_RETRY_MAX: Duration = Duration::from_secs(300);
+
+/// The key the hot-reload watcher compares.
+///
+/// The rule cache's hash alone is not enough once tunnels exist: a connector
+/// connecting or dropping changes which pools have an upstream without
+/// touching the cache, so the registry's generation is folded in.
+fn reload_key(snapshot: &CachedRules) -> Arc<str> {
+    let hash = snapshot.config_hash.clone();
+    match pingwaf_tunnel::installed_registry() {
+        Some(registry) => Arc::from(format!(
+            "{}#{}#{:016x}",
+            hash,
+            registry.generation(),
+            tunnel_policy_fingerprint(snapshot)
+        )),
+        None => hash,
+    }
+}
+
+/// Fingerprint of the tunnel policy the edge holds.
+///
+/// The reload pass is the only place that reconciles the registry with the
+/// cache, so a policy change that does not move the config hash (a credential
+/// rotation, a disable, a new target list) must move the key too — otherwise a
+/// revoked tunnel would keep its live session until some unrelated change
+/// happened to trigger a reload, and the documented ≤5s convergence would be
+/// a lie.
+fn tunnel_policy_fingerprint(cached: &CachedRules) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for tunnel in cached.tunnels.iter() {
+        tunnel.tunnel_id.hash(&mut hasher);
+        tunnel.enabled.hash(&mut hasher);
+        tunnel.session_public_key.hash(&mut hasher);
+        tunnel.targets.hash(&mut hasher);
+    }
+    if let Some(settings) = cached.tunnel_settings {
+        (
+            settings.max_streams,
+            settings.idle_timeout_secs,
+            settings.heartbeat_secs,
+        )
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 /// Decides when the hot-reload watcher applies the rule cache to the proxy.
 ///
@@ -2362,7 +2588,12 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
         },
         RunMode::Agent(config) => run_agent(*config).await,
         #[cfg(not(feature = "edge"))]
-        RunMode::AllInOne(server_config, mut agent_config) => {
+        RunMode::AllInOne(mut server_config, mut agent_config) => {
+            if let Some(port) = agent_config.tunnel_addr.as_deref().and_then(configured_tunnel_port) {
+                anyhow::ensure!(!server_config.infrastructure_ports().contains(&port),
+                    "tunnel port {port} conflicts with the control plane or local database");
+                server_config.embedded_tunnel_port = Some(port);
+            }
             info!(target: LOG_TARGET,
                 http_addr = %server_config.http_addr,
                 grpc_addr = %server_config.grpc_addr,
@@ -2397,6 +2628,18 @@ pub async fn run(mode: RunMode) -> anyhow::Result<()> {
                          it will fall back to its configured CA settings"
                     );
                 },
+            }
+
+            // The tunnel listener (when configured) starts before the data
+            // plane: the registry it installs is what the configuration build
+            // asks for bridge addresses, and the heartbeat reports it from the
+            // first tick.
+            if let Some(addr) = agent_config.tunnel_addr.clone() {
+                let _ =
+                    start_tunnel_listener(&addr, &agent_config.cache_dir).await;
+                if let Some(bound) = pingwaf_tunnel::runtime().and_then(|r| r.listener_addr) {
+                    server_config.embedded_tunnel_port = Some(bound.port());
+                }
             }
 
             // Start the agent in the background first.
@@ -2451,6 +2694,15 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
         cache_dir = %config.cache_dir,
         "starting PingWAF in Agent mode (data plane only)"
     );
+    // The tunnel listener starts before the data plane: the registry it
+    // installs is what the configuration build asks for bridge addresses, and
+    // the heartbeat reports it from the first tick.
+    let mut infrastructure = Vec::new();
+    if let Some(addr) = config.tunnel_addr.clone() {
+        let _ = start_tunnel_listener(&addr, &config.cache_dir).await;
+        infrastructure.extend(pingwaf_tunnel::runtime().and_then(|r| r.listener_addr).map(|a| a.port())
+            .or_else(|| configured_tunnel_port(&addr)));
+    }
     let (agent, host) = start_data_plane_agent(config).await?;
     // Opt-in self-upgrade: follows the control plane's build, then re-execs
     // this process (see `pingwaf_agent::upgrade`).
@@ -2460,7 +2712,7 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
     // Start the data plane proxy in the background
     let rule_cache = Arc::clone(&agent.rule_cache);
     let proxy_handle =
-        tokio::spawn(run_data_plane(rule_cache, Vec::new(), host));
+        tokio::spawn(run_data_plane(rule_cache, infrastructure, host));
 
     // Wait for shutdown signal
     shutdown_signal().await;
@@ -2468,6 +2720,10 @@ pub(crate) async fn run_agent(config: AgentConfig) -> anyhow::Result<()> {
     agent.shutdown().await;
     proxy_handle.abort();
     Ok(())
+}
+
+fn configured_tunnel_port(address: &str) -> Option<u16> {
+    address.rsplit_once(':')?.1.parse::<u16>().ok().filter(|port| *port != 0)
 }
 
 /// Connect to the database, run migrations, and create a bootstrap API key
@@ -2887,6 +3143,7 @@ mod tests {
             sni: String::new(),
             verify_cert: None,
             address_family: "auto".to_string(),
+            tunnel_id: String::new(),
             is_default: false,
         }
     }
@@ -3004,6 +3261,71 @@ mod tests {
                 .unwrap()
                 .contains("{{ host }}"),
             "the control-plane template must pass through untouched"
+        );
+    }
+
+    #[test]
+    fn the_reload_key_moves_when_only_the_tunnel_policy_changes() {
+        // The config hash is identical; only the tunnel policy differs. Without
+        // the policy in the key, the reload pass (the only place that applies
+        // it) would never run and a revoked tunnel would keep its session.
+        let site = site_rules("site1", "a.example.com");
+        let mut cached = one_site_cache(site);
+        let base = tunnel_policy_fingerprint(&cached);
+
+        let tunnel = |key: &str| pingwaf_agent::cache::TunnelConfig {
+            tunnel_id: "tunnel-1".to_string(),
+            name: "branch".to_string(),
+            session_public_key: key.to_string(),
+            enabled: true,
+            targets: vec!["10.0.0.5:8080".to_string()],
+        };
+        cached.tunnels = std::sync::Arc::new(vec![tunnel(&"aa".repeat(32))]);
+        let rotated = tunnel_policy_fingerprint(&cached);
+        assert_ne!(base, rotated, "a new public key must move the key");
+
+        let mut disabled = tunnel(&"bb".repeat(32));
+        disabled.enabled = false;
+        cached.tunnels = std::sync::Arc::new(vec![disabled]);
+        assert_ne!(
+            rotated,
+            tunnel_policy_fingerprint(&cached),
+            "disabling a tunnel must move the key"
+        );
+    }
+
+    #[test]
+    fn a_tunnel_pool_without_a_session_never_falls_back_to_the_default_pool() {
+        // A route whose pool is bound to a tunnel has no upstream while the
+        // connector is offline. Falling back to the site's default pool would
+        // send the request — Host, cookies, Authorization — to a different
+        // origin, so the route must keep pointing at the missing pool and
+        // answer 503 instead.
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let mut tunneled = pool("pool_t", vec![peer("10.0.0.5:8080")]);
+        tunneled.tunnel_id = "tunnel-1".to_string();
+        site.upstreams.push(tunneled);
+        site.routes = vec![route("r1", "prefix", "/api", "pool_t")];
+        let cached = one_site_cache(site);
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            cached_rules_to_pingap_config(&cached, dir.path()).unwrap();
+
+        // The tunnel pool has no upstream on this edge (no session).
+        assert!(
+            !config.upstreams.contains_key("pool_t"),
+            "a tunnel pool with no session must not have an upstream"
+        );
+        // …and the route still targets it, not the default pool.
+        let location = config
+            .locations
+            .get("site1_route_r1")
+            .expect("route location");
+        assert_eq!(
+            location.upstream.as_deref(),
+            Some("pool_t"),
+            "the route must not fall back to another origin"
         );
     }
 
@@ -4956,6 +5278,22 @@ mod tests {
     }
 
     #[test]
+    fn issued_acme_pair_retains_the_renewal_configuration() {
+        let mut site = site_rules("site1", "example.test");
+        let mut ssl = acme_ssl();
+        ssl.certificate_id = "selected".into();
+        ssl.cert_pem = "cert".into();
+        ssl.key_pem = "key".into();
+        site.ssl_config = Some(ssl);
+        let config = cached_rules_to_pingap_config(&one_site_cache(site), Path::new("/tmp/pingwaf-test-cache")).unwrap();
+        let cert = &config.certificates["site1_cert"];
+        assert!(cert.acme.is_some());
+        assert_eq!(cert.acme_certificate_id.as_deref(), Some("selected"));
+        assert_eq!(cert.tls_cert.as_deref(), Some("cert"));
+        assert_eq!(cert.tls_key.as_deref(), Some("key"));
+    }
+
+    #[test]
     fn merge_config_state_empty_prev_is_identity() {
         let new_toml = "[certificates.c1]\ntls_key = \"k\"\n";
         assert_eq!(merge_config_state(new_toml, ""), new_toml);
@@ -4963,10 +5301,17 @@ mod tests {
 
     #[test]
     fn merge_config_state_carries_issued_pems_and_storages() {
+        let key = pingap_certificate::rcgen::KeyPair::generate().unwrap();
+        let pem = pingap_certificate::rcgen::CertificateParams::new(vec!["example.test".to_string()])
+            .unwrap().self_signed(&key).unwrap().pem();
+        let key = key.serialize_pem();
         let prev_toml = "\
 [certificates.c1]
-tls_cert = \"ISSUED\"
-tls_key = \"KEY\"
+domains = \"example.test\"
+acme = \"http://a@example.com\"
+acme_certificate_id = \"row1\"
+tls_cert = '''ISSUED'''
+tls_key = '''PRIVATE'''
 
 [certificates.c2]
 tls_cert = \"UPLOAD\"
@@ -4978,13 +5323,26 @@ path = \"/tmp/acme\"
 ";
         let new_toml = "\
 [certificates.c1]
+domains = \"example.test\"
+acme_certificate_id = \"row1\"
 acme = \"http://a@example.com\"
 
 [certificates.c2]
 tls_cert = \"NEWUPLOAD\"
 tls_key = \"NEWKEY\"
 ";
-        let merged = merge_config_state(new_toml, prev_toml)
+        let prev_toml = prev_toml.replace("ISSUED", &pem).replace("'''PRIVATE'''", &format!("'''{key}'''"));
+        let mismatched_key = pingap_certificate::rcgen::KeyPair::generate().unwrap().serialize_pem();
+        for (current, old) in [
+            (new_toml.replace("row1", "row2"), prev_toml.clone()),
+            (new_toml.replace("example.test", "changed.test"), prev_toml.clone()),
+            (new_toml.to_owned(), prev_toml.replace(&key, &mismatched_key)),
+            (new_toml.replace("example.test", "changed.test"), prev_toml.replace("example.test", "changed.test")),
+        ] {
+            let merged = merge_config_state(&current, &old).parse::<toml::Table>().unwrap();
+            assert!(merged["certificates"]["c1"].get("tls_cert").is_none());
+        }
+        let merged = merge_config_state(new_toml, &prev_toml)
             .parse::<toml::Table>()
             .expect("merged config must parse");
 
@@ -4994,12 +5352,12 @@ tls_key = \"NEWKEY\"
             .expect("c1 entry");
         assert_eq!(
             c1.get("tls_cert").and_then(|v| v.as_str()),
-            Some("ISSUED"),
+            Some(pem.as_str()),
             "issued pem must be carried over"
         );
         assert_eq!(
             c1.get("tls_key").and_then(|v| v.as_str()),
-            Some("KEY"),
+            Some(key.as_str()),
             "issued key must be carried over"
         );
 

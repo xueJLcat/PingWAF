@@ -372,6 +372,9 @@ pub(crate) async fn check_agent_ingress(
     if inventory.panel.is_none() || !inventory.dynamic_bind {
         return Err(unavailable("upgrade this node to support panel-managed listeners"));
     }
+    if inventory.panel.as_ref().is_some_and(|p| p.infrastructure_ports.contains(&(port as u32))) {
+        return Err(unavailable(&format!("node {agent_id} reserves port {port} for infrastructure")));
+    }
     let slots = available_listener_slots(tx, agent_id, &inventory).await?;
     let usable = match inventory.listeners.iter().find(|entry| entry.port as i32 == port) {
         Some(entry) => entry.state() == pingwaf_proto::IngressBindState::Bound
@@ -459,7 +462,7 @@ pub(crate) async fn ingress_agent_options(
         if inventory.panel.is_none() || !inventory.dynamic_bind { continue; }
         let available_slots = available_listener_slots(db, id, &inventory).await?;
         let mut listeners = Vec::new();
-        let mut unavailable_ports = Vec::new();
+        let mut unavailable_ports = inventory.panel.as_ref().map(|p| p.infrastructure_ports.clone()).unwrap_or_default();
         for entry in &inventory.listeners {
             if entry.state() != pingwaf_proto::IngressBindState::Bound || registry.reserved_ports.contains(&(entry.port as u16)) {
                 unavailable_ports.push(entry.port);
@@ -473,6 +476,8 @@ pub(crate) async fn ingress_agent_options(
             }
         }
         let dynamic_bind = inventory.panel.is_some() && inventory.dynamic_bind;
+        unavailable_ports.sort_unstable();
+        unavailable_ports.dedup();
         if listeners.is_empty() && !dynamic_bind {
             continue;
         }
@@ -994,6 +999,7 @@ pub(super) async fn check_postgres(
     assert!(check_site_ingress(&tx, &registry, custom).await.is_err());
     bound.dynamic_bind = true;
     bound.panel = Some(pingwaf_proto::PanelListenerReport {
+        infrastructure_ports: vec![9443],
         desired_generation: 1,
         applied_generation: 1,
         policy_revision: 0,
@@ -1008,6 +1014,8 @@ pub(super) async fn check_postgres(
     assert_eq!(options.len(), 1);
     assert_eq!(options[0].id, id);
     assert_eq!(options[0].listeners, [(81, "http")]);
+    assert!(options[0].unavailable_ports.contains(&9443));
+    assert!(check_agent_ingress(&tx, &registry, id, custom.user_id, 9443, "https").await.is_err());
     assert!(
         ingress_agent_options(&tx, &registry, Uuid::new_v4())
             .await

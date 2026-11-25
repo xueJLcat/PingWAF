@@ -407,6 +407,7 @@ impl<T> AppliedState<T> {
             desired_generation: state.latest.map_or(0, |v| v.generation),
             applied_generation: active.map_or(0, |a| a.authorization.borrow().lease.version().generation),
             policy_revision: active.map_or(-1, |a| a.policy.policy_revision),
+            infrastructure_ports: Vec::new(),
             sockets: Vec::new(),
         };
         (report, endpoints)

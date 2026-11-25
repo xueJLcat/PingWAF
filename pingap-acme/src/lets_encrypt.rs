@@ -139,7 +139,7 @@ async fn update_certificate_lets_encrypt(
             category: "load_config".to_string(),
             message: e.to_string(),
         })?;
-    let Some(mut cert) = cert else {
+    let Some(cert) = cert else {
         return Err(Error::Fail {
             category: "save_config".to_string(),
             message: format!(
@@ -149,27 +149,31 @@ async fn update_certificate_lets_encrypt(
         });
     };
 
-    // get new certificate from lets encrypt
+    if cert != params.expected {
+        return Err(Error::Fail { category: "order_changed".into(), message: "certificate settings changed before ordering".into() });
+    }
     let production = acme_production_from_env();
     let (pem, key) =
         new_lets_encrypt(config_manager.clone(), production, params.clone())
             .await?;
 
-    cert.tls_cert = Some(pem);
-    cert.tls_key = Some(key);
-    config_manager
-        .update(Category::Certificate, &params.name, &cert)
+    let installed = config_manager
+        .install_issued_certificate(&params.name, &cert, pem, key)
         .await
         .map_err(|e| Error::Fail {
             category: "save_config".to_string(),
             message: e.to_string(),
         })?;
+    if !installed {
+        return Err(Error::Fail { category: "order_changed".into(), message: "certificate settings changed during issuance".into() });
+    }
     Ok(())
 }
 
 /// File cache parameters
 #[derive(Debug, Clone)]
 struct UpdateCertificateParams {
+    expected: CertificateConf,
     name: String,
     domains: Vec<String>,
     buffer_days: u16,
@@ -329,6 +333,10 @@ async fn do_update_certificates(
             Ok(()) => {
                 retries.remove(&retry_key);
             },
+            Err(Error::Fail { category, .. }) if category == "order_changed" => {
+                retries.remove(&retry_key);
+                debug!(target: LOG_TARGET, name, "discarded a superseded certificate order");
+            },
             Err(e) => {
                 let failures = retries
                     .get(&retry_key)
@@ -483,6 +491,7 @@ impl BackgroundTask for LetsEncryptTask {
             );
 
             params.push(UpdateCertificateParams {
+                expected: certificate.clone(),
                 name: name.to_string(),
                 buffer_days: certificate.buffer_days.unwrap_or_default(),
                 domains: domains
@@ -1364,6 +1373,7 @@ mod tests {
         let err = update_certificate_lets_encrypt(
             manager,
             UpdateCertificateParams {
+                expected: Default::default(),
                 name: "panel".to_string(),
                 domains: vec!["example.com".to_string()],
                 buffer_days: 30,

@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
@@ -27,6 +27,7 @@ use pingwaf_proto::control_plane::{
     VisitorPasskeyListResponse, VisitorPasskeyOptionsResponse,
     VisitorSetVisibleRequest, VisitorSetVisibleResponse,
     VisitorValidateRequest, VisitorValidateResponse,
+    PairTunnelRequest, PairTunnelResponse, TunnelConnectorCommand, TunnelConnectorMessage,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -58,10 +59,11 @@ use crate::grpc::registry::{
     AgentRegistry, ConfigDrift, HeartbeatMetrics, COMMAND_CHANNEL_CAPACITY,
 };
 use crate::models::{
-    access_log, action, agent, agent_blocked_ip, agent_metric, agent_sites,
+    access_log, action, agent, agent_blocked_ip, agent_metric,
     agent_status, api_key, certificate_events, certificate_links, geo_rules,
     host_sample, ip_access_rules, path_exceptions, security_event, site,
-    site_basic_auth, site_certificates, site_oidc,
+    site_basic_auth, site_certificates, site_oidc, tunnel_connector,
+    tunnel_session, tunnel_status,
 };
 
 /// Stream type returned by the server-streaming RPCs.
@@ -293,57 +295,7 @@ impl ControlPlaneService {
         &self,
         row: &agent::Model,
     ) -> Result<Vec<site::Model>, Status> {
-        if row.site_scope == "selected" {
-            let Some(key_id) = row.api_key_id else {
-                return Ok(Vec::new());
-            };
-            let key = api_key::Entity::find_by_id(key_id)
-                .one(&self.db)
-                .await
-                .map_err(db_status)?
-                .ok_or_else(|| {
-                    Status::unauthenticated("API key was revoked")
-                })?;
-            let assigned: Vec<Uuid> = agent_sites::Entity::find()
-                .filter(agent_sites::Column::AgentId.eq(row.id))
-                .all(&self.db)
-                .await
-                .map_err(db_status)?
-                .into_iter()
-                .map(|assignment| assignment.site_id)
-                .collect();
-            if assigned.is_empty() {
-                return Ok(Vec::new());
-            }
-            return site::Entity::find()
-                .filter(site::Column::Id.is_in(assigned))
-                .filter(site::Column::UserId.eq(key.user_id))
-                .all(&self.db)
-                .await
-                .map_err(db_status);
-        }
-        if let Some(site_id) = row.site_id {
-            let owned = site::Entity::find_by_id(site_id)
-                .one(&self.db)
-                .await
-                .map_err(db_status)?;
-            return Ok(owned.into_iter().collect());
-        }
-
-        let Some(key_id) = row.api_key_id else {
-            return Ok(Vec::new());
-        };
-        let key = api_key::Entity::find_by_id(key_id)
-            .one(&self.db)
-            .await
-            .map_err(db_status)?
-            .ok_or_else(|| Status::unauthenticated("API key was revoked"))?;
-
-        site::Entity::find()
-            .filter(site::Column::UserId.eq(key.user_id))
-            .all(&self.db)
-            .await
-            .map_err(db_status)
+        super::agent_site_query(row).all(&self.db).await.map_err(db_status)
     }
 
     /// DR-04 observability: compares the registering agent's reported version
@@ -488,6 +440,13 @@ impl ControlPlaneService {
         build_site_config(&self.db, Some(&ids))
             .await
             .map_err(db_status)
+    }
+
+    async fn telemetry_sites(&self, agent: &agent::Model, session: Option<Uuid>) -> Result<Vec<Uuid>, Status> {
+        match session {
+            Some(id) => managed::heartbeat_scope(&self.db, agent.id, id).await,
+            None => Ok(self.legacy_delivery_sites(agent).await?.into_iter().map(|row| row.id).collect()),
+        }
     }
 
     /// For legacy per-site requests only. Keep these rows from the same read
@@ -639,6 +598,13 @@ impl ControlPlaneTrait for ControlPlaneService {
                     private_ip: Set(optional(&payload.private_ip)),
                     peer_ip: Set(peer_ip.clone()),
                     peer_ip_seen_at: Set(peer_ip.as_ref().map(|_| now)),
+                    // Filled in by the first heartbeat that carries the
+                    // tunnel listener state; the ingress address is the
+                    // operator's and starts unset.
+                    tunnel_ingress_addr: Set(None),
+                    tunnel_listener_addr: Set(None),
+                    tunnel_cert_sha256: Set(None),
+                    tunnel_listener_error: Set(None),
                 }
                 .insert(&tx)
                 .await
@@ -792,12 +758,14 @@ impl ControlPlaneTrait for ControlPlaneService {
         // Heartbeat writes certificate state and cache/block counters: an
         // entry stamped with a site this agent does not serve must be dropped
         // (2026-11-13 audit, server-grpc-control-03).
+        let mut pre_tunnel_agent = false;
         let mut visible = match session_id {
             Some(session) => {
                 managed::heartbeat_scope(&self.db, agent_id, session).await?
             },
             None => {
                 let row = self.authorize_claims(&claims).await?;
+                pre_tunnel_agent = row.version.as_deref().is_some_and(|version| version.starts_with("0.32."));
                 self.legacy_delivery_sites(&row)
                     .await?
                     .into_iter()
@@ -806,6 +774,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             },
         };
         let mut first = first;
+        first.decode_legacy_reports(session_id.is_some(), pre_tunnel_agent).map_err(Status::invalid_argument)?;
         filter_heartbeat_sites(&mut first, &visible);
         if session_id.is_some() {
             clear_legacy_config_report(&mut first);
@@ -866,6 +835,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             )
             .await;
             record_upstream_health(&db, agent_id, &first.upstream_health).await;
+            persist_tunnel_state(&db, agent_id, &first).await;
             while let Some(mut message) = match inbound.message().await {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
@@ -889,6 +859,10 @@ impl ControlPlaneTrait for ControlPlaneService {
                     managed::current_session(&db, agent_id).await,
                     Ok(None)
                 ) {
+                    break;
+                }
+                if let Err(error) = message.decode_legacy_reports(session_id.is_some(), pre_tunnel_agent) {
+                    tracing::warn!(%agent_id, error, "invalid heartbeat report");
                     break;
                 }
                 filter_heartbeat_sites(&mut message, &visible);
@@ -936,6 +910,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 .await;
                 record_upstream_health(&db, agent_id, &message.upstream_health)
                     .await;
+                persist_tunnel_state(&db, agent_id, &message).await;
             }
             if registry.is_current_stream(agent_id, generation).await
                 && matches!(managed::current_session(&db, agent_id).await, Ok(current) if current == session_id)
@@ -953,6 +928,304 @@ impl ControlPlaneTrait for ControlPlaneService {
         ))
     }
 
+    type TunnelControlStream = BoxedStream<TunnelConnectorCommand>;
+
+    async fn pair_tunnel(
+        &self,
+        request: Request<PairTunnelRequest>,
+    ) -> Result<Response<PairTunnelResponse>, Status> {
+        // Unauthenticated by design — the one-time token is the credential —
+        // so the peer is rate limited exactly like agent registration.
+        if let Some(addr) = request.remote_addr() {
+            if let Err(retry_after) =
+                crate::api::rate_limit::consume_agent_registration(addr.ip())
+            {
+                return Err(Status::resource_exhausted(format!(
+                    "too many pairing attempts; retry in {retry_after} seconds"
+                )));
+            }
+        }
+        let payload = request.into_inner();
+        let token = payload.pairing_token.trim();
+        if token.is_empty() {
+            return Err(Status::invalid_argument("pairing_token is required"));
+        }
+        let settings = crate::tunnel_policy::load_settings(&self.db)
+            .await
+            .map_err(db_status)?;
+        if !settings.enabled {
+            return Err(Status::failed_precondition(
+                "tunnel connectors are disabled on this deployment",
+            ));
+        }
+        let hash = crate::tunnel_policy::digest_hex(token);
+        let tx = self.db.begin().await.map_err(db_status)?;
+        let row = tunnel_connector::Entity::find()
+            .filter(tunnel_connector::Column::PairingTokenHash.eq(hash))
+            .lock_exclusive()
+            .one(&tx)
+            .await
+            .map_err(db_status)?;
+        let Some(row) = row else {
+            // Same reply whether the token never existed or was already
+            // redeemed: a prober learns nothing either way.
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        };
+        let now = Utc::now();
+        if row
+            .pairing_token_expires_at
+            .map(|expires| expires <= now)
+            .unwrap_or(true)
+        {
+            return Err(Status::unauthenticated(
+                "the pairing token has expired; mint a new one in the console",
+            ));
+        }
+        if row.status != tunnel_status::PENDING {
+            return Err(Status::failed_precondition("this tunnel is not awaiting pairing"));
+        }
+
+        let credential = crate::tunnel_policy::generate_secret();
+        let tunnel_id = row.id;
+        let name = row.name.clone();
+        let mut active: tunnel_connector::ActiveModel = row.into();
+        active.credential_sha256 =
+            Set(Some(crate::tunnel_policy::digest_hex(&credential)));
+        active.credential_issued_at = Set(Some(now));
+        active.pairing_token_hash = Set(None);
+        active.pairing_token_expires_at = Set(None);
+        active.status = Set(tunnel_status::ACTIVE.to_string());
+        active.version = Set(optional(&payload.version));
+        active.hostname = Set(optional(&payload.hostname));
+        active.os_info = Set(optional(&payload.os_info));
+        active.last_seen_at = Set(Some(now));
+        active.updated_at = Set(now);
+        active.update(&tx).await.map_err(db_status)?;
+        tx.commit().await.map_err(db_status)?;
+
+        tracing::info!(
+            %tunnel_id,
+            hostname = %payload.hostname,
+            version = %payload.version,
+            "tunnel connector paired"
+        );
+
+        // A connector that is already running still holds a control stream
+        // opened with the previous credential (or with none). It must be told
+        // to go: otherwise the console shows it online while the edges — which
+        // are about to receive the new digest — refuse its data plane.
+        crate::grpc::notify_tunnel_connectors(
+            &self.db,
+            tunnel_id,
+            Some(
+                "the tunnel was paired again; run the new pairing command"
+                    .to_string(),
+            ),
+        )
+        .await;
+        // The new credential digest has to reach the edges now: until they
+        // hold it, the connector's session is refused.
+        crate::grpc::push_config_to_all(&self.db, &self.agents).await;
+
+        let ingress = crate::tunnel_policy::ingress_endpoints(&self.db)
+            .await
+            .map_err(db_status)?;
+        let targets =
+            crate::tunnel_policy::targets_for_tunnel(&self.db, tunnel_id)
+                .await
+                .map_err(db_status)?;
+        // A token is minted with the pairing so the connector can open edge
+        // sessions immediately; the control stream refreshes it from then on.
+        let (session_token, session_token_expires_at) =
+            crate::tunnel_token::mint(
+                &tunnel_id.to_string(),
+                &crate::tunnel_policy::digest_hex(&credential),
+                settings.session_token_ttl_seconds.max(60) as u64,
+            )
+            .map_err(|err| {
+                tracing::error!(%tunnel_id, error = %err, "cannot mint a tunnel session token");
+                Status::internal(INTERNAL_MESSAGE)
+            })?;
+        Ok(Response::new(PairTunnelResponse {
+            tunnel_id: tunnel_id.to_string(),
+            name,
+            credential,
+            ingress,
+            targets,
+            settings: Some(pingwaf_proto::control_plane::TunnelSettings {
+                max_streams: settings.max_streams_per_session.max(1) as u32,
+                idle_timeout_secs: settings.idle_timeout_seconds.max(10) as u32,
+                heartbeat_secs: settings.heartbeat_seconds.max(5) as u32,
+                session_token_ttl_secs: settings
+                    .session_token_ttl_seconds
+                    .max(60) as u32,
+            }),
+            session_token,
+            session_token_expires_at,
+        }))
+    }
+
+    async fn tunnel_control(
+        &self,
+        request: Request<Streaming<TunnelConnectorMessage>>,
+    ) -> Result<Response<Self::TunnelControlStream>, Status> {
+        use pingwaf_proto::control_plane::tunnel_connector_message;
+
+        let mut inbound = request.into_inner();
+        let first = inbound.next().await.ok_or_else(|| {
+            Status::invalid_argument("the connector sent no hello")
+        })??;
+        let Some(tunnel_connector_message::Kind::Hello(hello)) = first.kind
+        else {
+            return Err(Status::invalid_argument(
+                "the first tunnel message must be a hello",
+            ));
+        };
+        let tunnel_id = Uuid::parse_str(hello.tunnel_id.trim())
+            .map_err(|_| Status::invalid_argument("tunnel_id is not a UUID"))?;
+        let row = tunnel_connector::Entity::find_by_id(tunnel_id)
+            .one(&self.db)
+            .await
+            .map_err(db_status)?;
+        let Some(row) = row else {
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        };
+        let expected = row.credential_sha256.clone().unwrap_or_default();
+        if !pingwaf_tunnel::protocol::credential_matches(
+            &hello.credential,
+            &expected,
+        ) {
+            tracing::warn!(%tunnel_id, "tunnel control stream refused: bad credential");
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        }
+        let settings = crate::tunnel_policy::load_settings(&self.db)
+            .await
+            .map_err(db_status)?;
+        if !settings.enabled || row.status != tunnel_status::ACTIVE {
+            return Err(Status::permission_denied("this tunnel is disabled"));
+        }
+
+        let now = Utc::now();
+        let mut active: tunnel_connector::ActiveModel = row.into();
+        active.last_seen_at = Set(Some(now));
+        active.version = Set(optional(&hello.version));
+        active.hostname = Set(optional(&hello.hostname));
+        active.os_info = Set(optional(&hello.os_info));
+        active.updated_at = Set(now);
+        active.update(&self.db).await.map_err(db_status)?;
+
+        let (generation, mut commands) =
+            crate::grpc::TUNNEL_CONNECTORS.register(tunnel_id).await;
+        let (tx, rx) =
+            mpsc::channel::<Result<TunnelConnectorCommand, Status>>(16);
+        // The policy the connector needs first: without it there is nothing to
+        // dial.
+        match crate::tunnel_policy::connector_config(&self.db, tunnel_id).await
+        {
+            Ok(Some(config)) => {
+                if !connector_credential_current(&self.db, tunnel_id, &expected).await {
+                    crate::grpc::TUNNEL_CONNECTORS.unregister(tunnel_id, generation).await;
+                    return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+                }
+                let _ = tx
+                    .send(Ok(TunnelConnectorCommand {
+                        kind: Some(
+                            pingwaf_proto::control_plane::tunnel_connector_command::Kind::Config(
+                                config,
+                            ),
+                        ),
+                    }))
+                    .await;
+            },
+            Ok(None) => {
+                let _ = tx
+                    .send(Ok(TunnelConnectorCommand {
+                        kind: Some(
+                            pingwaf_proto::control_plane::tunnel_connector_command::Kind::Revoked(
+                                pingwaf_proto::control_plane::TunnelConnectorRevoked {
+                                    message: "the tunnel was deleted".to_string(),
+                                },
+                            ),
+                        ),
+                    }))
+                    .await;
+            },
+            Err(err) => {
+                tracing::warn!(%tunnel_id, error = %err, "cannot build the tunnel policy");
+            },
+        }
+        tracing::info!(%tunnel_id, hostname = %hello.hostname, "tunnel connector connected");
+
+        // A connector that goes away without closing the stream (host power
+        // loss, NAT expiry) must not keep the row "connected" forever: the
+        // heartbeat cadence bounds how long silence is plausible.
+        let liveness =
+            Duration::from_secs((settings.heartbeat_seconds.max(5) as u64) * 3);
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    command = commands.recv() => {
+                        match command {
+                            Some(command) => {
+                                if matches!(command.kind.as_ref(), Some(pingwaf_proto::tunnel_connector_command::Kind::Config(_)))
+                                    && !connector_credential_current(&db, tunnel_id, &expected).await {
+                                    break;
+                                }
+                                let revoked = matches!(command.kind.as_ref(), Some(pingwaf_proto::tunnel_connector_command::Kind::Revoked(_)));
+                                if tx.send(Ok(command)).await.is_err() {
+                                    break;
+                                }
+                                if revoked { break; }
+                            },
+                            None => break,
+                        }
+                    },
+                    message = tokio::time::timeout(liveness, inbound.next()) => {
+                        let message = match message {
+                            Ok(message) => message,
+                            Err(_) => {
+                                tracing::warn!(
+                                    %tunnel_id,
+                                    timeout_secs = liveness.as_secs(),
+                                    "tunnel connector went silent, closing its control stream"
+                                );
+                                break;
+                            },
+                        };
+                        match message {
+                            Some(Ok(message)) => {
+                                // Heartbeats keep the row fresh; nothing else
+                                // is expected on this stream.
+                                if let Some(
+                                    tunnel_connector_message::Kind::Heartbeat(heartbeat),
+                                ) = message.kind
+                                {
+                                    let _ = heartbeat;
+                                    let _ = tunnel_connector::Entity::update_many()
+                                        .col_expr(
+                                            tunnel_connector::Column::LastSeenAt,
+                                            Expr::value(Utc::now()),
+                                        )
+                                        .filter(tunnel_connector::Column::Id.eq(tunnel_id))
+                                        .exec(&db)
+                                        .await;
+                                }
+                            },
+                            _ => break,
+                        }
+                    },
+                }
+            }
+            crate::grpc::TUNNEL_CONNECTORS
+                .unregister(tunnel_id, generation)
+                .await;
+            tracing::info!(%tunnel_id, "tunnel connector disconnected");
+        });
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+
     type SyncRulesStream = BoxedStream<RuleBundle>;
 
     async fn sync_rules(
@@ -966,6 +1239,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         // SyncRules predates listener identity and sends one bare RuleBundle
         // at a time. Only build from the visible default-ingress rows.
         let requested = payload.site_id.trim();
+        let visible_sites: Vec<_> = sites.iter().filter(|site| site.status == "active").map(|site| site.id).collect();
         let selected: Vec<site::Model> = if requested.is_empty() {
             sites
         } else {
@@ -984,7 +1258,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         let mut bundles = Vec::with_capacity(selected.len());
         let mut skipped = 0usize;
         for site_row in &selected {
-            match build_rule_bundle(&self.db, site_row).await {
+            match build_rule_bundle(&self.db, site_row, &visible_sites).await {
                 Ok(bundle) => {
                     // Delta sync: the agent already runs this exact configuration.
                     if !current_hash.is_empty()
@@ -1064,13 +1338,8 @@ impl ControlPlaneTrait for ControlPlaneService {
         // every [`SITE_VISIBILITY_REFRESH`] inside the loop below (D10 +
         // DR32-08): a revoked key or an unbound site must stop the flow even
         // on a stream that stays up for hours.
-        let mut visibility = SiteVisibility::new(
-            self.legacy_delivery_sites(&agent)
-                .await?
-                .iter()
-                .map(|row| row.id)
-                .collect(),
-        );
+        let session = managed_session_id(&self.agent_claims(&agent_token)?)?;
+        let mut visibility = SiteVisibility::new(self.telemetry_sites(&agent, session).await?);
         let mut next_visibility_refresh =
             tokio::time::Instant::now() + SITE_VISIBILITY_REFRESH;
         let mut inbound = request.into_inner();
@@ -1110,11 +1379,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 next_visibility_refresh =
                     tokio::time::Instant::now() + SITE_VISIBILITY_REFRESH;
                 match self.authorize(&agent_token).await {
-                    Ok(agent) => match self.legacy_delivery_sites(&agent).await
-                    {
+                    Ok(agent) => match self.telemetry_sites(&agent, session).await {
                         Ok(sites) => {
-                            let sites: Vec<Uuid> =
-                                sites.into_iter().map(|row| row.id).collect();
                             if visibility.refresh(sites) {
                                 tracing::info!(
                                     agent_id = %authenticated_id,
@@ -1295,13 +1561,8 @@ impl ControlPlaneTrait for ControlPlaneService {
         // unbound site must stop the flow even on a connection that lives for
         // days (review of 0.32.33, H3 — the same defect as DR32-08, fixed here
         // because the two streams had identical shapes).
-        let mut visibility = SiteVisibility::new(
-            self.legacy_delivery_sites(&agent)
-                .await?
-                .iter()
-                .map(|row| row.id)
-                .collect(),
-        );
+        let session = managed_session_id(&self.agent_claims(&agent_token)?)?;
+        let mut visibility = SiteVisibility::new(self.telemetry_sites(&agent, session).await?);
         let mut next_visibility_refresh =
             tokio::time::Instant::now() + SITE_VISIBILITY_REFRESH;
         let mut inbound = request.into_inner();
@@ -1335,11 +1596,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 next_visibility_refresh =
                     tokio::time::Instant::now() + SITE_VISIBILITY_REFRESH;
                 match self.authorize(&agent_token).await {
-                    Ok(agent) => match self.legacy_delivery_sites(&agent).await
-                    {
+                    Ok(agent) => match self.telemetry_sites(&agent, session).await {
                         Ok(sites) => {
-                            let sites: Vec<Uuid> =
-                                sites.into_iter().map(|row| row.id).collect();
                             if visibility.refresh(sites) {
                                 tracing::info!(
                                     agent_id = %authenticated_id,
@@ -1406,6 +1664,21 @@ impl ControlPlaneTrait for ControlPlaneService {
                     );
                 }
                 continue;
+            }
+            if !message.certificate_id.is_empty() {
+                let (Some(site_id), Some(cert_id)) = (
+                    parse_optional_uuid(&message.site_id), parse_optional_uuid(&message.certificate_id),
+                ) else { dropped += 1; continue };
+                let owned = site_certificates::Entity::find_by_id(cert_id)
+                    .filter(site_certificates::Column::SiteId.eq(site_id))
+                    .one(&self.db).await.map_err(db_status)?.is_some();
+                if !owned && certificate_links::Entity::find()
+                    .filter(certificate_links::Column::SiteId.eq(site_id))
+                    .filter(certificate_links::Column::CertificateId.eq(cert_id))
+                    .one(&self.db).await.map_err(db_status)?.is_none() {
+                    dropped += 1;
+                    continue;
+                }
             }
             received += 1;
             // A terminal ACME failure is both an alertable log line and a
@@ -1954,159 +2227,36 @@ async fn persist_heartbeat(
     sweep_offline_agents(db, registry).await;
 }
 
-/// Writes the per-site certificate state reported by the edge back onto its
-/// certificate rows.
-///
-/// Only rows without a PEM are touched: those are the ACME-managed ones, whose
-/// issuance happens entirely on the edge — the control plane never sees the
-/// certificate, so without this write-back the row would read "pending" with no
-/// expiry forever, even after the certificate went live.
-type CertStateBySite = HashMap<Uuid, Vec<(String, Option<DateTime<Utc>>)>>;
-
-async fn persist_site_certificates(
-    db: &DatabaseConnection,
-    statuses: &[SiteStatus],
-) {
+/// Serving a shared certificate does not give the reporting site an issuance
+/// order. An older agent without a certificate ID can only report the
+/// certificate explicitly selected by its site's TLS settings.
+async fn persist_site_certificates(db: &DatabaseConnection, statuses: &[SiteStatus]) {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
     let now = Utc::now();
-    if !statuses.is_empty() {
-        tracing::debug!(
-            site_statuses = statuses.len(),
-            "persisting edge certificate state"
-        );
-    }
-
-    // A steady fleet reports the same certificate on every heartbeat. One
-    // batched read lets us skip the per-site UPDATE statements entirely; the previous
-    // shape issued one UPDATE per site per heartbeat even when nothing
-    // changed. The UPDATE guard below still protects against a concurrent
-    // change after this snapshot.
-    // `certificate_id` identifies the exact row: one certificate can be shared
-    // by several sites, so matching on `site_id` alone would update whichever
-    // pending row happens to belong to the reporting site.
-    let targets: Vec<(Uuid, Option<Uuid>, &str, DateTime<Utc>)> = statuses
-        .iter()
-        .filter_map(|status| {
-            let row_status = match status.ssl_status.as_str() {
-                "valid" | "expiring_soon" => cert_status::ACTIVE,
-                "expired" => cert_status::EXPIRED,
-                _ => return None,
-            };
-            let site_id = Uuid::parse_str(&status.site_id).ok()?;
-            let certificate_id = Uuid::parse_str(&status.certificate_id).ok();
-            let expires_at = status
-                .ssl_expires_at
-                .and_then(|ts| DateTime::from_timestamp(ts.seconds, 0))?;
-            Some((site_id, certificate_id, row_status, expires_at))
-        })
-        .collect();
-    if targets.is_empty() {
-        return;
-    }
-
-    let site_ids: Vec<Uuid> = targets.iter().map(|(id, _, _, _)| *id).collect();
-    let current = match site_certificates::Entity::find()
-        .filter(site_certificates::Column::SiteId.is_in(site_ids))
-        .filter(site_certificates::Column::CertPem.is_null())
-        .all(db)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            // Fall back to the guarded per-site UPDATE statements: correctness does not
-            // depend on this optional read.
-            tracing::warn!(error = %err, "could not read current certificate state");
-            Vec::new()
-        },
-    };
-    let mut current_by_site: CertStateBySite = HashMap::new();
-    for row in current {
-        if let Some(site_id) = row.site_id {
-            current_by_site
-                .entry(site_id)
-                .or_default()
-                .push((row.status, row.expires_at));
-        }
-    }
-
-    for (site_id, certificate_id, row_status, expires_at) in targets {
-        // The agent names the certificate row it observed. Accept it only when
-        // the reporting site owns or is linked to that row: an agent must not
-        // be able to rewrite another site's issuance state by reporting a
-        // foreign id.
-        if let Some(cert_id) = certificate_id {
-            let owned = site_certificates::Entity::find_by_id(cert_id)
-                .filter(site_certificates::Column::SiteId.eq(site_id))
-                .one(db)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            let linked = if owned {
-                true
-            } else {
-                certificate_links::Entity::find()
-                    .filter(certificate_links::Column::SiteId.eq(site_id))
-                    .filter(
-                        certificate_links::Column::CertificateId.eq(cert_id),
-                    )
-                    .one(db)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some()
-            };
-            if !linked {
-                tracing::warn!(
-                    %site_id,
-                    %cert_id,
-                    "ignoring certificate status for a certificate this site does not own or link"
-                );
-                continue;
-            }
-        }
-        if certificate_id.is_none()
-            && current_by_site.get(&site_id).is_some_and(|rows| {
-                rows.iter().all(|(status, expiry)| {
-                    status == row_status && *expiry == Some(expires_at)
-                })
-            })
-        {
-            continue;
-        }
-
-        // The guard keeps a steady fleet from writing the same values every
-        // heartbeat: only rows whose status or expiry actually change match.
-        // A live certificate also clears whatever failure the stale-pending
-        // sweep recorded for the order that produced it.
-        let result = site_certificates::Entity::update_many()
-            .col_expr(
-                site_certificates::Column::Status,
-                Expr::value(row_status),
-            )
-            .col_expr(
-                site_certificates::Column::ExpiresAt,
-                Expr::value(expires_at),
-            )
-            .col_expr(
-                site_certificates::Column::FailureReason,
-                Expr::value(Option::<String>::None),
-            )
-            .col_expr(site_certificates::Column::UpdatedAt, Expr::value(now))
-            .filter(match certificate_id {
-                Some(id) => site_certificates::Column::Id.eq(id),
-                None => site_certificates::Column::SiteId.eq(site_id),
-            })
-            .filter(site_certificates::Column::CertPem.is_null())
-            .filter(
-                Condition::any()
-                    .add(site_certificates::Column::Status.ne(row_status))
-                    .add(site_certificates::Column::ExpiresAt.is_null())
-                    .add(site_certificates::Column::ExpiresAt.ne(expires_at)),
-            )
-            .exec(db)
-            .await;
+    for status in statuses {
+        let row_status = match status.ssl_status.as_str() {
+            "valid" | "expiring_soon" => cert_status::ACTIVE,
+            "expired" => cert_status::EXPIRED,
+            _ => continue,
+        };
+        let Ok(site_id) = Uuid::parse_str(&status.site_id) else { continue };
+        let cert_id = match status.certificate_id.as_str() {
+            "" => None,
+            raw => match Uuid::parse_str(raw) {
+                Ok(id) => Some(id),
+                Err(_) => continue,
+            },
+        };
+        let Some(expires_at) = status.ssl_expires_at.and_then(|ts| DateTime::from_timestamp(ts.seconds, 0)) else { continue };
+        let result = db.execute(Statement::from_sql_and_values(DbBackend::Postgres, "
+            UPDATE site_certificates c SET status=$3, expires_at=$4, failure_reason=NULL, updated_at=$5
+            WHERE c.site_id=$1 AND c.cert_pem IS NULL AND c.acme_email IS NOT NULL
+              AND c.id=COALESCE($2::uuid, (SELECT certificate_id FROM site_ssl WHERE site_id=$1))
+              AND NOT EXISTS (SELECT FROM site_ssl ssl WHERE ssl.site_id=$1 AND ssl.certificate_id IS NOT NULL AND ssl.certificate_id<>c.id)
+              AND (c.status IS DISTINCT FROM $3 OR c.expires_at IS DISTINCT FROM $4)",
+            [site_id.into(), cert_id.into(), row_status.into(), expires_at.into(), now.into()])).await;
         match result {
-            Ok(result) if result.rows_affected > 0 => {
+            Ok(result) if result.rows_affected() > 0 => {
                 tracing::info!(
                     %site_id,
                     status = row_status,
@@ -2220,50 +2370,42 @@ fn certificate_failure_update(
 /// Builds the update that fails the row a terminal event belongs to, or
 /// `None` when the event cannot be attributed to one.
 ///
-/// The reported certificate is not necessarily the pending row: the site's
-/// TLS posture can still point at the certificate this order is replacing.
-/// So the event matches either that id or a pending row of the same site
-/// covering one of the reported domains, and the base filters decide which
-/// rows are the control plane's to fail at all. Only pending, PEM-less ACME
-/// rows are touched: a manual upload or a certificate the edge already
-/// reported live is not this event's to fail.
+/// The site must own the pending order. A named certificate must match all
+/// supplied domains. An unnamed event requires exactly one pending order for
+/// the complete set of identifiers.
 fn certificate_failure_query(
     update: &CertificateFailureUpdate,
     certificate_id: Option<Uuid>,
     site_id: Option<Uuid>,
     domains: &[&str],
 ) -> Option<UpdateMany<site_certificates::Entity>> {
-    let mut target = Condition::any();
-    let mut attributable = false;
-    if let Some(certificate_id) = certificate_id {
-        target = target.add(site_certificates::Column::Id.eq(certificate_id));
-        attributable = true;
+    let site_id = site_id?;
+    let mut target = Condition::all().add(site_certificates::Column::SiteId.eq(site_id));
+    if let Some(id) = certificate_id {
+        target = target.add(site_certificates::Column::Id.eq(id));
     }
-    if let Some(site_id) = site_id {
-        if domains.is_empty() {
-            // A bare site id is not enough to pick between its orders.
-            if !attributable {
-                return None;
-            }
-        } else {
-            target = target.add(
-                Condition::all()
-                    .add(site_certificates::Column::SiteId.eq(site_id))
-                    .add(site_certificates::Column::Domain.is_in(
-                        domains.iter().map(|domain| domain.to_string()),
-                    )),
-            );
-            attributable = true;
+    if !domains.is_empty() {
+        let mut names: Vec<_> = domains.iter().map(|d| d.trim().to_ascii_lowercase()).collect();
+        names.sort();
+        names.dedup();
+        let matches = Expr::cust_with_values(
+            "ARRAY(SELECT DISTINCT lower(btrim(n)) FROM unnest(string_to_array(site_certificates.domain, ',')) n ORDER BY 1) = $1::text[]",
+            [sea_orm::Value::from(names.clone())]);
+        target = target.add(matches);
+        if certificate_id.is_none() {
+            target = target.add(Expr::cust_with_values(
+                "(SELECT count(*) FROM site_certificates c WHERE c.site_id=site_certificates.site_id
+                  AND c.status='pending' AND c.cert_pem IS NULL AND c.acme_email IS NOT NULL
+                  AND ARRAY(SELECT DISTINCT lower(btrim(n)) FROM unnest(string_to_array(c.domain, ',')) n ORDER BY 1)=$1::text[]) = 1",
+                [sea_orm::Value::from(names)]));
         }
-    }
-    if !attributable {
+    } else if certificate_id.is_none() {
         return None;
     }
-    let condition = Condition::all()
+    let condition = target
         .add(site_certificates::Column::Status.eq(cert_status::PENDING))
         .add(site_certificates::Column::CertPem.is_null())
-        .add(site_certificates::Column::AcmeEmail.is_not_null())
-        .add(target);
+        .add(site_certificates::Column::AcmeEmail.is_not_null());
     Some(
         site_certificates::Entity::update_many()
             .col_expr(
@@ -2293,6 +2435,7 @@ async fn fail_certificate_from_event(
     let now = Utc::now();
     let update = certificate_failure_update(failure.reason, now);
     let certificate_id = parse_optional_uuid(&event.certificate_id);
+    if !event.certificate_id.is_empty() && certificate_id.is_none() { return; }
     let site_id = parse_optional_uuid(&event.site_id);
     let Some(query) = certificate_failure_query(
         &update,
@@ -2330,6 +2473,25 @@ async fn fail_certificate_from_event(
             );
         },
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn check_certificate_report_ownership(db: &DatabaseConnection, owner: Uuid, other: Uuid, cert: Uuid) {
+    use sea_orm::ConnectionTrait;
+    let targets = ["selected.test", "www.selected.test"];
+    let update = certificate_failure_update("fixture", Utc::now());
+    db.execute_unprepared("UPDATE site_certificates SET status='pending'").await.unwrap();
+    for (site, domains, count) in [(other, &targets[..], 0), (owner, &targets[..1], 0), (owner, &targets[..], 1)] {
+        let query = certificate_failure_query(&update, None, Some(site), domains).unwrap();
+        assert_eq!(query.exec(db).await.unwrap().rows_affected, count);
+    }
+    let report = |site: Uuid, cert_id: String| SiteStatus { site_id: site.to_string(), certificate_id: cert_id,
+        ssl_status: "valid".into(), ssl_expires_at: Some(prost_types::Timestamp { seconds: 2_000_000_000, nanos: 0 }),
+        ..Default::default() };
+    persist_site_certificates(db, &[report(other, cert.to_string()), report(owner, "invalid".into())]).await;
+    assert_eq!(site_certificates::Entity::find_by_id(cert).one(db).await.unwrap().unwrap().status, cert_status::FAILED);
+    persist_site_certificates(db, &[report(owner, String::new())]).await;
+    assert_eq!(site_certificates::Entity::find_by_id(cert).one(db).await.unwrap().unwrap().status, cert_status::ACTIVE);
 }
 
 /// How long an ACME order may sit in `pending` with no sign of life before
@@ -2393,17 +2555,23 @@ async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
         );
         let cert_id = row.id;
         let site_id = row.site_id;
-        let mut active: site_certificates::ActiveModel = row.into();
-        active.status = Set(failure.status);
-        active.failure_reason = Set(Some(failure.failure_reason));
-        active.updated_at = Set(failure.updated_at);
-        if let Err(err) = active.update(db).await {
-            tracing::warn!(
-                %cert_id,
-                error = %err,
-                "could not fail stale pending certificate"
-            );
-            continue;
+        let outcome = site_certificates::Entity::update_many()
+            .col_expr(site_certificates::Column::Status, Expr::value(failure.status))
+            .col_expr(site_certificates::Column::FailureReason, Expr::value(failure.failure_reason))
+            .col_expr(site_certificates::Column::UpdatedAt, Expr::value(failure.updated_at))
+            .filter(site_certificates::Column::Id.eq(cert_id))
+            .filter(site_certificates::Column::Status.eq(cert_status::PENDING))
+            .filter(site_certificates::Column::CertPem.is_null())
+            .filter(site_certificates::Column::AcmeEmail.is_not_null())
+            .filter(site_certificates::Column::UpdatedAt.eq(row.updated_at))
+            .exec(db).await;
+        match outcome {
+            Ok(updated) if updated.rows_affected == 1 => {},
+            Ok(_) => continue,
+            Err(err) => {
+                tracing::warn!(%cert_id, error = %err, "could not fail stale pending certificate");
+                continue;
+            }
         }
         tracing::info!(
             cert_id = ?cert_id,
@@ -2967,6 +3135,32 @@ async fn mark_offline(db: &DatabaseConnection, agent_id: Uuid) {
         .await
     {
         tracing::warn!(%agent_id, error = %err, "could not mark agent offline");
+    }
+    // Its tunnel listener is gone with the process: clearing the reported
+    // address and fingerprint stops `ingress_endpoints` from handing
+    // connectors a pin they can no longer reach. The operator's ingress
+    // address is kept — it is configuration, not a report.
+    let _ = agent::Entity::update_many()
+        .col_expr(
+            agent::Column::TunnelListenerAddr,
+            Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            agent::Column::TunnelCertSha256,
+            Expr::value(Option::<String>::None),
+        )
+        .filter(agent::Column::Id.eq(agent_id))
+        .exec(db)
+        .await;
+    // Its tunnel sessions ended with the stream; the heartbeat that reported
+    // them is not coming back, so the report is cleared here instead of
+    // lingering as connected on the tunnel page.
+    if let Err(err) = tunnel_session::Entity::delete_many()
+        .filter(tunnel_session::Column::AgentId.eq(agent_id))
+        .exec(db)
+        .await
+    {
+        tracing::warn!(%agent_id, error = %err, "could not clear the tunnel sessions of a disconnected agent");
     }
 }
 
@@ -3638,12 +3832,121 @@ fn managed_session_id(claims: &Claims) -> Result<Option<Uuid>, Status> {
         .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))
 }
 
+async fn connector_credential_current(db: &DatabaseConnection, id: Uuid, digest: &str) -> bool {
+    matches!(tunnel_connector::Entity::find_by_id(id)
+        .filter(tunnel_connector::Column::CredentialSha256.eq(digest))
+        .filter(tunnel_connector::Column::Status.eq(tunnel_status::ACTIVE))
+        .one(db).await, Ok(Some(_)))
+}
+
 /// Legacy sync metadata cannot acknowledge a managed generation.
 fn clear_legacy_config_report(heartbeat: &mut AgentHeartbeat) {
     heartbeat.config_hash.clear();
     heartbeat.config_apply_error.clear();
     heartbeat.last_config_sync_at = None;
     heartbeat.last_policy_sync_at = None;
+}
+
+/// Records what an agent reports about its tunnel listener and sessions.
+///
+/// The session list is a *report*, not a source of truth: the rows for this
+/// agent are replaced on every heartbeat, so a session that ended disappears
+/// instead of lingering as a permanently-connected ghost. The listener columns
+/// are the ones the tunnel page reads before offering an ingress.
+async fn persist_tunnel_state(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    heartbeat: &AgentHeartbeat,
+) {
+    let listener = heartbeat.tunnel_listener.as_ref();
+    let (addr, fingerprint, listener_error) = match listener {
+        Some(listener) if listener.active => (
+            optional(&listener.addr),
+            optional(&listener.cert_sha256),
+            None,
+        ),
+        // A configured listener that failed to bind reports why; an agent with
+        // no listener at all reports nothing. Either way it is not an ingress
+        // right now, and `tunnel_ingress_addr` (the operator's) is untouched.
+        Some(listener) => (
+            None,
+            optional(&listener.cert_sha256),
+            optional(&listener.last_error),
+        ),
+        None => (None, None, None),
+    };
+    // A rotated certificate changes what connectors must pin. Read the old
+    // value first (one indexed lookup per heartbeat) so the change can be
+    // pushed instead of waiting for a connector to reconnect on its own.
+    let previous_fingerprint = agent::Entity::find_by_id(agent_id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.tunnel_cert_sha256);
+    let mut active: agent::ActiveModel = agent::ActiveModel {
+        id: Set(agent_id),
+        ..Default::default()
+    };
+    active.tunnel_listener_addr = Set(addr);
+    active.tunnel_cert_sha256 = Set(fingerprint.clone());
+    active.tunnel_listener_error = Set(listener_error);
+    if let Err(err) = active.update(db).await {
+        tracing::warn!(%agent_id, error = %err, "cannot record the tunnel listener state");
+    } else if fingerprint.is_some() && fingerprint != previous_fingerprint {
+        tracing::info!(
+            %agent_id,
+            "tunnel certificate fingerprint changed, pushing it to the connectors"
+        );
+        crate::grpc::notify_all_tunnel_connectors(db).await;
+    }
+
+    // The report is a snapshot, not a delta: replace it atomically so a reader
+    // never sees the agent with zero sessions between the delete and the
+    // inserts (the tunnel page would flash "no sessions" on every heartbeat).
+    let now = Utc::now();
+    let reports: Vec<(Uuid, tunnel_session::ActiveModel)> = heartbeat
+        .tunnel_sessions
+        .iter()
+        .filter_map(|report| {
+            let tunnel_id = Uuid::parse_str(report.tunnel_id.trim()).ok()?;
+            let session = tunnel_session::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                tunnel_id: Set(tunnel_id),
+                agent_id: Set(agent_id),
+                connected_at: Set(from_timestamp(report.connected_at.as_ref())),
+                last_seen_at: Set(now),
+                version: Set(optional(&report.connector_version)),
+                hostname: Set(optional(&report.hostname)),
+                streams_active: Set(
+                    report.streams_active.min(i32::MAX as u32) as i32
+                ),
+                rtt_ms: Set(report.rtt_ms.min(i32::MAX as u32) as i32),
+            };
+            Some((tunnel_id, session))
+        })
+        .collect();
+    let replaced = db
+        .transaction::<_, (), sea_orm::DbErr>(|txn| {
+            Box::pin(async move {
+                tunnel_session::Entity::delete_many()
+                    .filter(tunnel_session::Column::AgentId.eq(agent_id))
+                    .exec(txn)
+                    .await?;
+                for (tunnel_id, session) in reports {
+                    if let Err(err) = session.insert(txn).await {
+                        // A single bad row must not roll back the whole
+                        // report: the other tunnels' sessions are still true.
+                        tracing::warn!(%agent_id, %tunnel_id, error = %err, "cannot record a tunnel session");
+                    }
+                }
+                Ok(())
+            })
+        })
+        .await;
+    if let Err(err) = replaced {
+        tracing::warn!(%agent_id, error = %err, "cannot record the tunnel session report");
+    }
 }
 
 /// Maps a SeaORM error onto a `tonic::Status`, keeping storage details in
@@ -3939,13 +4242,13 @@ mod tests {
         assert!(sql.contains("\"cert_pem\" IS NULL"), "{sql}");
         assert!(sql.contains("\"acme_email\" IS NOT NULL"), "{sql}");
         assert!(sql.contains("\"site_id\" = "), "{sql}");
-        assert!(sql.contains("\"domain\" IN ("), "{sql}");
+        assert!(sql.contains("string_to_array") && sql.contains("count(*)"), "{sql}");
 
         // The agent may report the certificate the site still serves instead
         // of the pending replacement; the id branch covers that.
         let query =
-            certificate_failure_query(&update, Some(Uuid::new_v4()), None, &[])
-                .expect("a certificate id is actionable on its own");
+            certificate_failure_query(&update, Some(Uuid::new_v4()), Some(Uuid::new_v4()), &[])
+                .expect("a certificate id and owner site identify a row");
         let sql =
             sea_orm::QueryTrait::build(&query, sea_orm::DbBackend::Postgres)
                 .sql;
@@ -3953,6 +4256,7 @@ mod tests {
 
         // Without a certificate or site id the event cannot be attributed.
         assert!(certificate_failure_query(&update, None, None, &[]).is_none());
+        assert!(certificate_failure_query(&update, Some(Uuid::new_v4()), None, &[]).is_none());
     }
 
     /// D03: only the marked line is a state transition. The edge's own 404

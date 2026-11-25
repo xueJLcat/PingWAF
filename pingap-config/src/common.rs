@@ -146,7 +146,7 @@ pub fn normalize_dns_provider(value: &str) -> Option<&'static str> {
 }
 
 /// Configuration struct for TLS/SSL certificates
-#[derive(Debug, Default, Deserialize, Clone, Serialize, Hash)]
+#[derive(Debug, Default, Deserialize, Clone, Serialize, Hash, PartialEq)]
 pub struct CertificateConf {
     /// Domain names this certificate is valid for (comma separated)
     pub domains: Option<String>,
@@ -160,6 +160,8 @@ pub struct CertificateConf {
     pub is_ca: Option<bool>,
     /// ACME configuration for automated certificate management
     pub acme: Option<String>,
+    /// Control-plane certificate row that owns this order, when specified.
+    pub acme_certificate_id: Option<String>,
     /// Whether to use DNS challenge for ACME certificate management
     pub dns_challenge: Option<bool>,
     /// DNS provider for ACME certificate management
@@ -3341,7 +3343,10 @@ ai02RHnemmqJaNepfmCdyec=
         assert_eq!(true, result.is_ok());
 
         // spellchecker:off
-        assert_eq!("15ba921aee80abc3", conf.hash_key());
+        let mut selected = conf.clone();
+        selected.acme_certificate_id = Some("selected".into());
+        assert_eq!(conf.hash_key(), conf.clone().hash_key());
+        assert_ne!(conf.hash_key(), selected.hash_key());
         // spellchecker:on
     }
     #[test]

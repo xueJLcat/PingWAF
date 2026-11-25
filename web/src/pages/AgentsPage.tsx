@@ -24,6 +24,7 @@ import { Select } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { Table, type Column } from '@/components/ui/Table'
+import { Tabs } from '@/components/ui/Tabs'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { AgentProbePanel } from '@/components/agents/AgentProbePanel'
@@ -31,6 +32,7 @@ import { StaticRootsDialog } from '@/components/agents/StaticRootsDialog'
 import { ListenerPolicyDialog } from '@/components/agents/ListenerPolicyDialog'
 import { useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/stores/authStore'
+import { TunnelsTab } from '@/pages/tunnels/TunnelsTab'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
@@ -94,11 +96,16 @@ export function AgentsPage() {
   const [detail, setDetail] = useState<Agent | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Agent | null>(null)
   const [renameAgent, setRenameAgent] = useState<Agent | null>(null)
+  const [ingressAgent, setIngressAgent] = useState<Agent | null>(null)
+  const [ingressValue, setIngressValue] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const [sitesAgent, setSitesAgent] = useState<Agent | null>(null)
   const [siteScope, setSiteScope] = useState<'all' | 'selected'>('all')
   const [selectedSiteIds, setSelectedSiteIds] = useState<string[]>([])
   const [pendingCommand, setPendingCommand] = useState<{ agent: Agent; command: AgentCommand } | null>(null)
+  // The edge-agent page hosts both halves of the edge inventory: the agents
+  // themselves and the tunnel connectors that dial into them.
+  const [tab, setTab] = useState<'agents' | 'tunnels'>('agents')
   const [enrollOpen, setEnrollOpen] = useState(false)
   const [enrollName, setEnrollName] = useState('')
   const [enrollResult, setEnrollResult] = useState<AgentEnrollResponse | null>(null)
@@ -225,6 +232,20 @@ export function AgentsPage() {
     },
     onError: (error) => {
       toast.error(t('pages.agents.displayNameFailed'), errorMessage(error))
+    },
+  })
+
+  const saveIngress = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: string }) =>
+      agentsApi.update(id, { tunnel_ingress_addr: value }),
+    onSuccess: (agent) => {
+      toast.success(t('pages.agents.tunnelIngressSaved'), displayName(agent))
+      setIngressAgent(null)
+      setDetail((prev) => (prev?.id === agent.id ? agent : prev))
+      invalidate()
+    },
+    onError: (error) => {
+      toast.error(t('pages.agents.tunnelIngressFailed'), errorMessage(error))
     },
   })
 
@@ -518,6 +539,29 @@ export function AgentsPage() {
     },
   ]
 
+  const tabItems = [
+    { value: 'agents', label: t('pages.agents.tabAgents') },
+    { value: 'tunnels', label: t('pages.agents.tabTunnels') },
+  ]
+
+  if (tab === 'tunnels') {
+    return (
+      <div className="animate-slide-up">
+        <PageHeader
+          title={t('pages.agents.title')}
+          description={t('pages.agents.description')}
+        />
+        <Tabs
+          items={tabItems}
+          value={tab}
+          onChange={(value) => setTab(value === 'tunnels' ? 'tunnels' : 'agents')}
+          className="mb-4"
+        />
+        <TunnelsTab />
+      </div>
+    )
+  }
+
   return (
     <div className="animate-slide-up">
       <PageHeader
@@ -544,6 +588,13 @@ export function AgentsPage() {
             )}
           </div>
         }
+      />
+
+      <Tabs
+        items={tabItems}
+        value={tab}
+        onChange={(value) => setTab(value === 'tunnels' ? 'tunnels' : 'agents')}
+        className="mb-4"
       />
 
       {/* Fleet summary */}
@@ -862,6 +913,68 @@ export function AgentsPage() {
                     : t('pages.agents.neverSynced')
                 }
               />
+              {detail.tunnel_listener_error && (
+                <div className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg">
+                  <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-danger" />
+                  <p className="min-w-0">
+                    {t('pages.agents.tunnelListenerFailed')}{' '}
+                    <span className="pw-mono break-words text-xs">
+                      {detail.tunnel_listener_error}
+                    </span>
+                  </p>
+                </div>
+              )}
+              <DetailRow
+                label={t('pages.agents.tunnelListener')}
+                value={
+                  detail.tunnel_listener_addr
+                    ? `${detail.tunnel_listener_addr}${
+                        detail.tunnel_cert_sha256
+                          ? ` · ${t('pages.agents.tunnelFingerprint', {
+                              fingerprint: detail.tunnel_cert_sha256.slice(0, 16),
+                            })}`
+                          : ''
+                      }`
+                    : t('pages.agents.tunnelListenerOff')
+                }
+                mono
+              />
+              <DetailRow
+                label={t('pages.agents.tunnelIngress')}
+                value={
+                  detail.tunnel_ingress_addr ? (
+                    <span className="inline-flex items-center gap-2">
+                      <span className="pw-mono">{detail.tunnel_ingress_addr}</span>
+                      {canWrite && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={t('pages.agents.tunnelIngressEdit')}
+                          onClick={() => {
+                            setIngressValue(detail.tunnel_ingress_addr ?? '')
+                            setIngressAgent(detail)
+                          }}
+                        >
+                          <PencilSimple weight="duotone" className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
+                    </span>
+                  ) : canWrite ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setIngressValue('')
+                        setIngressAgent(detail)
+                      }}
+                    >
+                      {t('pages.agents.tunnelIngressSet')}
+                    </Button>
+                  ) : (
+                    t('pages.agents.tunnelIngressUnset')
+                  )
+                }
+              />
               <DetailRow label={t('pages.agents.registeredAt')} value={formatDateTime(detail.registered_at)} />
               <DetailRow label={t('pages.agents.agentId')} value={detail.id} mono />
               <DetailRow label={t('pages.agents.configHash')} value={detail.config_hash} mono />
@@ -1135,6 +1248,41 @@ export function AgentsPage() {
         </div>
       </Dialog>
 
+      {/* Tunnel ingress address */}
+      <Dialog
+        open={ingressAgent !== null}
+        onClose={() => setIngressAgent(null)}
+        size="md"
+        title={t('pages.agents.tunnelIngressTitle')}
+        description={ingressAgent?.hostname}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setIngressAgent(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              loading={saveIngress.isPending}
+              onClick={() =>
+                ingressAgent &&
+                saveIngress.mutate({ id: ingressAgent.id, value: ingressValue.trim() })
+              }
+            >
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <Input
+          label={t('pages.agents.tunnelIngress')}
+          value={ingressValue}
+          autoFocus
+          placeholder={t('pages.agents.tunnelIngressPlaceholder')}
+          hint={t('pages.agents.tunnelIngressHint')}
+          onChange={(e) => setIngressValue(e.target.value)}
+        />
+      </Dialog>
+
       {/* Rename / display name */}
       <Dialog
         open={renameAgent !== null}
@@ -1236,11 +1384,12 @@ function DetailRow({
   title,
 }: {
   label: string
-  value: string | null | undefined
+  /** A plain string, or a small inline control (the tunnel ingress editor). */
+  value: ReactNode
   mono?: boolean
   title?: string
 }) {
-  const text = value && value.length > 0 ? value : '—'
+  const text = value === null || value === undefined || value === '' ? '—' : value
   return (
     <div className="flex min-w-0 items-baseline justify-between gap-3 border-b border-line/60 pb-1.5">
       <dt className="shrink-0 text-xs text-fg-subtle">{label}</dt>

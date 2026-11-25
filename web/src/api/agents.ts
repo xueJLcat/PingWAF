@@ -38,11 +38,15 @@ export const agentsApi = {
   remove: (id: string) => apiClient.delete<void>(`/agents/${id}`),
 
   /**
-   * Updates the operator-assigned display name (`PATCH /agents/{id}`). An
-   * empty string or null clears it, falling back to the hostname.
+   * Updates the operator-assigned label and/or the tunnel ingress address
+   * (`PATCH /agents/{id}`). An omitted field is left alone; an empty string or
+   * null clears the display name (falling back to the hostname) or the ingress
+   * address (the node stops being offered as a tunnel ingress).
    */
-  update: (id: string, data: { display_name: string | null }) =>
-    apiClient.patch<Agent>(`/agents/${id}`, data),
+  update: (
+    id: string,
+    data: { display_name?: string | null; tunnel_ingress_addr?: string | null },
+  ) => apiClient.patch<Agent>(`/agents/${id}`, data),
 
   /**
    * Sets the sites the agent serves. `all` keeps the historical "every site

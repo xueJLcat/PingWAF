@@ -17,6 +17,7 @@ pub(crate) use managed::{
     ingress_agent_options, site_deployment, IngressAgentOption, SiteDeployment,
 };
 pub mod registry;
+pub mod tunnel_registry;
 pub mod visitor_auth;
 
 pub use cache_status::{CacheStatusRegistry, SiteCacheStatus};
@@ -24,12 +25,13 @@ pub use control_plane::ControlPlaneService;
 pub use registry::{
     AgentRegistry, ConfigDrift, ConnectedAgent, COMMAND_CHANNEL_CAPACITY,
 };
+pub use tunnel_registry::TUNNEL_CONNECTORS;
 
 use pingwaf_proto::control_plane::{
     server_command::Payload, ServerCommand, SiteConfig, UpdateSiteCommand,
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect, QueryTrait,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -53,48 +55,30 @@ pub(crate) async fn agent_visible_site_ids<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    if agent_row.site_scope == "selected" {
-        let Some(key_id) = agent_row.api_key_id else {
-            return Ok(Vec::new());
-        };
-        let Some(key) = api_key::Entity::find_by_id(key_id).one(db).await?
-        else {
-            return Ok(Vec::new());
-        };
-        let assigned: Vec<Uuid> = agent_sites::Entity::find()
-            .filter(agent_sites::Column::AgentId.eq(agent_row.id))
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|row| row.site_id)
-            .collect();
-        if assigned.is_empty() {
-            return Ok(Vec::new());
+    agent_site_query(agent_row).select_only().column(site::Column::Id)
+        .into_tuple::<Uuid>().all(db).await
+}
+
+/// The binding and the owning API key must agree in the same database read.
+pub(crate) fn agent_site_query(row: &agent::Model) -> sea_orm::Select<site::Entity> {
+    let owner = api_key::Entity::find().select_only().column(api_key::Column::UserId)
+        .filter(api_key::Column::Id.eq(row.api_key_id)).into_query();
+    let query = site::Entity::find().filter(site::Column::UserId.in_subquery(owner));
+    match row.site_scope.as_str() {
+        "selected" => {
+            let assigned = agent_sites::Entity::find().select_only().column(agent_sites::Column::SiteId)
+                .filter(agent_sites::Column::AgentId.eq(row.id)).into_query();
+            query.filter(site::Column::Id.in_subquery(assigned))
         }
-        // The assignment table is operator-managed, but ownership still
-        // decides what the key's user may see: an assignment of somebody
-        // else's site is ignored rather than leaked.
-        let sites = site::Entity::find()
-            .filter(site::Column::Id.is_in(assigned))
-            .filter(site::Column::UserId.eq(key.user_id))
-            .all(db)
-            .await?;
-        return Ok(sites.iter().map(|row| row.id).collect());
+        "all" => {
+            let query = query.filter(site::Column::IngressPort.is_null());
+            match row.site_id {
+                Some(id) => query.filter(site::Column::Id.eq(id)),
+                None => query,
+            }
+        }
+        _ => query.filter(site::Column::Id.is_null()),
     }
-    if let Some(site_id) = agent_row.site_id {
-        return Ok(vec![site_id]);
-    }
-    let Some(key_id) = agent_row.api_key_id else {
-        return Ok(Vec::new());
-    };
-    let Some(key) = api_key::Entity::find_by_id(key_id).one(db).await? else {
-        return Ok(Vec::new());
-    };
-    let sites = site::Entity::find()
-        .filter(site::Column::UserId.eq(key.user_id))
-        .all(db)
-        .await?;
-    Ok(sites.iter().map(|row| row.id).collect())
 }
 
 /// The command that replaces an agent's configuration with `site_config`.
@@ -329,7 +313,15 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
         let Some(visible) = visible_per_agent.get(&row.id.to_string()) else {
             continue;
         };
-        if push_visible_bundle(state, row, visible, &mut bundle_cache).await {
+        if push_visible_bundle(
+            &state.db,
+            &state.agents,
+            row,
+            visible,
+            &mut bundle_cache,
+        )
+        .await
+        {
             delivered += 1;
         }
     }
@@ -342,25 +334,113 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
     );
 }
 
+/// Pushes the current configuration to every registered agent.
+///
+/// Used by the gRPC pairing path, which has no `AppState` to hand to
+/// [`notify_all_config_changed`]. No configuration version is recorded: pairing
+/// changes no site, it only changes the tunnel policy a bundle carries.
+pub async fn push_config_to_all(
+    db: &DatabaseConnection,
+    registry: &AgentRegistry,
+) -> usize {
+    let agents = match agent::Entity::find().all(db).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list agents for config push");
+            return 0;
+        },
+    };
+    let mut bundle_cache: HashMap<Vec<Uuid>, SiteConfig> = HashMap::new();
+    let mut delivered = 0usize;
+    for row in &agents {
+        let visible = match agent_visible_site_ids(db, row).await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(
+                    agent_id = %row.id,
+                    error = %err,
+                    "failed to resolve the sites of an agent"
+                );
+                continue;
+            },
+        };
+        if push_visible_bundle(db, registry, row, &visible, &mut bundle_cache)
+            .await
+        {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
+/// Pushes one connector's current policy, or a revocation, over its control
+/// stream. Returns whether a live stream received it.
+pub async fn notify_tunnel_connectors(
+    db: &DatabaseConnection,
+    tunnel_id: Uuid,
+    revoked: Option<String>,
+) -> bool {
+    use pingwaf_proto::control_plane::{
+        tunnel_connector_command, TunnelConnectorCommand,
+        TunnelConnectorRevoked,
+    };
+    let command = match revoked {
+        Some(message) => TunnelConnectorCommand {
+            kind: Some(tunnel_connector_command::Kind::Revoked(
+                TunnelConnectorRevoked { message },
+            )),
+        },
+        None => {
+            match crate::tunnel_policy::connector_config(db, tunnel_id).await {
+                Ok(Some(config)) => TunnelConnectorCommand {
+                    kind: Some(tunnel_connector_command::Kind::Config(config)),
+                },
+                Ok(None) => TunnelConnectorCommand {
+                    kind: Some(tunnel_connector_command::Kind::Revoked(
+                        TunnelConnectorRevoked {
+                            message: "the tunnel was deleted".to_string(),
+                        },
+                    )),
+                },
+                Err(err) => {
+                    tracing::warn!(%tunnel_id, error = %err, "failed to build the tunnel policy");
+                    return false;
+                },
+            }
+        },
+    };
+    TUNNEL_CONNECTORS.push(tunnel_id, command).await
+}
+
+/// Pushes the current policy to every connected connector (global settings
+/// changed, ingress list changed).
+pub async fn notify_all_tunnel_connectors(db: &DatabaseConnection) {
+    let online: Vec<Uuid> =
+        TUNNEL_CONNECTORS.online().await.keys().copied().collect();
+    for tunnel_id in online {
+        notify_tunnel_connectors(db, tunnel_id, None).await;
+    }
+}
+
 /// Sends one agent the authoritative bundle of the sites it serves.
 ///
 /// An empty visibility set is meaningful too: once an agent's last site is
 /// gone it needs the empty bundle rather than silence, or it keeps serving the
 /// deleted site. Returns whether the command reached a live stream.
 async fn push_visible_bundle(
-    state: &AppState,
+    db: &DatabaseConnection,
+    registry: &AgentRegistry,
     row: &agent::Model,
     visible: &[Uuid],
     bundle_cache: &mut HashMap<Vec<Uuid>, SiteConfig>,
 ) -> bool {
-    if let Some(delivered) = state.agents.hint_managed_config(&row.id).await {
+    if let Some(delivered) = registry.hint_managed_config(&row.id).await {
         return delivered;
     }
     let payload = match bundle_cache.get(visible) {
         Some(config) => config.clone(),
         None => {
-            let config = match build_site_config(&state.db, Some(visible)).await
-            {
+            let config = match build_site_config(db, Some(visible)).await {
                 Ok(config) => config,
                 Err(err) => {
                     tracing::warn!(
@@ -375,8 +455,7 @@ async fn push_visible_bundle(
             config
         },
     };
-    state
-        .agents
+    registry
         .send_command(&row.id, update_site_command(payload))
         .await
 }
@@ -443,7 +522,15 @@ pub async fn notify_site_deleted(
                 continue;
             },
         };
-        if push_visible_bundle(state, row, &visible, &mut bundle_cache).await {
+        if push_visible_bundle(
+            &state.db,
+            &state.agents,
+            row,
+            &visible,
+            &mut bundle_cache,
+        )
+        .await
+        {
             delivered += 1;
         }
     }

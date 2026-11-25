@@ -3812,6 +3812,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4671,7 +4677,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pingap-acme"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4705,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-cache"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "async-trait",
@@ -4738,7 +4744,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-certificate"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4764,7 +4770,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-config"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4799,7 +4805,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-core"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "TinyUFO",
  "ahash",
@@ -4828,7 +4834,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-discovery"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4847,7 +4853,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-health"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4869,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-imageoptim"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -4897,7 +4903,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-location"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4918,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-logger"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4951,7 +4957,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-otel"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4968,7 +4974,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-performance"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4998,7 +5004,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-plugin"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "TinyUFO",
  "ahash",
@@ -5063,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-proxy"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "async-trait",
@@ -5100,7 +5106,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-pyroscope"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "pingora",
@@ -5113,14 +5119,14 @@ dependencies = [
 
 [[package]]
 name = "pingap-sentry"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "sentry-core",
 ]
 
 [[package]]
 name = "pingap-upstream"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -5151,7 +5157,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-util"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "aes-gcm-siv",
  "ahash",
@@ -5173,7 +5179,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-webhook"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "local-ip-address",
@@ -5479,7 +5485,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -5527,6 +5533,7 @@ dependencies = [
  "pingwaf-proto",
  "pingwaf-server",
  "pingwaf-system",
+ "pingwaf-tunnel",
  "pretty_assertions",
  "prost",
  "rcgen",
@@ -5558,7 +5565,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-agent"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5573,6 +5580,7 @@ dependencies = [
  "pingwaf-content",
  "pingwaf-profiler",
  "pingwaf-proto",
+ "pingwaf-tunnel",
  "prost",
  "prost-types",
  "rand 0.10.4",
@@ -5592,7 +5600,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-challenge"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5610,7 +5618,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-content"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "brotli 8.0.4",
  "flate2",
@@ -5625,7 +5633,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-profiler"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -5634,7 +5642,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-proto"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -5645,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-server"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5668,11 +5676,13 @@ dependencies = [
  "pingwaf-profiler",
  "pingwaf-proto",
  "pingwaf-system",
+ "pingwaf-tunnel",
  "pingwaf-waf",
  "pretty_assertions",
  "printpdf",
  "prost",
  "prost-types",
+ "rand 0.10.4",
  "rcgen",
  "regex",
  "reqwest 0.13.5",
@@ -5706,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-system"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "bytesize",
  "memory-stats",
@@ -5717,8 +5727,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "pingwaf-tunnel"
+version = "0.33.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures",
+ "hex",
+ "hyper-util",
+ "pingwaf-proto",
+ "rand 0.10.4",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "x509-parser 0.18.1",
+ "yamux",
+]
+
+[[package]]
 name = "pingwaf-waf"
-version = "0.32.52"
+version = "0.33.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -8290,6 +8333,7 @@ checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "libc",
  "pin-project-lite",
@@ -9441,6 +9485,21 @@ name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
+
+[[package]]
+name = "yamux"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f4e661d6ba6f09a768e31c6f3d88f9fac596ad5d376515d598a37b62d220b34"
+dependencies = [
+ "futures",
+ "log",
+ "nohash-hasher",
+ "parking_lot 0.12.5",
+ "pin-project",
+ "static_assertions",
+ "web-time",
+]
 
 [[package]]
 name = "yansi"

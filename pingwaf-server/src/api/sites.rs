@@ -628,6 +628,10 @@ pub struct CreatePoolRequest {
     /// `auto` (default) prefers IPv4, `ipv4`/`ipv6` pin one family.
     #[serde(default)]
     pub address_family: Option<String>,
+    /// Tunnel connector that reaches this pool's origins. Empty/omitted keeps
+    /// them direct (the edge dials the address itself).
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
 }
 
 fn default_lb_algorithm() -> String {
@@ -717,6 +721,10 @@ pub struct UpdatePoolRequest {
     /// state the data plane can act on.
     #[serde(default)]
     pub address_family: Option<String>,
+    /// Tunnel connector for this pool's origins: absent leaves the binding
+    /// alone, an empty string clears it (direct origins), a UUID binds it.
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
 }
 
 /// A pool plus its origin nodes, as `list_pools` returns them.
@@ -729,6 +737,44 @@ pub(crate) struct PoolWithMembers {
     #[serde(flatten)]
     pool: site_upstream_pools::Model,
     upstreams: Vec<site_upstreams::Model>,
+}
+
+/// Resolves the `tunnel_id` of a pool request.
+///
+/// `None` and an empty string mean "no tunnel" (direct origins). A non-empty
+/// value must be an existing tunnel id: binding a pool to a tunnel that does
+/// not exist would leave it silently unreachable, and the foreign key would
+/// reject it anyway with a far less useful message.
+///
+/// Binding requires an administrator. A tunnel is deployment infrastructure
+/// shared by several sites, so its id is not a tenant boundary: without this
+/// check a site owner could route their traffic into any tunnel by guessing a
+/// UUID, and through it into a network they were never given.
+async fn resolve_pool_tunnel(
+    state: &AppState,
+    current: &AuthUser,
+    raw: Option<&str>,
+) -> Result<Option<Uuid>, ApiError> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    if !current.is_admin() {
+        return Err(ApiError::Forbidden(
+            "only an administrator can bind an origin pool to a tunnel"
+                .to_string(),
+        ));
+    }
+    let tunnel_id = parse_uuid(raw, "tunnel id")?;
+    let exists = crate::models::tunnel_connector::Entity::find_by_id(tunnel_id)
+        .one(&state.db)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(ApiError::BadRequest(format!(
+            "tunnel {tunnel_id} does not exist"
+        )));
+    }
+    Ok(Some(tunnel_id))
 }
 
 /// A pool's health check posture with defaults applied, ready for storage
@@ -1796,6 +1842,8 @@ async fn create(
         health_check_timeout_ms: Set(defaults.timeout_ms),
         health_check_unhealthy_threshold: Set(defaults.unhealthy_threshold),
         health_check_healthy_threshold: Set(defaults.healthy_threshold),
+        // A direct origin: the site's upstream address is dialed by the edge.
+        tunnel_id: Set(None),
         // The same default a pool created through the API gets: IPv4 first,
         // which is what makes a domain origin reachable on a host without an
         // IPv6 route.
@@ -2246,6 +2294,7 @@ async fn clone_site(
                 ),
                 health_check_healthy_threshold: Set(defaults.healthy_threshold),
                 address_family: Set(ADDRESS_FAMILY_AUTO.to_string()),
+                tunnel_id: Set(None),
                 is_default: Set(true),
                 created_at: Set(timestamp),
             }
@@ -3083,6 +3132,10 @@ async fn create_pool(
         &address_family,
     )?;
 
+    let tunnel_id =
+        resolve_pool_tunnel(&state, &current, payload.tunnel_id.as_deref())
+            .await?;
+
     let mut health_check = PoolHealthCheck::default_values();
     health_check.enabled = payload.health_check_enabled.unwrap_or(false);
     if let Some(path) = non_empty(&payload.health_check_path) {
@@ -3120,6 +3173,7 @@ async fn create_pool(
         health_check_unhealthy_threshold: Set(health_check.unhealthy_threshold),
         health_check_healthy_threshold: Set(health_check.healthy_threshold),
         address_family: Set(address_family),
+        tunnel_id: Set(tunnel_id),
         is_default: Set(false),
         created_at: Set(Utc::now()),
     }
@@ -3216,6 +3270,10 @@ async fn update_pool(
     active.health_check_unhealthy_threshold =
         Set(health_check.unhealthy_threshold);
     active.health_check_healthy_threshold = Set(health_check.healthy_threshold);
+    if let Some(raw) = payload.tunnel_id.as_deref() {
+        active.tunnel_id =
+            Set(resolve_pool_tunnel(&state, &current, Some(raw)).await?);
+    }
 
     let updated = active.update(&state.db).await?;
 
@@ -4729,6 +4787,7 @@ mod tests {
         let pool_id = Uuid::new_v4();
         let payload = PoolWithMembers {
             pool: site_upstream_pools::Model {
+                tunnel_id: None,
                 id: pool_id,
                 site_id: Uuid::nil(),
                 name: "origin".into(),

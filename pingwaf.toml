@@ -89,6 +89,12 @@ max_body_log_size = 8192
 fail_open = true
 # Metrics shipping interval in seconds (0 disables metric shipping)
 metrics_ship_interval_secs = 30
+# Tunnel listener (`agent`, `all-in-one`). Empty — the default — disables it.
+# A tunnel connector inside a private network dials this address outbound, so
+# only an edge that should terminate tunnels sets it, and its firewall opens
+# the port to where the connectors run. The edge generates and rotates its own
+# certificate; connectors pin its SHA-256. See docs/user-guide.md -> Tunnels.
+# tunnel_addr = "0.0.0.0:9443"
 
 # ─── Proxy configuration (pingap mode) ───────────────────────────────────
 # The sections below are read by the same binary when it runs as pingap —

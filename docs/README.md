@@ -68,7 +68,7 @@ Run everything in one process with `all-in-one`, or split the control plane
 
 ## 📦 Crate documentation
 
-PingWAF adds seven WAF-specific crates on top of the `pingap` proxy foundation.
+PingWAF adds eight WAF-specific crates on top of the `pingap` proxy foundation.
 
 **WAF crates:**
 
@@ -79,6 +79,7 @@ PingWAF adds seven WAF-specific crates on top of the `pingap` proxy foundation.
 | [pingwaf-agent](../pingwaf-agent) | Data-plane agent: connects to the control plane, caches rules with disk persistence, ships logs/metrics, receives commands |
 | [pingwaf-waf](../pingwaf-waf) | Detection engine: normalize → signatures → expression → anomaly score |
 | [pingwaf-challenge](../pingwaf-challenge) | Dynamic challenges: JS 5-second shield, interactive challenge, PoW, fingerprinting, HMAC clearance cookies |
+| [pingwaf-tunnel](../pingwaf-tunnel/README.md) | Outbound-only connector and the edge-side acceptor: serve a NATed origin through the data plane with no inbound port (signed session tokens, SOCKS5 egress) |
 | `pingwaf-profiler` (no README) | Module/method CPU and memory attribution tables served at `/api/v1/system/profile` |
 | `pingwaf-system` (no README) | Process/host CPU snapshots and memory/cgroup accounting served at `/api/v1/system/metrics` |
 

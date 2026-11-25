@@ -8,7 +8,95 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.33.0] — 2026-11-25
+
+### Added
+
+- **Tunnels: internal services without an inbound port.** A new standalone
+  `pingwaf-tunnel` binary runs inside a private network, pairs with the control
+  plane once and dials the edges outbound — no inbound port, no public IP on
+  that host. An origin pool can be bound to a tunnel (`site_upstream_pools.tunnel_id`,
+  the new **Tunnel** selector in the origin-pool dialog), and the edge then
+  reaches the origin through a loopback bridge it creates per tunnel target, so
+  WAF, rate limiting, challenges, cache, logs, certificates and TLS-to-origin
+  are the untouched request path. A tunnel has three independent states the
+  console shows separately — paired, enabled and connector-online — and the
+  page (**Agents → Tunnels**) creates tunnels, mints one-time pairing commands,
+  rotates and revokes credentials, disables and deletes them, lists the edges
+  holding a session, and carries the deployment-wide limits
+  (`tunnel_settings`).
+  - Edge side: `agent.tunnel_addr` / `--tunnel-addr` / `PINGWAF_TUNNEL_ADDR`
+    (off by default) starts the TLS listener; the edge generates its own
+    self-signed certificate on first boot (persisted, so restarts keep the same
+    fingerprint) and reports its SHA-256, which connectors pin. Deleting the
+    certificate files and restarting rotates it; the new fingerprint reaches the
+    connectors on the next heartbeat.
+  - Auth: a one-time pairing token is redeemed over the new `PairTunnel` gRPC
+    RPC for a 32-byte credential (stored only as its SHA-256), which
+    authenticates the connector's control stream. Edges never see it: the
+    control plane mints a short-lived **Ed25519 session token** (key derived
+    from `jwt_secret`, TTL `session_token_ttl_seconds`, one hour by default) and
+    the edge verifies the signature, the tunnel id and the expiry against the
+    public key in its rule bundle. The long-lived `TunnelControl` stream pushes
+    ingress endpoints, the target policy, a refreshed token and revocations.
+  - Agent heartbeat gained `tunnel_listener` and `tunnel_sessions`; the agent
+    detail panel shows the listener state, the pinned fingerprint and an
+    operator-set **Tunnel ingress** address, and the access log renders a bridged
+    origin as `tunnel://<name>/<target>` instead of a loopback port.
+  - `install.sh --mode tunnel` installs the connector, pairs it and registers
+    `pingwaf-tunnel.service`; the release pipeline publishes
+    `pingwaf-tunnel-linux-{amd64,arm64}.tar.{xz,gz}` with `.sha256` sidecars and
+    provenance attestations.
+
+- **Tunnels can reach out through a SOCKS5 proxy.** A connector on a host with
+  no direct egress sends both its control-plane channel and every edge session
+  through the proxy configured in `tunnel.toml` (`socks5_proxy` /
+  `socks5_username` / `socks5_password`, or `--socks5-proxy` and friends, also
+  accepted by `install.sh --mode tunnel`). SOCKS5 CONNECT with no-auth and
+  RFC 1929 username/password, target names resolved by the proxy (ATYP 3),
+  bracketed IPv6 supported, and a bounded handshake with a distinct error for
+  every failure (refused methods, rejected credentials, CONNECT reply code,
+  early close, timeout) — never a silent direct dial. Covered by an in-process
+  mock proxy: domain/IPv4 targets, auth success and rejection, refusal codes,
+  early close, stall and unreachable proxy.
+- Tunnel console: the detail panel lists the **sites bound to the tunnel** (the
+  blast radius of disabling or deleting it) and the delete confirmation names
+  them; the pairing dialog carries a three-step checklist (run the command,
+  enable the edge listener + ingress, bind an origin pool); the empty state
+  offers **Create tunnel**; clickable table rows are keyboard-operable and
+  icon-only buttons have accessible names.
+
+### Changed
+
+- `PATCH /api/v1/agents/{agent_id}` treats `display_name` as tri-state (absent
+  leaves it alone) and accepts `tunnel_ingress_addr`. Previously any update
+  omitted the field and silently cleared the label.
+
+### Fixed
+
+- **A tunnel target stored as a bare hostname had no upstream.** The origin-pool
+  API accepts `app.internal`, but the control plane derived tunnel targets with
+  the strict `host:port` normalizer, so the target never reached the rule
+  bundle and the edge could not find a bridge for it: the pool silently had no
+  upstream while the connector refused to dial the address. Both sides now use
+  the same normalizer, which appends the default port of the node's TLS flag
+  (80/443), exactly as a direct origin would.
+- **A shared tunnel no longer leaks other tenants' sites and internal
+  addresses.** The derived `sites` and `targets` a non-administrator sees are
+  scoped to that account's own sites.
+- **The per-edge session report is replaced in one transaction**, so the tunnel
+  page cannot flash "no sessions" between a heartbeat's delete and inserts, and
+  a deleted tunnel's session rows are cleared instead of lingering until a
+  heartbeat that may never arrive.
+- **Disabling tunnels deployment-wide no longer makes connectors redial.** The
+  edge closes the live session on the next reload and the connector now waits
+  for the next policy push instead of producing a refusal every backoff window.
+- **Revocation is immediate again, not bounded by the token's lifetime.** The
+  bundle now carries no session-token public key for an unpaired or revoked
+  tunnel, so the edge refuses its next handshake instead of accepting a token
+  minted before the revocation. The reload key also includes the tunnel policy,
+  so a rotation or a disable reaches the edge on the next poll (≤5s) rather
+  than waiting for an unrelated configuration change to trigger a reload.
 
 - HTTP-01 responses now require a current challenge record for the requested domain. Unknown challenge types disable issuance. Manual DNS orders added after startup follow the per-certificate retry schedule.
 - Shared standard ports select a site for each request. Restoring error pages now checks their scope, status, content type and template together. HTML site error pages escape interpolated request values by default.
@@ -2503,12 +2591,12 @@ that table up if you may need to roll back.
   built from `site/` (Astro), whose deployment pages now document both install
   modes.
 
-## [PingWAF 0.33.0] — 2026-10-31
+### Also in this release
 
-Feature release: static-asset access-log filtering, AI bots as a first-class
-client type, and regex support in rewrite body replacement. One migration
-ships automatically; the `RuleBundle` proto gains an optional field, so old
-agents keep working against a new control plane.
+Static-asset access-log filtering, AI bots as a first-class client type, and
+regex support in rewrite body replacement. One migration ships automatically;
+the `RuleBundle` proto gains an optional field, so old agents keep working
+against a new control plane.
 
 ### Added
 

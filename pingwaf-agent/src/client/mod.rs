@@ -940,6 +940,49 @@ impl ControlPlaneClient {
                         .and_then(|host| host.application_report()),
                     #[cfg(not(target_os = "linux"))]
                     managed_apply: None,
+                    // The tunnel listener and its sessions, when this process
+                    // runs one. `None` tells the control plane the edge is not
+                    // an ingress, which is also what clears a stale address.
+                    tunnel_listener: pingwaf_tunnel::runtime().map(|runtime| {
+                        proto::TunnelListenerStatus {
+                            active: runtime.listener_addr.is_some(),
+                            addr: runtime
+                                .listener_addr
+                                .map(|addr| addr.to_string())
+                                .unwrap_or_default(),
+                            cert_sha256: runtime.cert_fingerprint.clone(),
+                            last_error: runtime
+                                .listener_error
+                                .clone()
+                                .unwrap_or_default(),
+                        }
+                    }),
+                    tunnel_sessions: pingwaf_tunnel::runtime()
+                        .map(|runtime| {
+                            runtime
+                                .registry
+                                .session_reports()
+                                .into_iter()
+                                .map(|report| proto::TunnelSessionReport {
+                                    tunnel_id: report.tunnel_id,
+                                    connector_version: report.connector_version,
+                                    hostname: report.hostname,
+                                    connected_at: Some(
+                                        prost_types::Timestamp {
+                                            seconds: report
+                                                .connected_at
+                                                .unix_timestamp(),
+                                            nanos: 0,
+                                        },
+                                    ),
+                                    streams_active: report.streams_active,
+                                    rtt_ms: report.rtt_ms,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    legacy_listener: Vec::new(),
+                    legacy_report: Vec::new(),
                 };
                 if managed {
                     hb.config_hash.clear();
@@ -953,6 +996,7 @@ impl ControlPlaneClient {
                     hb.health = heartbeat_health("") as i32;
                 }
 
+                hb.encode_legacy_reports(managed);
                 if hb_tx.send(hb).await.is_err() {
                     debug!("Heartbeat channel closed");
                     break;

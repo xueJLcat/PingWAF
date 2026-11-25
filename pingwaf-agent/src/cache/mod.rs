@@ -122,6 +122,15 @@ pub struct CachedRules {
     /// server never sent it (old control plane) — nothing is then skipped.
     #[serde(default)]
     pub log_settings: Option<Arc<LogSettings>>,
+    /// Tunnel connectors this edge may accept sessions from. Every bundle
+    /// carries the complete set (like the failover registry), so the last one
+    /// wins wholesale and a deleted tunnel disappears with one push.
+    #[serde(default)]
+    pub tunnels: Arc<Vec<TunnelConfig>>,
+    /// Deployment-wide tunnel limits; `None` on an old control plane, which
+    /// leaves the edge on its built-in defaults.
+    #[serde(default)]
+    pub tunnel_settings: Option<TunnelSettings>,
     /// When the cache was last updated from the server
     pub updated_at: DateTime<Utc>,
     /// Hash of the configuration (for delta sync). An `Arc` so the hot path
@@ -148,6 +157,8 @@ impl Default for CachedRules {
             global_fail_open: None,
             global_cache: None,
             origin_verify_cert: None,
+            tunnels: Arc::new(Vec::new()),
+            tunnel_settings: None,
             log_settings: None,
             updated_at: Utc::now(),
             config_hash: Arc::from(""),
@@ -1277,6 +1288,10 @@ pub struct UpstreamConfig {
     /// does not send it.
     #[serde(default = "default_address_family")]
     pub address_family: String,
+    /// Tunnel connector that reaches this pool's origins. Empty keeps them
+    /// direct (the edge dials the address itself).
+    #[serde(default)]
+    pub tunnel_id: String,
     #[serde(default)]
     pub is_default: bool,
 }
@@ -1292,6 +1307,37 @@ pub struct UpstreamPeer {
     pub address: String,
     pub weight: u32,
     pub tls: bool,
+}
+
+/// One tunnel as the control plane distributes it to the edges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelConfig {
+    pub tunnel_id: String,
+    pub name: String,
+    /// Lower-case hex Ed25519 public key the connector's session token must
+    /// verify against; empty = unpaired.
+    #[serde(default)]
+    pub session_public_key: String,
+    #[serde(default)]
+    pub enabled: bool,
+    /// Internal `host:port` origins the connector serves.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+/// Deployment-wide tunnel limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelSettings {
+    pub max_streams: u32,
+    pub idle_timeout_secs: u32,
+    pub heartbeat_secs: u32,
+    /// Lifetime of a connector session token (bounded by the edge anyway).
+    #[serde(default = "default_session_token_ttl")]
+    pub session_token_ttl_secs: u32,
+}
+
+fn default_session_token_ttl() -> u32 {
+    3600
 }
 
 /// A path-based route directing matching requests to an origin pool.
@@ -1881,6 +1927,24 @@ impl RuleCache {
                 updated.log_settings =
                     Some(Arc::new(Self::convert_log_settings(ls)));
             }
+            // The tunnel policy is complete in every bundle, exactly like the
+            // failover registry: an empty list is authoritative and removes a
+            // tunnel that was deleted.
+            updated.tunnels = Arc::new(
+                bundle
+                    .tunnels
+                    .iter()
+                    .map(Self::convert_tunnel_config)
+                    .collect(),
+            );
+            if let Some(settings) = &bundle.tunnel_settings {
+                updated.tunnel_settings = Some(TunnelSettings {
+                    max_streams: settings.max_streams,
+                    idle_timeout_secs: settings.idle_timeout_secs,
+                    heartbeat_secs: settings.heartbeat_secs,
+                    session_token_ttl_secs: settings.session_token_ttl_secs,
+                });
+            }
             updated.config_hash = bundle.config_hash.as_str().into();
             updated.updated_at = Utc::now();
             Arc::new(updated)
@@ -1930,6 +1994,17 @@ impl RuleCache {
         &self,
         config: &proto::SiteConfig,
     ) -> anyhow::Result<()> {
+        let policy = config.sites.iter().find_map(|site| site.rules.as_ref());
+        self.update_from_site_config_with_policy(config, policy)
+    }
+
+    /// Site maps contain default routes only in managed mode. Tunnel policy
+    /// covers the active sites assigned to this node, including custom ports.
+    pub fn update_from_site_config_with_policy(
+        &self,
+        config: &proto::SiteConfig,
+        policy: Option<&proto::RuleBundle>,
+    ) -> anyhow::Result<()> {
         // Pre-sync enforcement state per site, so leaving enforcing mode
         // (block → monitor/off, observation on) drops the site's stale
         // WAF auto-blocks after the swap.
@@ -1952,6 +2027,18 @@ impl RuleCache {
         let mut global_cache = None;
         let mut origin_verify_cert = None;
         let mut log_settings = None;
+        // The tunnel policy rides in every bundle exactly like the failover
+        // registry, but it used to be merged only by `update_from_bundle`.
+        // The registration path (`GetSiteConfig` → this function) therefore
+        // left a brand-new agent with no tunnels at all, and the connector it
+        // fronts was refused with `Unauthenticated` until some unrelated
+        // per-site push happened to arrive.
+        let tunnels = Arc::new(policy.into_iter().flat_map(|p| &p.tunnels)
+            .map(Self::convert_tunnel_config).collect());
+        let tunnel_settings = policy.and_then(|p| p.tunnel_settings.as_ref()).map(|s| TunnelSettings {
+            max_streams: s.max_streams, idle_timeout_secs: s.idle_timeout_secs,
+            heartbeat_secs: s.heartbeat_secs, session_token_ttl_secs: s.session_token_ttl_secs,
+        });
         let mut prepared_sites: HashMap<Arc<str>, Arc<SiteRules>> =
             HashMap::with_capacity(config.sites.len());
         let mut prepared_domain_index: HashMap<Arc<str>, Arc<str>> =
@@ -1999,9 +2086,7 @@ impl RuleCache {
             updated.config_hash = config.config_hash.as_str().into();
             updated.updated_at = Utc::now();
 
-            if let Some(registry) = &failover_registry {
-                updated.failover_registry = Arc::clone(registry);
-            }
+            updated.failover_registry = failover_registry.clone().unwrap_or_default();
             if let Some(default_fail_open) = global_fail_open {
                 updated.global_fail_open = Some(default_fail_open);
             }
@@ -2014,6 +2099,8 @@ impl RuleCache {
             if let Some(ls) = &log_settings {
                 updated.log_settings = Some(Arc::clone(ls));
             }
+            updated.tunnels = Arc::clone(&tunnels);
+            updated.tunnel_settings = tunnel_settings;
 
             // A full site config is authoritative: replace both maps with
             // the prepared generation. Sites the control plane no longer
@@ -3645,7 +3732,24 @@ impl RuleCache {
             } else {
                 u.address_family.clone()
             },
+            tunnel_id: u.tunnel_id.clone(),
             is_default: u.is_default,
+        }
+    }
+
+    fn convert_tunnel_config(t: &proto::TunnelConfig) -> TunnelConfig {
+        TunnelConfig {
+            tunnel_id: t.tunnel_id.clone(),
+            name: t.name.clone(),
+            session_public_key: t.session_public_key.clone(),
+            enabled: t.enabled,
+            targets: t
+                .targets
+                .iter()
+                .filter_map(|target| {
+                    pingwaf_tunnel::protocol::normalize_target(target)
+                })
+                .collect(),
         }
     }
 
@@ -3834,6 +3938,8 @@ mod tests {
     #[test]
     fn cached_rules_clone_shares_the_heavy_fields() {
         let rules = CachedRules {
+            tunnels: Arc::new(Vec::new()),
+            tunnel_settings: None,
             sites: HashMap::new(),
             domain_index: HashMap::from([
                 (Arc::from("example.com"), Arc::from("site-1")),
@@ -4370,6 +4476,63 @@ mod tests {
     }
 
     #[test]
+    fn the_registration_site_config_carries_the_tunnel_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        // The agent's first contact is `GetSiteConfig`, not a per-site bundle:
+        // if that path dropped `tunnels`, a fresh edge would refuse every
+        // connector with `Unauthenticated` and never recover on its own.
+        cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "site-1".to_string(),
+                    domain: "a.example.com".to_string(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        tunnels: vec![proto::TunnelConfig {
+                            tunnel_id: "tunnel-1".to_string(),
+                            name: "branch".to_string(),
+                            session_public_key: "ab".repeat(32),
+                            enabled: true,
+                            targets: vec!["10.0.0.5:8080".to_string()],
+                        }],
+                        tunnel_settings: Some(proto::TunnelSettings {
+                            max_streams: 64,
+                            idle_timeout_secs: 60,
+                            heartbeat_secs: 15,
+                            session_token_ttl_secs: 600,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+
+        let cached = cache.all_sites();
+        assert_eq!(cached.tunnels.len(), 1);
+        assert_eq!(cached.tunnels[0].tunnel_id, "tunnel-1");
+        assert!(cached.tunnels[0].enabled);
+        assert_eq!(
+            cached.tunnels[0].targets,
+            vec!["10.0.0.5:8080".to_string()]
+        );
+        let settings = cached.tunnel_settings.expect("settings");
+        assert_eq!(settings.max_streams, 64);
+        assert_eq!(settings.heartbeat_secs, 15);
+        cache.update_from_site_config(&proto::SiteConfig::default()).unwrap();
+        let empty = cache.all_sites();
+        assert!(empty.tunnels.is_empty());
+        assert!(empty.tunnel_settings.is_none());
+        assert!(empty.sites.is_empty());
+    }
+
+    #[test]
     fn update_from_site_config_removes_deleted_sites() {
         let dir = tempfile::tempdir().unwrap();
         let cache =
@@ -4638,6 +4801,8 @@ mod tests {
     #[test]
     fn new_format_roundtrips() {
         let cached = CachedRules {
+            tunnels: Arc::new(Vec::new()),
+            tunnel_settings: None,
             sites: [(
                 "site-1".into(),
                 Arc::new(SiteRules {
@@ -4662,6 +4827,7 @@ mod tests {
                     ssl_config: None,
                     path_exceptions: Vec::new(),
                     upstreams: vec![UpstreamConfig {
+                        tunnel_id: String::new(),
                         name: "default".to_string(),
                         peers: Vec::new(),
                         algorithm: "LbRoundRobin".to_string(),
@@ -4850,6 +5016,8 @@ mod tests {
         };
         let store = |global_space_mb: Option<u32>, quota_mb: u32| {
             cache.inner.store(Arc::new(CachedRules {
+                tunnels: Arc::new(Vec::new()),
+                tunnel_settings: None,
                 sites: [(DOMAIN.into(), site(quota_mb))].into_iter().collect(),
                 domain_index: HashMap::new(),
                 failover_registry: Arc::new(HashMap::new()),

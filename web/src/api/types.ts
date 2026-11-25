@@ -230,6 +230,12 @@ export interface UpstreamPool {
    * ignores it. Mirrors the DB CHECK constraint (`auto|ipv4|ipv6`).
    */
   address_family: 'auto' | 'ipv4' | 'ipv6' | string
+  /**
+   * Tunnel connector that reaches this pool's origins; null keeps them direct
+   * (the edge dials the address itself). When set, the peer addresses are
+   * resolved by the connector inside the private network.
+   */
+  tunnel_id: string | null
   is_default: boolean
   created_at: string
   /**
@@ -424,6 +430,8 @@ export interface CreatePoolRequest extends PoolHealthCheckFields {
   verify_cert?: boolean | null
   /** Omitted = `auto` (server default: prefer IPv4). */
   address_family?: AddressFamily | string
+  /** Tunnel connector for this pool's origins; omitted = direct origins. */
+  tunnel_id?: string | null
 }
 
 export interface UpdatePoolRequest extends PoolHealthCheckFields {
@@ -439,6 +447,8 @@ export interface UpdatePoolRequest extends PoolHealthCheckFields {
   verify_cert?: boolean | null
   /** Omitted leaves the stored family alone; unknown values are rejected (400). */
   address_family?: AddressFamily | string
+  /** Absent leaves the binding alone; an empty string clears it. */
+  tunnel_id?: string | null
 }
 
 export interface CreateRouteRequest {
@@ -1228,11 +1238,93 @@ export interface Agent {
   pending_commands: number
   /** Whether the gRPC control plane serves TLS; false = plaintext (degraded). */
   grpc_tls: boolean
+  /**
+   * Public `host:port` a tunnel connector dials to reach this node's tunnel
+   * listener; null = the node is not offered as a tunnel ingress.
+   */
+  tunnel_ingress_addr: string | null
+  /** The address the tunnel listener bound; null = the listener is off. */
+  tunnel_listener_addr: string | null
+  /** SHA-256 of the listener's certificate leaf, which connectors pin. */
+  tunnel_cert_sha256: string | null
+  /**
+   * Why a configured tunnel listener is not running (bind failure, unusable
+   * certificate); null when it is active or was never configured.
+   */
+  tunnel_listener_error: string | null
 }
 
 export interface UpdateAgentSitesRequest {
   scope: 'all' | 'selected'
   site_ids?: string[]
+}
+
+/** One edge session held by a tunnel connector. */
+export interface TunnelSession {
+  agent_id: string
+  agent_name: string
+  agent_status: string
+  connected_at: string
+  last_seen_at: string
+  streams_active: number
+  rtt_ms: number
+  version: string | null
+  hostname: string | null
+}
+
+/**
+ * A tunnel connector as the console shows it.
+ *
+ * `paired` says a credential exists (the connector can connect at all);
+ * `connector_online` says it is connected right now; `enabled` folds in the
+ * deployment switch and the row's own status.
+ */
+export interface Tunnel {
+  id: string
+  name: string
+  description: string | null
+  status: 'pending' | 'active' | 'disabled' | string
+  paired: boolean
+  enabled: boolean
+  connector_online: boolean
+  connector_version: string | null
+  connector_hostname: string | null
+  last_seen_at: string | null
+  /** Internal `host:port` origins the connector serves. */
+  targets: string[]
+  /** Domains of the sites bound to this tunnel (the blast radius of disabling it). */
+  sites: string[]
+  sessions: TunnelSession[]
+  created_at: string
+  updated_at: string
+}
+
+/** What creating a tunnel (or rotating its credential) returns. */
+export interface TunnelPairing {
+  tunnel: Tunnel
+  /** The one-time token; shown once, only its digest is stored. */
+  pairing_token: string
+  /** Install-and-pair one-liner for the private-network host. */
+  pairing_command: string
+  expires_at: string
+}
+
+/** `tunnel_settings` — the deployment-wide tunnel limits (single row). */
+export interface TunnelSettings {
+  id: number
+  enabled: boolean
+  pairing_ttl_seconds: number
+  max_streams_per_session: number
+  max_targets_per_tunnel: number
+  idle_timeout_seconds: number
+  heartbeat_seconds: number
+  /**
+   * Lifetime of a connector session token. The connector gets a fresh one on
+   * every config push; the value also bounds how long a partitioned edge keeps
+   * accepting a revoked tunnel.
+   */
+  session_token_ttl_seconds: number
+  updated_at: string
 }
 
 export interface AgentListQuery extends PaginationQuery {
@@ -1586,6 +1678,20 @@ export interface VersionResponse {
 export interface SystemStatusResponse {
   /** Whether the gRPC control plane serves TLS; false = plaintext (degraded). */
   grpc_tls: boolean
+  /**
+   * Public `host:port` a tunnel connector dials to reach this node's tunnel
+   * listener; null = the node is not offered as a tunnel ingress.
+   */
+  tunnel_ingress_addr: string | null
+  /** The address the tunnel listener bound; null = the listener is off. */
+  tunnel_listener_addr: string | null
+  /** SHA-256 of the listener's certificate leaf, which connectors pin. */
+  tunnel_cert_sha256: string | null
+  /**
+   * Why a configured tunnel listener is not running (bind failure, unusable
+   * certificate); null when it is active or was never configured.
+   */
+  tunnel_listener_error: string | null
 }
 
 /* ── SSL / TLS ────────────────────────────────────────────────────── */

@@ -4,11 +4,11 @@ const docs = {
   meta: {
     title: "文档 — PingWAF",
     description:
-      "架构、部署、WAF 引擎与 REST/gRPC API：在生产环境运行 PingWAF 所需的六篇文档。",
+      "架构、部署、WAF 引擎与 REST/gRPC API：在生产环境运行 PingWAF 所需的七篇文档。",
   },
   hero: {
     eyebrow: "文档",
-    title: "读懂 PingWAF 的六篇文档",
+    title: "读懂 PingWAF 的七篇文档",
     lead: "做选型先从架构看起，要安装就看部署，调规则则从 WAF 引擎开始。",
   },
   cards: [
@@ -27,6 +27,14 @@ const docs = {
       lead: "all-in-one 与分布式、Docker 与 systemd、端口与配置优先级。",
       minutes: 10,
       topics: ["Docker", "systemd", "端口", "环境变量"],
+    },
+    {
+      slug: "tunnel",
+      icon: "route",
+      title: "隧道",
+      lead: "让内网服务经 WAF 被访问而无需入站端口：配对、边缘监听、源站池绑定、SOCKS5 出网与运维。",
+      minutes: 12,
+      topics: ['配对', '边缘监听', 'SOCKS5', 'NAT'],
     },
     {
       slug: "waf-engine",

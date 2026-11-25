@@ -571,6 +571,28 @@ impl ConfigManager {
         value: &T,
     ) -> Result<()> {
         let _guard = self.write_lock.lock().await;
+        self.update_locked(category, name, value).await
+    }
+
+    /// Complete an issuance only if the operator's certificate configuration
+    /// still matches the one used to create the order.
+    pub async fn install_issued_certificate(
+        &self, name: &str, expected: &crate::CertificateConf, pem: String, key: String,
+    ) -> Result<bool> {
+        let _guard = self.write_lock.lock().await;
+        if self.get::<crate::CertificateConf>(Category::Certificate, name).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        let mut issued = expected.clone();
+        issued.tls_cert = Some(pem);
+        issued.tls_key = Some(key);
+        self.update_locked(Category::Certificate, name, &issued).await?;
+        Ok(true)
+    }
+
+    async fn update_locked<T: Serialize + Send + Sync>(
+        &self, category: Category, name: &str, value: &T,
+    ) -> Result<()> {
         let key = self.get_key(&category, name)?;
         let value =
             Value::try_from(value).map_err(|e| Error::Ser { source: e })?;
@@ -652,6 +674,19 @@ mod tests {
     use super::*;
     use nanoid::nanoid;
     use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn late_issuance_cannot_replace_the_current_certificate_selection() {
+        let manager = new_memory_config_manager("[certificates.site]\nacme_certificate_id='first'\n", None);
+        let first: crate::CertificateConf = manager.get(Category::Certificate, "site").await.unwrap().unwrap();
+        let mut second = first.clone();
+        second.acme_certificate_id = Some("second".into());
+        manager.update(Category::Certificate, "site", &second).await.unwrap();
+        assert!(!manager.install_issued_certificate("site", &first, "old".into(), "key".into()).await.unwrap());
+        assert_eq!(manager.get::<crate::CertificateConf>(Category::Certificate, "site").await.unwrap(), Some(second.clone()));
+        assert!(manager.install_issued_certificate("site", &second, "new".into(), "key".into()).await.unwrap());
+        assert!(!manager.install_issued_certificate("site", &second, "duplicate".into(), "key".into()).await.unwrap());
+    }
 
     /// The global body cap fills locations that do not set their own and
     /// leaves explicit values alone (2026-10-18 audit).

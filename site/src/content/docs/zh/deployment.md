@@ -106,6 +106,37 @@ pingwaf agent
 
 如果控制面是 ACME 签发者，需 **0.32.40+** 才会把内嵌数据面签发的 PEM 同步并推送给 agent。旧控制面只下发 `acme_email`、没有 PEM，每个 agent 会自己发起 HTTP-01，验证请求落到控制面而不是 agent，最终 `acme_failed`。暂不能升级控制面时，可在 agent 单元设置 `PINGAP_DISABLE_ACME=true` 停止重试，并改用上传证书。安装器会把 `--server-ca-cert` 复制到 `/etc/pingwaf/grpc-ca.pem`，控制台生成的命令不含 CA / `--server-tls-name`，自签控制面需手动补上。
 
+## 隧道（内网服务免入站端口）
+
+隧道让**内网服务**在不开放入站端口、也不需要公网 IP 的情况下接入：`pingwaf-tunnel` 连接器主动向控制面与边缘节点拨号，公网侧由边缘数据面终止并经回环桥接转发，WAF、限流、缓存、日志与证书与直连源站完全一致。
+
+**边缘节点**：只在需要终止隧道的边缘开启监听，并把端口限制到连接器所在网络：
+
+```toml
+[agent]
+tunnel_addr = "0.0.0.0:9443"   # 默认关闭
+```
+
+然后在 **边缘节点 → [节点] → 隧道入口地址** 填写连接器拨号的公网地址（`edge1.example.com:9443`）；该面板同时显示监听状态与连接器要固定的证书指纹。
+
+**连接器**：在 **边缘节点 → 隧道** 创建隧道，复制一次性配对命令并在内网主机执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh \
+  | sudo bash -s -- --mode tunnel \
+      --server-url https://control-plane:9090 \
+      --server-ca-cert control-plane.pem \
+      --token <pairing-token>
+```
+
+它会安装 `/usr/local/bin/pingwaf-tunnel`、写入 `/etc/pingwaf/tunnel.toml`（`0600`）并注册 `pingwaf-tunnel.service`。内网侧无需开放任何端口：连接器只发起出站连接（控制面 9090、入口边缘 9443）。
+
+**使用**：在站点的源站池对话框里把源站池绑定到该隧道，池内节点地址（`10.0.0.5:8080`、`app.internal:8443`）随后由连接器在内网解析。隧道的目标清单由绑定的源站池推导。
+
+主机退役时吊销隧道：凭据立即失效，所有边缘会在一次规则包重载内拒绝会话；删除隧道前若仍有源站池引用会被拒绝（`409`），`?force=true` 才会解绑并回退为直连源站。
+
+完整操作说明——三个独立状态、请求链路、连接器命令与配置项、无直接出网时的 SOCKS5、以及排查表——见 [隧道](/docs/tunnel/) 页面。
+
 ## systemd
 
 仓库自带的 `pingwaf.service` 以 `pingwaf` 用户运行，设置 `Restart=always`、`LimitNOFILE=65536`、`ProtectSystem=strict`，只允许写入 `/var/lib/pingwaf` 与 `/etc/pingwaf`。没有 reload 信号：配置变更由控制面应用，二进制或单元变更需要 `systemctl restart pingwaf`。

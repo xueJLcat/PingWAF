@@ -111,7 +111,9 @@ mod m20240101_000103_challenge_adaptive_pow;
 mod m20240101_000104_site_ingress;
 mod m20240101_000104_site_ssl_self_signed_backfill;
 mod m20240101_000105_managed_config_order;
+mod m20240101_000105_tunnel_connectors;
 mod m20240101_000106_ingress_tls_policy;
+mod m20240101_000106_tunnel_sessions;
 mod m20240101_000107_enable_site_ingress;
 mod m20240101_000108_site_listeners;
 mod m20240101_000109_static_drafts;
@@ -124,6 +126,7 @@ mod m20240101_000115_dynamic_pages;
 mod m20240101_000116_dynamic_review;
 mod m20240101_000117_listener_tls;
 mod m20240101_000118_panel_listeners;
+mod m20240101_000119_tunnel_listener_error;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -252,7 +255,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000104_site_ingress::Migration),
             Box::new(m20240101_000104_site_ssl_self_signed_backfill::Migration),
             Box::new(m20240101_000105_managed_config_order::Migration),
+            Box::new(m20240101_000105_tunnel_connectors::Migration),
             Box::new(m20240101_000106_ingress_tls_policy::Migration),
+            Box::new(m20240101_000106_tunnel_sessions::Migration),
             Box::new(m20240101_000107_enable_site_ingress::Migration),
             Box::new(m20240101_000108_site_listeners::Migration),
             Box::new(m20240101_000109_static_drafts::Migration),
@@ -265,6 +270,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000116_dynamic_review::Migration),
             Box::new(m20240101_000117_listener_tls::Migration),
             Box::new(m20240101_000118_panel_listeners::Migration),
+            Box::new(m20240101_000119_tunnel_listener_error::Migration),
         ]
     }
 }
@@ -276,7 +282,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 119);
+        assert_eq!(migrations.len(), 122);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

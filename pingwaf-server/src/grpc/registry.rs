@@ -167,6 +167,10 @@ fn repush_cooldown(repushes: u32) -> Duration {
 
 fn validated_ingress(report: &IngressListeners) -> Option<IngressListeners> {
     if let Some(panel) = &report.panel {
+        if panel.infrastructure_ports.len() > MAX_INGRESS_LISTENERS ||
+            panel.infrastructure_ports.iter().any(|port| !(1..=65535).contains(port)) {
+            return None;
+        }
         if panel.sockets.len() > MAX_INGRESS_LISTENERS || !(0..=panel.desired_generation).contains(&panel.applied_generation)
             || panel.policy_revision < -1 { return None; }
         let mut states = HashMap::new();

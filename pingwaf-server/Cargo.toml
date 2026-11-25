@@ -8,6 +8,9 @@ license = "Apache-2.0"
 [dependencies]
 regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
 pingwaf-proto = { path = "../pingwaf-proto" }
+# Target normalization and the credential digest are the tunnel crate's, so the
+# control plane and the data plane agree on exactly one implementation.
+pingwaf-tunnel = { workspace = true }
 # The control plane validates the built-in rule expressions with the same
 # parser the data plane evaluates them with.
 pingwaf-waf = { path = "../pingwaf-waf" }
@@ -32,6 +35,8 @@ chrono = { workspace = true }
 # Drives the provider response streams and the SSE chat endpoint.
 futures-util = { workspace = true }
 hex = { workspace = true }
+# 32-byte pairing tokens and connector credentials.
+rand = { workspace = true }
 # HMAC-SHA256 signing of DingTalk webhook payloads.
 hmac = { workspace = true }
 # AES-256-GCM at-rest sealing of notification channel secrets.

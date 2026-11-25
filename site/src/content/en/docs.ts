@@ -4,11 +4,11 @@ const docs = {
   meta: {
     title: "Documentation — PingWAF",
     description:
-      "Architecture, deployment, the WAF engine and the REST/gRPC API: the six documents you need to run PingWAF in production.",
+      "Architecture, deployment, the WAF engine and the REST/gRPC API: the seven documents you need to run PingWAF in production.",
   },
   hero: {
     eyebrow: "Documentation",
-    title: "The six documents that explain PingWAF",
+    title: "The seven documents that explain PingWAF",
     lead: "Start with the architecture if you are evaluating, deployment if you are installing, and the WAF engine if you are tuning rules.",
   },
   cards: [
@@ -27,6 +27,14 @@ const docs = {
       lead: "All-in-one versus distributed, Docker and systemd, ports, configuration precedence.",
       minutes: 10,
       topics: ["docker", "systemd", "ports", "environment"],
+    },
+    {
+      slug: "tunnel",
+      icon: "route",
+      title: "Tunnels",
+      lead: "Serve an internal service through the WAF without an inbound port: pairing, the edge listener, pool binding, SOCKS5 egress and operations.",
+      minutes: 12,
+      topics: ['pairing', 'edge listener', 'SOCKS5', 'NAT'],
     },
     {
       slug: "waf-engine",

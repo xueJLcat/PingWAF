@@ -11,7 +11,7 @@ use sea_orm::{ConnectionTrait, DbErr, Statement, Value as DbValue};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub const SNAPSHOT_SCHEMA: i64 = 3;
+pub const SNAPSHOT_SCHEMA: i64 = 4;
 pub const INSTANCE_SETTING_KEYS: [&str; 3] =
     ["notification_settings", "login_security", "passkey_enabled"];
 
@@ -235,6 +235,15 @@ pub static GLOBAL_TABLES: &[TableSpec] = &[
         order: "id",
         secrets: &[],
     },
+    TableSpec {
+        name: "tunnel_settings",
+        scopes: GD,
+        filter: Filter::Singleton,
+        layer: 1,
+        key: Some("id"),
+        order: "id",
+        secrets: &[],
+    },
     global("error_pages", "status_code"),
 ];
 
@@ -288,6 +297,14 @@ pub static DEPLOYMENT_ONLY_TABLES: &[TableSpec] = &[
         key: Some("key"),
         order: "key",
         secrets: &[],
+    },
+    // The credential and the pairing token are only ever stored as digests,
+    // but they are still credential material: a restore brings the connector
+    // back without a re-pair, and a backup dump must not carry them in clear
+    // (they are hashes, so the secret is not recoverable either way).
+    TableSpec {
+        secrets: &["credential_sha256", "pairing_token_hash"],
+        ..deployment("tunnel_connectors", 1, "id")
     },
 ];
 
@@ -552,14 +569,16 @@ mod tests {
         assert_eq!(SITE_TABLES.len(), 26);
         // log_retention_settings moved from deployment-only to global: the
         // static-asset access-log filter rides inside every rule bundle.
-        assert_eq!(GLOBAL_TABLES.len(), 5);
-        assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 11);
-        assert_eq!(tables_for(VersionScope::Deployment).len(), 42);
+        // tunnel_settings joins the global singletons for the same reason:
+        // the limits ride inside every bundle.
+        assert_eq!(GLOBAL_TABLES.len(), 6);
+        assert_eq!(DEPLOYMENT_ONLY_TABLES.len(), 12);
+        assert_eq!(tables_for(VersionScope::Deployment).len(), 44);
         let names: BTreeSet<_> = tables_for(VersionScope::Deployment)
             .into_iter()
             .map(|table| table.name)
             .collect();
-        assert_eq!(names.len(), 42, "table names must be unique");
+        assert_eq!(names.len(), 44, "table names must be unique");
     }
 
     #[test]

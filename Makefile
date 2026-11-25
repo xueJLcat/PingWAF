@@ -180,6 +180,13 @@ release-rustls-full:
 	ls -lh target/release
 
 
+# The standalone tunnel connector: the binary installed inside a private
+# network (`install.sh --mode tunnel`). It has no TLS-backend feature matrix of
+# its own — it always speaks rustls — so no `--features` is needed.
+release-tunnel:
+	cargo build --release -p pingwaf-tunnel --bin pingwaf-tunnel
+	ls -lh target/release/pingwaf-tunnel
+
 release-all:
 	cargo build --release --features=full
 	mv target/release/pingwaf target/release/pingwaf-full

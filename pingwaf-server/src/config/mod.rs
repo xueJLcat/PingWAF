@@ -156,6 +156,9 @@ fn default_tls_sans() -> Vec<String> {
 /// Runtime configuration of the PingWAF control plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Set by the all-in-one process after resolving its embedded tunnel listener.
+    #[serde(skip)]
+    pub embedded_tunnel_port: Option<u16>,
     /// PostgreSQL connection string, e.g.
     /// `postgres://user:pass@host:5432/pingwaf`.
     #[serde(default = "default_db_url")]
@@ -282,6 +285,7 @@ impl Default for ServerConfig {
         Self {
             db_url: DEFAULT_DB_URL.to_string(),
             http_addr: DEFAULT_HTTP_ADDR.to_string(),
+            embedded_tunnel_port: None,
             grpc_addr: DEFAULT_GRPC_ADDR.to_string(),
             grpc_tls_cert: None,
             grpc_tls_key: None,
@@ -323,6 +327,7 @@ impl ServerConfig {
                 || host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))){
             ports.push(url.port().unwrap_or(5432));
         }
+        ports.extend(self.embedded_tunnel_port);
         ports.retain(|port| *port != 0);
         ports.sort_unstable();
         ports.dedup();

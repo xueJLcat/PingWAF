@@ -389,20 +389,8 @@ pub(crate) async fn agent_may_touch_site(
     let Some(row) = agent::Entity::find_by_id(agent_id).one(db).await? else {
         return Ok(false);
     };
-    if row.site_scope == "selected" {
-        return Ok(agent_sites::Entity::find()
-            .filter(agent_sites::Column::AgentId.eq(agent_id))
-            .filter(agent_sites::Column::SiteId.eq(site_id))
-            .one(db)
-            .await?
-            .is_some());
-    }
-    match row.site_id {
-        Some(bound) => Ok(bound == site_id),
-        // A global agent sees every site that exists; a stale id in an agent
-        // report is not a site at all, so it is refused.
-        None => Ok(site::Entity::find_by_id(site_id).one(db).await?.is_some()),
-    }
+    Ok(crate::grpc::agent_site_query(&row).filter(site::Column::Id.eq(site_id))
+        .one(db).await?.is_some())
 }
 
 /// The agents a purge for `site_id` may be sent to (D09).

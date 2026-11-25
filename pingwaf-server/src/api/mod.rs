@@ -55,6 +55,7 @@ pub mod ssl;
 pub mod state;
 pub mod system;
 pub mod system_tls;
+pub mod tunnels;
 pub mod upgrade;
 pub mod users;
 pub(crate) mod validation;
@@ -196,6 +197,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(users::routes())
         .merge(visitors::routes())
         .merge(agents::routes())
+        .merge(tunnels::routes())
         .merge(upgrade::routes())
         .merge(rules::routes())
         .merge(rate_limiting::routes())

@@ -6,15 +6,23 @@
 #   curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | bash -s -- --mode agent --server-url https://... --api-key pwk_...
 #   ./install.sh                     # interactive prompts (needs a terminal)
-#   ./install.sh [--version X.Y.Z] [--mode all-in-one|server|agent]
+#   ./install.sh [--version X.Y.Z] [--mode all-in-one|server|agent|tunnel]
 #
 # Options:
 #   --version         Install a specific version (default: latest)
-#   --mode            Operating mode: all-in-one, server, agent (default: all-in-one)
-#                     Agent mode installs the agent-only build (no control plane
-#                     or dashboard) as /usr/local/bin/pingwaf
+#   --mode            Operating mode: all-in-one, server, agent, tunnel
+#                     (default: all-in-one). Agent mode installs the agent-only
+#                     build (no control plane or dashboard) as
+#                     /usr/local/bin/pingwaf; tunnel mode installs the tunnel
+#                     connector as /usr/local/bin/pingwaf-tunnel
 #   --server-url      Control plane gRPC URL (agent mode)
 #   --api-key         Agent enrollment token (agent mode)
+#   --token           One-time tunnel pairing token (tunnel mode), shown in the
+#                     console's Edge Agents -> Tunnels tab
+#   --token-file      Read the pairing token from a file instead (keeps it out
+#                     of the process list)
+#   --socks5-proxy    Reach the control plane and the edge ingresses through a
+#                     SOCKS5 proxy (a host with no direct egress)
 #   --admin-email     Seed administrator e-mail (server / all-in-one)
 #   --admin-password  Seed administrator password (omit to generate a random one)
 #   --tls-sans        Comma separated names of the dashboard certificate
@@ -206,6 +214,12 @@ SERVER_URL=""
 SERVER_CA_CERT=""
 SERVER_TLS_NAME=""
 API_KEY=""
+# One-time tunnel pairing token (tunnel mode). Never echoed back.
+TUNNEL_TOKEN=""
+TUNNEL_TOKEN_FILE=""
+SOCKS5_PROXY=""
+SOCKS5_USERNAME=""
+SOCKS5_PASSWORD=""
 ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
 TLS_SANS=""
@@ -237,10 +251,12 @@ Pass options through the pipe with: bash -s -- <options>
 
 Options:
   --version VERSION        Install a specific version (default: latest release)
-  --mode MODE              Operating mode: all-in-one, server, agent.
+  --mode MODE              Operating mode: all-in-one, server, agent, tunnel.
                            Agent mode downloads the agent-only build
                            (pingwaf-agent) and installs it as
-                           /usr/local/bin/pingwaf.
+                           /usr/local/bin/pingwaf. Tunnel mode installs the
+                           tunnel connector as /usr/local/bin/pingwaf-tunnel
+                           and pairs it with --token.
   --server-url URL         Control plane gRPC URL (agent mode)
   --server-ca-cert PATH    PEM file with the CA that signed the control plane's
                            gRPC certificate (agent mode, https)
@@ -248,6 +264,13 @@ Options:
                            the certificate has no SAN for the URL host (agent
                            mode, requires a release that knows the flag)
   --api-key KEY            Agent enrollment token (agent mode)
+  --token TOKEN            One-time tunnel pairing token (tunnel mode)
+  --token-file PATH        Read the pairing token from a file instead of
+                           --token (keeps it out of `ps`)
+  --socks5-proxy ADDR      SOCKS5 proxy for a host with no direct egress
+                           (`host:port` or `socks5://user:pass@host:port`)
+  --socks5-username USER   SOCKS5 username (wins over embedded userinfo)
+  --socks5-password PASS   SOCKS5 password (prefer PINGWAF_TUNNEL_SOCKS5_PASSWORD)
   --db-url URL             PostgreSQL connection string
   --admin-email EMAIL      Seed administrator e-mail (server / all-in-one)
   --admin-password PASS    Seed administrator password. When omitted (and no
@@ -322,6 +345,11 @@ while [[ $# -gt 0 ]]; do
         --server-ca-cert) require_value "$1" "${2:-}"; SERVER_CA_CERT="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --server-tls-name) require_value "$1" "${2:-}"; SERVER_TLS_NAME="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --api-key)        require_value "$1" "${2:-}"; API_KEY="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --token)          require_value "$1" "${2:-}"; TUNNEL_TOKEN="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --token-file)     require_value "$1" "${2:-}"; TUNNEL_TOKEN_FILE="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --socks5-proxy)   require_value "$1" "${2:-}"; SOCKS5_PROXY="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --socks5-username) require_value "$1" "${2:-}"; SOCKS5_USERNAME="$2"; PARAMS_GIVEN=true; shift 2 ;;
+        --socks5-password) require_value "$1" "${2:-}"; SOCKS5_PASSWORD="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --admin-email)    require_value "$1" "${2:-}"; ADMIN_EMAIL="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --admin-password) require_value "$1" "${2:-}"; ADMIN_PASSWORD="$2"; PARAMS_GIVEN=true; shift 2 ;;
         --tls-sans)       require_value "$1" "${2:-}"; TLS_SANS="$2"; PARAMS_GIVEN=true; shift 2 ;;
@@ -346,6 +374,11 @@ SERVER_URL="${SERVER_URL:-${PINGWAF_SERVER_URL:-}}"
 SERVER_CA_CERT="${SERVER_CA_CERT:-${PINGWAF_SERVER_CA_CERT:-}}"
 SERVER_TLS_NAME="${SERVER_TLS_NAME:-${PINGWAF_SERVER_TLS_NAME:-}}"
 API_KEY="${API_KEY:-${PINGWAF_API_KEY:-}}"
+TUNNEL_TOKEN="${TUNNEL_TOKEN:-${PINGWAF_TUNNEL_TOKEN:-}}"
+TUNNEL_TOKEN_FILE="${TUNNEL_TOKEN_FILE:-${PINGWAF_TUNNEL_TOKEN_FILE:-}}"
+SOCKS5_PROXY="${SOCKS5_PROXY:-${PINGWAF_TUNNEL_SOCKS5_PROXY:-}}"
+SOCKS5_USERNAME="${SOCKS5_USERNAME:-${PINGWAF_TUNNEL_SOCKS5_USERNAME:-}}"
+SOCKS5_PASSWORD="${SOCKS5_PASSWORD:-${PINGWAF_TUNNEL_SOCKS5_PASSWORD:-}}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-${PINGWAF_ADMIN_EMAIL:-}}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-${PINGWAF_ADMIN_PASSWORD:-}}"
 TLS_SANS="${TLS_SANS:-${PINGWAF_TLS_SANS:-}}"
@@ -359,7 +392,7 @@ fi
 if [[ "$VERSION" == "latest" ]]; then VERSION=""; fi
 
 if [[ "$LISTEN_PUBLIC" == "true" ]]; then PARAMS_GIVEN=true; fi
-if [[ -n "$VERSION$MODE$DB_URL$SERVER_URL$SERVER_CA_CERT$SERVER_TLS_NAME$API_KEY$ADMIN_EMAIL$ADMIN_PASSWORD$TLS_SANS" ]]; then
+if [[ -n "$VERSION$MODE$DB_URL$SERVER_URL$SERVER_CA_CERT$SERVER_TLS_NAME$API_KEY$TUNNEL_TOKEN$TUNNEL_TOKEN_FILE$SOCKS5_PROXY$ADMIN_EMAIL$ADMIN_PASSWORD$TLS_SANS" ]]; then
     PARAMS_GIVEN=true
 fi
 
@@ -428,7 +461,8 @@ validate_mode_input() {
         1) REPLY="all-in-one" ;;
         2) REPLY="server" ;;
         3) REPLY="agent" ;;
-        all-in-one|server|agent) ;;
+        4) REPLY="tunnel" ;;
+        all-in-one|server|agent|tunnel) ;;
         *) return 1 ;;
     esac
     return 0
@@ -564,6 +598,9 @@ validate_install_values() {
     reject_control_chars "--server-ca-cert" "$SERVER_CA_CERT"
     reject_control_chars "--server-tls-name" "$SERVER_TLS_NAME"
     reject_control_chars "--api-key" "$API_KEY"
+    reject_control_chars "--token" "$TUNNEL_TOKEN"
+    reject_control_chars "--token-file" "$TUNNEL_TOKEN_FILE"
+    reject_control_chars "--socks5-proxy" "$SOCKS5_PROXY"
     reject_control_chars "--admin-email" "$ADMIN_EMAIL"
     reject_control_chars "--admin-password" "$ADMIN_PASSWORD"
     reject_control_chars "--tls-sans" "$TLS_SANS"
@@ -606,11 +643,11 @@ mask_db_url() {
 # other modes share the full binary. Kept as a function so the dry-run summary
 # (which runs before the final mode validation) and the download agree.
 asset_prefix() {
-    if [[ "${1:-}" == "agent" ]]; then
-        printf 'pingwaf-agent'
-    else
-        printf 'pingwaf'
-    fi
+    case "${1:-}" in
+        agent) printf 'pingwaf-agent' ;;
+        tunnel) printf 'pingwaf-tunnel' ;;
+        *) printf 'pingwaf' ;;
+    esac
 }
 
 print_plan_summary() {
@@ -648,10 +685,29 @@ print_plan_summary() {
         mem_eager="$(allocator_eager_commit_for "$mem_ceiling")"
         echo "  malloc:      arena_reserve=$((mem_reserve / 1048576))MiB eager_commit=${mem_eager} (ceiling=$(( ${mem_ceiling:-0} / 1048576 ))MiB)"
     fi
-    echo "  config:      ${CONFIG_DIR}/pingwaf.toml"
+    if [[ "${MODE:-}" == "tunnel" ]]; then
+        echo "  config:      ${CONFIG_DIR}/tunnel.toml"
+    else
+        echo "  config:      ${CONFIG_DIR}/pingwaf.toml"
+    fi
     echo "  data:        ${DATA_DIR}"
     echo "  systemd:     ${systemd_state}"
-    if [[ "${MODE:-all-in-one}" == "agent" ]]; then
+    if [[ "${MODE:-all-in-one}" == "tunnel" ]]; then
+        echo "  control:     ${SERVER_URL}"
+        if [[ -n "$SERVER_CA_CERT" ]]; then
+            echo "  control CA:  ${SERVER_CA_CERT} -> ${CONFIG_DIR}/tunnel-ca.pem"
+        else
+            echo "  control CA:  none (bundled webpki roots)"
+        fi
+        echo "  tls name:    ${SERVER_TLS_NAME:-URL host}"
+        echo "  socks5:      ${SOCKS5_PROXY:-none (direct egress)}"
+        if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
+            echo "  token:       from ${TUNNEL_TOKEN_FILE}"
+        else
+            echo "  token:       set (${#TUNNEL_TOKEN} chars)"
+        fi
+        echo "  service:     ${SERVICE_NAME}"
+    elif [[ "${MODE:-all-in-one}" == "agent" ]]; then
         echo "  control:     ${SERVER_URL}"
         if [[ -n "$SERVER_CA_CERT" ]]; then
             echo "  control CA:  ${SERVER_CA_CERT} -> ${CONFIG_DIR}/grpc-ca.pem"
@@ -685,8 +741,9 @@ run_interactive_prompts() {
     echo "  1) all-in-one  control plane and agent in one process (needs PostgreSQL)"
     echo "  2) server      control plane only"
     echo "  3) agent       data-plane node, connects to a control plane"
+    echo "  4) tunnel      tunnel connector for a service inside a private network"
     echo ""
-    prompt_until "Mode [1-3 or name]" "all-in-one" false validate_mode_input
+    prompt_until "Mode [1-4 or name]" "all-in-one" false validate_mode_input
     MODE="$REPLY"
 
     if [[ "$MODE" == "agent" ]]; then
@@ -752,9 +809,17 @@ TLS_SANS="${TLS_SANS// /}"
 
 # Validate mode
 case "$MODE" in
-    all-in-one|server|agent) ;;
-    *) fatal "Invalid mode: $MODE (must be: all-in-one, server, agent)" ;;
+    all-in-one|server|agent|tunnel) ;;
+    *) fatal "Invalid mode: $MODE (must be: all-in-one, server, agent, tunnel)" ;;
 esac
+
+# The tunnel connector is its own binary with its own unit and config: it
+# serves no sites, holds no database and must not replace the data-plane
+# binary an edge already runs.
+if [[ "$MODE" == "tunnel" ]]; then
+    BINARY_NAME="pingwaf-tunnel"
+    SERVICE_NAME="pingwaf-tunnel"
+fi
 
 # Agent mode installs the data-plane-only build; the binary keeps the name
 # `pingwaf` on disk so the unit and upgrade path do not change.
@@ -763,11 +828,17 @@ ARCHIVE_BINARY="$ASSET_PREFIX"
 
 validate_install_values
 
-# Agents talk to the control plane, never to PostgreSQL.
-if [[ "$MODE" == "agent" ]]; then
+# Agents and tunnel connectors talk to the control plane, never to PostgreSQL.
+if [[ "$MODE" == "agent" || "$MODE" == "tunnel" ]]; then
     SERVER_URL="${SERVER_URL:-http://127.0.0.1:9090}"
-    if [[ -z "$API_KEY" ]]; then
+    if [[ "$MODE" == "agent" && -z "$API_KEY" ]]; then
         warn "No --api-key given: start the agent with PINGWAF_API_KEY set, or it cannot register."
+    fi
+    if [[ "$MODE" == "tunnel" && -z "$TUNNEL_TOKEN" && -z "$TUNNEL_TOKEN_FILE" ]]; then
+        fatal "--mode tunnel needs --token (or --token-file): the one-time pairing token from Edge Agents -> Tunnels."
+    fi
+    if [[ -n "$TUNNEL_TOKEN_FILE" && ! -r "$TUNNEL_TOKEN_FILE" ]]; then
+        fatal "--token-file ${TUNNEL_TOKEN_FILE} is not readable."
     fi
     # Schemes are case-insensitive; `HTTP://` must not slip past the warning.
     # `tr` rather than `${var,,}`: macOS ships bash 3.2, which lacks it.
@@ -1046,7 +1117,154 @@ else
     fatal "No write permission to ${INSTALL_DIR} and sudo not available."
 fi
 
+# Installs the tunnel connector: pairs it with the control plane and registers
+# it as its own unit. Nothing here touches PostgreSQL, the dashboard or the
+# data-plane binary an edge already runs.
+install_tunnel_connector() {
+    local cmd="" config_file="${CONFIG_DIR}/tunnel.toml"
+    local ca_dest="${CONFIG_DIR}/tunnel-ca.pem"
+    if [[ -w "/" ]]; then
+        cmd=""
+    elif has sudo; then
+        cmd="sudo"
+    else
+        fatal "Cannot write ${CONFIG_DIR} without sudo."
+    fi
+    $cmd mkdir -p "$CONFIG_DIR" "${DATA_DIR}/tunnel"
+    if [[ "$OS" == "linux" ]] && ! id -u pingwaf >/dev/null 2>&1; then
+        $cmd useradd -r -m -d "$DATA_DIR" -s /usr/sbin/nologin pingwaf 2>/dev/null || true
+    fi
+    if [[ "$OS" == "linux" ]]; then
+        $cmd chown -R pingwaf:pingwaf "${DATA_DIR}/tunnel" 2>/dev/null || true
+        $cmd chmod 0750 "${DATA_DIR}/tunnel" 2>/dev/null || true
+    fi
+
+    # The control-plane CA, if one was supplied, is copied to a durable path:
+    # the pairing command references it and the unit must keep working after
+    # the operator's download directory is gone.
+    local ca_args=()
+    if [[ -n "$SERVER_CA_CERT" ]]; then
+        $cmd cp "$SERVER_CA_CERT" "$ca_dest" || fatal "Could not copy ${SERVER_CA_CERT} to ${ca_dest}."
+        $cmd chmod 0644 "$ca_dest" 2>/dev/null || true
+        ca_args=(--server-ca-cert "$ca_dest")
+    fi
+    local tls_args=()
+    if [[ -n "$SERVER_TLS_NAME" ]]; then
+        tls_args=(--server-tls-name "$SERVER_TLS_NAME")
+    fi
+
+    info "Pairing the tunnel connector with ${SERVER_URL}..."
+    # The token is on the command line because it is a one-time secret the
+    # operator just pasted; it is redeemed immediately and never stored (the
+    # long-lived credential it returns goes into the 0600 config file).
+    local token_args=(--token "$TUNNEL_TOKEN")
+    if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
+        token_args=(--token-file "$TUNNEL_TOKEN_FILE")
+    fi
+    local proxy_args=()
+    if [[ -n "$SOCKS5_PROXY" ]]; then
+        proxy_args=(--socks5-proxy "$SOCKS5_PROXY")
+        [[ -n "$SOCKS5_USERNAME" ]] && proxy_args+=(--socks5-username "$SOCKS5_USERNAME")
+        # The password is not echoed: it is already on this command line only
+        # because the operator passed it, and it is written to the 0600 config.
+        [[ -n "$SOCKS5_PASSWORD" ]] && proxy_args+=(--socks5-password "$SOCKS5_PASSWORD")
+    fi
+    if ! $cmd "${INSTALL_DIR}/${BINARY_NAME}" pair \
+        --config "$config_file" \
+        ${token_args[@]+"${token_args[@]}"} \
+        ${proxy_args[@]+"${proxy_args[@]}"} \
+        --server-url "$SERVER_URL" \
+        ${ca_args[@]+"${ca_args[@]}"} \
+        ${tls_args[@]+"${tls_args[@]}"}; then
+        fatal "Pairing failed. Check --server-url/--server-ca-cert, and mint a fresh token in Edge Agents -> Tunnels."
+    fi
+    $cmd chown root:pingwaf "$config_file" 2>/dev/null || true
+    $cmd chmod 0640 "$config_file" 2>/dev/null || true
+    success "Paired; configuration written to ${config_file}"
+
+    if [[ "$SKIP_SYSTEMD" == "true" ]]; then
+        info "Skipping the systemd unit (--no-systemd)."
+    elif [[ "$OS" != "linux" ]]; then
+        info "Not Linux — run it with: ${INSTALL_DIR}/${BINARY_NAME} run --config ${config_file}"
+    elif ! has systemctl; then
+        warn "systemctl not found — run it with: ${INSTALL_DIR}/${BINARY_NAME} run --config ${config_file}"
+    else
+        local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+        info "Creating systemd service ${SERVICE_NAME}..."
+        (umask 077; $cmd tee "$service_file" >/dev/null <<EOF
+[Unit]
+Description=PingWAF tunnel connector
+Documentation=https://github.com/${REPO}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pingwaf
+Group=pingwaf
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} run --config ${config_file}
+# The connector retries network and control-plane failures internally, so it
+# only exits when it was revoked or told to stop. `on-failure` keeps a revoked
+# connector stopped instead of restart-looping against a dead credential.
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# The connector only dials out and needs no privilege of its own.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${DATA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+        $cmd systemctl daemon-reload
+        # `restart` rather than `enable --now`: a re-run pairs a NEW credential,
+        # and an already-running unit would keep using the old one (the config
+        # file is only read at startup) until someone restarted it by hand.
+        if $cmd systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 \
+            && $cmd systemctl restart "$SERVICE_NAME"; then
+            success "Service ${SERVICE_NAME} is running"
+        else
+            warn "Could not start ${SERVICE_NAME}; check: journalctl -u ${SERVICE_NAME} -n 50"
+        fi
+    fi
+
+    echo ""
+    echo "${BOLD}Tunnel connector installed${NO_COLOR}"
+    echo "  Binary:   ${INSTALL_DIR}/${BINARY_NAME}"
+    echo "  Config:   ${config_file}"
+    echo "  Control:  ${SERVER_URL}"
+    echo "  Socks5:   ${SOCKS5_PROXY:-none}"
+    echo "  Status:   ${INSTALL_DIR}/${BINARY_NAME} status --config ${config_file}"
+    if [[ "$OS" == "linux" && "$SKIP_SYSTEMD" != "true" ]]; then
+        echo "  Logs:     journalctl -u ${SERVICE_NAME} -f"
+    fi
+    echo ""
+    if grep -q '^\[\[ingress\]\]' "$config_file" 2>/dev/null; then
+        echo "  Ingress endpoints were advertised by the control plane."
+    else
+        echo "  ${YELLOW}! No ingress endpoint was advertised.${NO_COLOR}"
+        echo "    On the edge that should terminate this tunnel: set"
+        echo "    agent.tunnel_addr (e.g. 0.0.0.0:9443) and firewall the port, then"
+        echo "    fill in that node's Tunnel ingress address in the console"
+        echo "    (Agents -> [node] -> Tunnel ingress) and restart the connector:"
+        echo "      sudo systemctl restart ${SERVICE_NAME}"
+    fi
+    echo ""
+    echo "  Next: bind an origin pool to this tunnel in the site's origin pool"
+    echo "  settings; until then it advertises no targets."
+    echo ""
+}
+
 success "Binary installed: ${INSTALL_DIR}/${BINARY_NAME}"
+
+if [[ "$MODE" == "tunnel" ]]; then
+    install_tunnel_connector
+    exit 0
+fi
 
 # ─── Create Directories ───────────────────────────────────────────────────────
 create_dirs() {

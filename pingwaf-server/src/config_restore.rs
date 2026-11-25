@@ -512,6 +512,7 @@ async fn validate_references<C: ConnectionTrait>(
                 // restored scope. Dangling grants are swept in
                 // `delete_rows` instead.
                 "rules" => refs.push(("group_id", "rule_groups")),
+                "site_upstream_pools" => refs.push(("tunnel_id", "tunnel_connectors")),
                 "site_upstreams" => {
                     refs.push(("pool_id", "site_upstream_pools"))
                 },
@@ -1064,7 +1065,11 @@ async fn prepare_restore_inner<C: ConnectionTrait>(
     if scope == VersionScope::Deployment && schema >= 2 {
         let missing: Vec<_> = tables_for(scope)
             .into_iter()
-            .filter(|spec| schema >= 3 || !matches!(spec.name, "node_listener_policies" | "node_listener_overrides"))
+            .filter(|spec| match spec.name {
+                "node_listener_policies" | "node_listener_overrides" => schema >= 3,
+                "tunnel_settings" | "tunnel_connectors" => schema >= 4,
+                _ => true,
+            })
             .filter(|spec| !tables.contains_key(spec.name))
             .map(|spec| spec.name)
             .collect();

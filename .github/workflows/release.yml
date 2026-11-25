@@ -9,6 +9,8 @@ name: Release
 #   pingwaf-linux-arm64.tar.xz  pingwaf-linux-arm64.tar.gz
 #   pingwaf-agent-linux-amd64.tar.xz  pingwaf-agent-linux-amd64.tar.gz
 #   pingwaf-agent-linux-arm64.tar.xz  pingwaf-agent-linux-arm64.tar.gz
+#   pingwaf-tunnel-linux-amd64.tar.xz  pingwaf-tunnel-linux-amd64.tar.gz
+#   pingwaf-tunnel-linux-arm64.tar.xz  pingwaf-tunnel-linux-arm64.tar.gz
 # The `pingwaf-agent` archives carry the agent-only build (`--bin
 # pingwaf-agent --features tracing,edge`): the data plane without PostgreSQL,
 # the REST API or the embedded dashboard. `install.sh --mode agent` prefers
@@ -321,6 +323,36 @@ jobs:
           ls -lh "$ASSET.tar.xz" "$ASSET.tar.gz" \
                  "$ASSET.tar.xz.sha256" "$ASSET.tar.gz.sha256"
 
+      # The tunnel connector: the only piece installed inside a private
+      # network, and the only one that needs neither the data plane nor the
+      # control plane. `install.sh --mode tunnel` downloads this archive.
+      - name: Build and package pingwaf-tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p pingwaf-tunnel --bin pingwaf-tunnel --target ${{ matrix.target }}
+          ls -lh "target/${{ matrix.target }}/release/pingwaf-tunnel"
+
+          ASSET="pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}"
+          rm -rf "$ASSET" "$ASSET.tar.xz" "$ASSET.tar.gz" \
+                 "$ASSET.tar.xz.sha256" "$ASSET.tar.gz.sha256"
+          mkdir -p "$ASSET"
+          cp "target/${{ matrix.target }}/release/pingwaf-tunnel" "$ASSET/pingwaf-tunnel"
+          cp LICENSE "$ASSET/"
+          cp pingwaf-tunnel/README.md "$ASSET/" 2>/dev/null || true
+          chmod +x "$ASSET/pingwaf-tunnel"
+          tar -cJf "$ASSET.tar.xz" "$ASSET"
+          tar -czf "$ASSET.tar.gz" "$ASSET"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
+            sha256sum "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          else
+            shasum -a 256 "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
+            shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          fi
+          ls -lh "$ASSET.tar.xz" "$ASSET.tar.gz" \
+                 "$ASSET.tar.xz.sha256" "$ASSET.tar.gz.sha256"
+
       # SBOM for the source tree that produced the archive. `dir:` (not the
       # tarball) is deliberate: syft's `dir:` source cannot scan a single file,
       # and scanning the repository's Cargo.lock gives a dependency inventory
@@ -345,6 +377,8 @@ jobs:
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
             pingwaf-agent-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
             pingwaf-agent-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
+            pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
+            pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -370,6 +404,10 @@ jobs:
             pingwaf-agent-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz.sha256
             pingwaf-agent-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
             pingwaf-agent-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz.sha256
+            pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
+            pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz.sha256
+            pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
+            pingwaf-tunnel-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz.sha256
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.spdx.json
 
   docker:

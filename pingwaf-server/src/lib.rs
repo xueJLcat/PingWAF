@@ -34,6 +34,8 @@ pub mod pki;
 pub mod site_cert;
 pub mod subscription;
 pub mod tls;
+pub mod tunnel_policy;
+pub mod tunnel_token;
 
 pub use config::ServerConfig;
 
@@ -173,6 +175,7 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
 
     // ── 3b. Pin the JWT secret for the life of the instance ────────────────
     resolve_jwt_secret(&db, &mut config).await?;
+    crate::tunnel_token::init(&config.jwt_secret);
 
     // ── 4. Seed default admin ────────────────────────────────────────────────
     seed_admin(&db, &config).await?;

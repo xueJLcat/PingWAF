@@ -240,6 +240,12 @@ pub struct AgentOpts {
     )]
     pub fail_open: bool,
 
+    /// Address the tunnel listener binds (`0.0.0.0:9443`); empty disables it.
+    /// A connector reaches this address out of the private network, so it is
+    /// only enabled on an edge that is meant to be a tunnel ingress.
+    #[arg(long, env = "PINGWAF_TUNNEL_ADDR", default_value = "")]
+    pub tunnel_addr: String,
+
     /// Heartbeat interval in seconds
     #[arg(long, env = "PINGWAF_HEARTBEAT_INTERVAL", default_value = "30")]
     pub heartbeat_interval_secs: u64,
@@ -352,6 +358,12 @@ pub struct AllInOneOpts {
         action = clap::ArgAction::Set
     )]
     pub fail_open: bool,
+
+    /// Address the tunnel listener binds (`0.0.0.0:9443`); empty disables it.
+    /// A connector reaches this address out of the private network, so it is
+    /// only enabled on an edge that is meant to be a tunnel ingress.
+    #[arg(long, env = "PINGWAF_TUNNEL_ADDR", default_value = "")]
+    pub tunnel_addr: String,
 
     /// Heartbeat interval in seconds
     #[arg(long, env = "PINGWAF_HEARTBEAT_INTERVAL", default_value = "30")]

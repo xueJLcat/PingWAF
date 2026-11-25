@@ -4,7 +4,7 @@ const docs = {
   meta: {
     title: "ドキュメント — PingWAF",
     description:
-      "アーキテクチャ、デプロイ、WAF エンジン、REST/gRPC API。PingWAF を本番運用するための 6 つのドキュメント。",
+      "アーキテクチャ、デプロイ、WAF エンジン、REST/gRPC API。PingWAF を本番運用するための 7 つのドキュメント。",
   },
   hero: {
     eyebrow: "ドキュメント",
@@ -27,6 +27,14 @@ const docs = {
       lead: "all-in-one と分散構成、Docker と systemd、ポート、設定の優先順位。",
       minutes: 10,
       topics: ["Docker", "systemd", "ポート", "環境変数"],
+    },
+    {
+      slug: "tunnel",
+      icon: "route",
+      title: "トンネル",
+      lead: "受信ポートなしで内部サービスを WAF 経由で公開：ペアリング、エッジのリスナー、プールの紐付け、SOCKS5 経由の外向き接続、運用。",
+      minutes: 12,
+      topics: ['ペアリング', 'エッジ', 'SOCKS5', 'NAT'],
     },
     {
       slug: "waf-engine",

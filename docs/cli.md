@@ -125,6 +125,56 @@ Agent-only options (`agent` / the agent half of `all-in-one`): `--server-url`
 (`PINGWAF_METRICS_SHIP_INTERVAL`, default `30`), plus `--log-batch-size`,
 `--log-flush-interval-secs` and `--max-body-log-size` (command line only).
 
+The connector can reach both the control plane and the edge ingresses through a
+SOCKS5 proxy, for a host with no direct egress: `--socks5-proxy <host:port>`
+(`PINGWAF_TUNNEL_SOCKS5_PROXY`), plus `--socks5-username` /
+`--socks5-password` (prefer `PINGWAF_TUNNEL_SOCKS5_PASSWORD` over the flag, which
+`ps` can read). The same keys live in `/etc/pingwaf/tunnel.toml` as
+`socks5_proxy`, `socks5_username` and `socks5_password`. Target names are
+resolved by the proxy (SOCKS5 ATYP 3), and the handshake has its own timeout.
+
+The tunnel listener is an agent/all-in-one option as well: `--tunnel-addr`
+(`PINGWAF_TUNNEL_ADDR`, default empty = off) binds the address a
+`pingwaf-tunnel` connector dials. Only an edge that terminates tunnels sets it;
+see [user-guide.md](user-guide.md#tunnels-internal-services-without-an-inbound-port).
+
+The standalone connector is its own binary, `pingwaf-tunnel`:
+
+```
+pingwaf-tunnel pair   --token <pairing-token> --server-url https://cp:9090 [--config PATH]
+pingwaf-tunnel run    [--config PATH]
+pingwaf-tunnel status [--config PATH]
+```
+
+`pair` redeems the one-time token (from **Agents → Tunnels**) for a long-lived
+credential and writes `/etc/pingwaf/tunnel.toml` (`0600`); `run` serves until
+SIGTERM (or until the tunnel is revoked); `status` prints the stored
+configuration plus the live state `run` publishes to
+`/var/lib/pingwaf/tunnel/status.json` — the connected ingress endpoints, the
+targets in force, the SOCKS5 proxy when one is configured, and the last
+revocation reason. `status` never opens a control-plane stream: doing so would
+take the session slot of the connector that is actually serving traffic.
+
+`pair` and `run` take the same global flags; anything not on the command line is
+read from the config file:
+
+| Flag | Env | Meaning |
+| --- | --- | --- |
+| `--config PATH` | — | `tunnel.toml` (default `/etc/pingwaf/tunnel.toml`) |
+| `--token`, `--token-file` | `PINGWAF_TUNNEL_TOKEN`, `PINGWAF_TUNNEL_TOKEN_FILE` | the one-time pairing token |
+| `--server-url` | `PINGWAF_TUNNEL_SERVER_URL` | control-plane gRPC URL (`https://…:9090`) |
+| `--server-ca-cert` | `PINGWAF_TUNNEL_SERVER_CA_CERT` | CA bundle for a self-signed control plane |
+| `--server-tls-name` | `PINGWAF_TUNNEL_SERVER_TLS_NAME` | override the TLS server name |
+| `--ingress` | `PINGWAF_TUNNEL_INGRESS` | pin edge endpoints (`host:port[=sha256],…`) |
+| `--allowed-targets` | `PINGWAF_TUNNEL_ALLOWED_TARGETS` | local allowlist, intersected with the policy |
+| `--socks5-proxy`, `--socks5-username`, `--socks5-password` | `PINGWAF_TUNNEL_SOCKS5_*` | egress through a SOCKS5 proxy |
+
+The config file carries the same keys in snake_case (`server_url`,
+`server_ca_cert`, `server_tls_name`, `ingress`, `allowed_targets`,
+`socks5_proxy`, `socks5_username`, `socks5_password`, plus the `tunnel_id`,
+`credential` and `session_token` that `pair` writes). A malformed value is an
+error, never a silent fallback to a direct dial.
+
 ### Passing secrets safely
 
 `--db-url`, `--api-key`, `--jwt-secret` and `--admin-password` are visible to

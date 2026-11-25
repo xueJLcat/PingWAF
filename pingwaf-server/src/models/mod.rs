@@ -54,6 +54,7 @@ pub mod site_basic_auth;
 pub mod site_oidc;
 pub mod site_visitors;
 pub mod sites;
+pub mod tunnels;
 pub mod users;
 pub mod visitor_auth_states;
 pub mod visitor_passkeys;
@@ -110,6 +111,10 @@ pub use sites::{
     acme_challenge, route_match_type, site_routes, site_ssl, site_status,
     site_upstream_pools, site_upstreams, sites as site, tls_version,
     trusted_header, ResponseReplaceConfig, ResponseReplaceRule,
+};
+pub use tunnels::{
+    tunnel_connectors as tunnel_connector, tunnel_sessions as tunnel_session,
+    tunnel_settings as tunnel_setting, tunnel_status,
 };
 pub use users::{api_keys as api_key, permission, role, users as user};
 pub use visitor_auth_states::visitor_auth_states as visitor_auth_state;

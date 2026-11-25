@@ -260,6 +260,7 @@ pub(super) async fn run(
         if panel.sockets.iter().any(|s| s.listener.as_ref().is_none_or(|l| l.state() != IngressBindState::Bound)) {
             panel.applied_generation = 0;
         }
+        panel.infrastructure_ports = management_ports.iter().copied().map(u32::from).collect();
         report.panel = Some(panel);
         report.listeners = by_port.into_values().collect();
         if previous.as_ref() != Some(&report) {
