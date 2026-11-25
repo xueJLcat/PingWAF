@@ -366,6 +366,7 @@ pub struct ListQuery {
     pub pagination: Pagination,
     pub search: Option<String>,
     pub status: Option<String>,
+    pub ids: Option<String>,
 }
 
 /// Missing keys preserve the current ingress; a pair of nulls clears it.
@@ -1631,6 +1632,16 @@ async fn list(
     let mut condition = Condition::all();
     if !current.is_admin() {
         condition = condition.add(site::Column::UserId.eq(current.id));
+    }
+    if let Some(raw) = &query.ids {
+        let ids: Vec<Uuid> = raw.split(',').take(21)
+            .map(|id| Uuid::parse_str(id.trim()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| ApiError::BadRequest("ids must be a list of site UUIDs".into()))?;
+        if ids.len() > 20 {
+            return Err(ApiError::BadRequest("select at most 20 site IDs per lookup".into()));
+        }
+        condition = condition.add(site::Column::Id.is_in(ids));
     }
     if let Some(status) = non_empty(&query.status) {
         if !site_status::is_valid(&status) {

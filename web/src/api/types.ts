@@ -520,6 +520,7 @@ export interface UpsertSslRequest {
 export interface SiteListQuery extends PaginationQuery {
   search?: string
   status?: string
+  ids?: string
 }
 
 /* ── WAF rule groups & rules ──────────────────────────────────────── */

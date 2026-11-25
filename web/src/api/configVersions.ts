@@ -48,10 +48,11 @@ export const configVersionKeys = {
 }
 
 export const configVersionsApi = {
-  list: (siteId?: string, limit = 100, offset = 0) => {
+  list: (siteId?: string, limit = 100, offset = 0, beforeId?: number) => {
     const params = new URLSearchParams()
     params.set('limit', String(limit))
     params.set('offset', String(offset))
+    if (beforeId !== undefined) params.set('before_id', String(beforeId))
     if (siteId) params.set('site_id', siteId)
     return apiClient.get<ConfigVersionSummary[]>(
       `/config-versions?${params.toString()}`,

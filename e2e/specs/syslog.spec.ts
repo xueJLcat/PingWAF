@@ -6,6 +6,64 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, expect } from '../fixtures/app'
 
+test('remove a deleted site from a paused destination without losing the remaining site', async ({ app }) => {
+  test.skip(process.env.PINGWAF_SMOKE_SYSLOG !== '1', 'Uses disposable sites and destination')
+  const { page } = app
+  const endpoint = app.adminUrl('/log-buffer')
+  const stamp = Date.now()
+  const kept = `syslog-keep-${stamp}.e2e.test`
+  const removed = `syslog-gone-${stamp}.e2e.test`
+  try {
+    const keepId = await app.createSite({ name: kept, domain: kept, upstream: '127.0.0.1:18090' })
+    const goneId = await app.createSite({ name: removed, domain: removed, upstream: '127.0.0.1:18090' })
+    await page.goto(endpoint)
+    await page.getByRole('button', { name: 'Configure forwarding' }).click()
+    await page.getByLabel('Transport', {exact:true}).selectOption('udp')
+    await page.getByLabel('Site scope').selectOption('selected')
+    const search = page.getByLabel('Find sites')
+    for (const domain of [kept, removed]) {
+      await search.fill(domain)
+      await page.getByRole('checkbox', { name: new RegExp(domain.replaceAll('.', '\\.')) }).check()
+    }
+    await page.getByRole('button', { name: 'Save and apply' }).click()
+    await expect(page.getByText('Configuration saved', { exact: true })).toBeVisible()
+    await app.deleteSite(removed)
+    await page.goto(endpoint)
+    for (const commit of [false, true]) {
+      await page.getByRole('button', {name:'Edit', exact:true}).click()
+      const lookup = !commit ? page.waitForResponse(r => {
+        const url = new URL(r.url())
+        return url.pathname === '/api/v1/sites' && url.searchParams.get('ids')?.includes(goneId) === true
+      }) : undefined
+      await page.getByText('2 selected', { exact: true }).click()
+      if (lookup) {
+        const resolved = await (await lookup).json()
+        expect(resolved.items.map((site: { id: string }) => site.id)).toEqual([keepId])
+      }
+      await expect(page.getByRole('button', { name: new RegExp('Remove .*' + kept.replaceAll('.', '\\.')) })).toBeVisible()
+      await page.getByRole('button', { name: `Remove ${goneId} from selection`, exact: true }).click()
+      if (commit) {
+        const saved = page.waitForResponse(r => r.url().endsWith('/settings/syslog') && r.request().method() === 'PUT')
+        await page.getByRole('button', {name:'Save and apply'}).click()
+        expect((await (await saved).json()).config.sites).toEqual([keepId])
+      } else {
+        await page.getByRole('button', { name:'Cancel', exact:true }).click()
+      }
+    }
+    await page.reload()
+    await page.getByRole('button', {name:'Edit', exact:true}).click()
+    await page.getByText('1 selected', { exact: true }).click()
+    await expect(page.getByRole('button', { name: new RegExp('Remove .*' + kept.replaceAll('.', '\\.')) })).toBeVisible()
+    await page.getByRole('button', { name:'Cancel', exact:true }).click()
+    await page.getByRole('button', {name:'Remove destination'}).click()
+    await page.getByRole('dialog').getByRole('button',{name:'Confirm'}).click()
+    await expect(page.getByRole('button',{name:'Configure forwarding'})).toBeVisible()
+  } finally {
+    await app.deleteSiteIfPresent(removed)
+    await app.deleteSiteIfPresent(kept)
+  }
+})
+
 test('maintain a log destination across desktop and mobile with a real UDP receiver', async ({ app }) => {
   test.skip(process.env.PINGWAF_SMOKE_SYSLOG !== '1', 'Requires disposable control plane and same loopback namespace')
   const { page } = app
@@ -103,9 +161,9 @@ test('maintain a log destination across desktop and mobile with a real UDP recei
     await other.getByRole('button',{name:'Save and apply'}).click()
     const latest = await (await saveOther).json()
     await page.clock.setFixedTime(new Date(Date.now()+60_000))
-    const refetched = page.waitForResponse(r=>r.url().endsWith('/settings/syslog') && r.request().method()==='GET')
+    const refetched = page.waitForResponse(r=>r.url().endsWith('/settings/syslog') && r.request().method()==='GET', {timeout:15000})
     await page.bringToFront()
-    await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')))
+    await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange', {bubbles:true})))
     expect((await (await refetched).json()).revision).toBe(latest.revision)
     await expect(page.getByText(new RegExp('Saved / active revision '+latest.revision+' /'))).toBeAttached()
     const staleDelete = page.waitForResponse(r=>r.url().endsWith('/settings/syslog') && r.request().method()==='DELETE')

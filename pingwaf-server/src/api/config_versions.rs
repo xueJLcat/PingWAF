@@ -60,6 +60,8 @@ pub struct ListVersionsQuery {
     pub site_id: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
+    /// Continue after this version in descending ID order.
+    pub before_id: Option<i64>,
 }
 
 /// `GET /api/v1/config-versions` — administrators only.
@@ -74,6 +76,7 @@ async fn list_versions(
         site_id,
         limit,
         offset,
+        before_id,
     } = query;
     let limit = limit.unwrap_or(50).clamp(1, 200);
     let offset = offset.unwrap_or(0);
@@ -81,6 +84,9 @@ async fn list_versions(
         .order_by_desc(config_version::Column::Id)
         .limit(limit)
         .offset(offset);
+    if let Some(id) = before_id {
+        query = query.filter(config_version::Column::Id.lt(id));
+    }
     query = match site_id.as_deref() {
         None => query,
         Some("global") => query
@@ -295,6 +301,16 @@ mod tests {
         let admin = AuthUser::new(Uuid::new_v4(), "admin@example.test", "admin");
         let viewer = AuthUser::new(Uuid::new_v4(), "viewer@example.test", "viewer");
         let target = ids[0];
+        let query = |before_id, site_id| Query(ListVersionsQuery {
+            site_id, limit: Some(1), offset: None, before_id,
+        });
+        let first = list_versions(state.clone(), admin.clone(), query(None, None)).await.unwrap();
+        assert_eq!(first.0[0].id, ids[1]);
+        let older = list_versions(state.clone(), admin.clone(), query(Some(ids[1]), None)).await.unwrap();
+        assert_eq!(older.0[0].id, target);
+        let filtered = list_versions(state.clone(), admin.clone(),
+            query(Some(ids[1]), Some("deployment".into()))).await.unwrap();
+        assert!(filtered.0.is_empty());
         let denied = delete_version(state.clone(), viewer, Path(target))
             .await.unwrap_err();
         assert_eq!(denied.into_response().status(), StatusCode::FORBIDDEN);

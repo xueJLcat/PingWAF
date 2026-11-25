@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowCounterClockwise,
   Broom,
@@ -21,6 +21,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog } from '@/components/ui/Dialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Select } from '@/components/ui/Select'
+import { Input } from '@/components/ui/Input'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { Table, type Column } from '@/components/ui/Table'
 import { useToast } from '@/components/ui/Toast'
@@ -34,12 +35,12 @@ import {
 } from '@/api/configVersions'
 import { configBackupsApi, configBackupKeys } from '@/api/configBackups'
 import { errorMessage } from '@/api/errors'
-import { useCanWrite, useSitesList } from '@/hooks'
+import { useCanWrite, useDebouncedValue } from '@/hooks'
+import { sitesApi, siteKeys } from '@/api/sites'
 import { formatSiteAddress, formatDateTime } from '@/lib/format'
 
 /**
- * How many versions one request asks for. The console keeps its own
- * pagination client-side (`Table`), so a page here is one round trip.
+ * Keep one extra row per request to detect whether older snapshots exist.
  */
 const PAGE_SIZE = 50
 
@@ -387,20 +388,29 @@ export function ConfigVersionsPage() {
   const canWrite = useCanWrite()
 
   const [scope, setScope] = useState('')
+  const [scopeLabel, setScopeLabel] = useState('')
+  const [siteSearch, setSiteSearch] = useState('')
+  const search = useDebouncedValue(siteSearch.trim())
   const [detail, setDetail] = useState<ConfigVersionSummary | null>(null)
   const [pending, setPending] = useState<ConfigVersionSummary | null>(null)
   const [confirmPrune, setConfirmPrune] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ConfigVersionSummary | null>(null)
 
-  const sites = useSitesList({ page: 1, page_size: 200 })
-
-  const versions = useQuery({
-    queryKey: configVersionKeys.list(scope || undefined),
-    queryFn: () =>
-      configVersionsApi.list(scope || undefined, PAGE_SIZE, 0),
+  const sites = useInfiniteQuery({
+    queryKey: [...siteKeys.all, 'snapshot-scope-options', search],
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) => sitesApi.list({ search, page: pageParam, page_size: 200 }),
+    getNextPageParam: (last, _pages, page) => page * 200 < last.total ? page + 1 : undefined,
   })
 
-  const rows = versions.data ?? []
+  const versions = useInfiniteQuery({
+    queryKey: configVersionKeys.list(scope || undefined),
+    initialPageParam: undefined as number | undefined,
+    queryFn: ({ pageParam }) => configVersionsApi.list(scope || undefined, PAGE_SIZE + 1, 0, pageParam),
+    getNextPageParam: last => last.length > PAGE_SIZE ? last[PAGE_SIZE - 1].id : undefined,
+  })
+
+  const rows = useMemo(() => versions.data?.pages.flatMap(page => page.slice(0, PAGE_SIZE)) ?? [], [versions.data])
   const backupTargets = useQuery({
     queryKey: configBackupKeys.targets,
     queryFn: configBackupsApi.listTargets,
@@ -572,7 +582,7 @@ export function ConfigVersionsPage() {
         value: DEPLOYMENT_SCOPE,
         label: t('pages.configVersions.deploymentScope'),
       },
-      ...(sites.data ?? []).map((site) => ({
+      ...(sites.data?.pages.flatMap(page => page.items) ?? []).map((site) => ({
         value: site.id,
         label: formatSiteAddress(site),
       })),
@@ -603,13 +613,25 @@ export function ConfigVersionsPage() {
 
       <Card>
         <CardBody className="flex flex-col gap-4">
-          <div className="max-w-sm">
+          <div className="max-w-sm space-y-2">
+            {(siteSearch || (sites.data?.pages[0].total ?? 0) > 200) && (
+              <Input type="search" label={t('syslog.search')} value={siteSearch}
+                onChange={event => setSiteSearch(event.target.value)} />
+            )}
             <Select
               label={t('pages.configVersions.scopeFilter')}
               value={scope}
-              options={scopeOptions}
-              onChange={(event) => setScope(event.target.value)}
+              options={scopeOptions.some(option => option.value === scope) ? scopeOptions
+                : [...scopeOptions, { value: scope, label: scopeLabel }]}
+              onChange={event => {
+                setScopeLabel(event.target.selectedOptions[0].text)
+                setScope(event.target.value)
+              }}
             />
+            {sites.hasNextPage && <Button size="sm" loading={sites.isFetchingNextPage}
+              onClick={() => void sites.fetchNextPage()}>{t('pages.configVersions.moreSites')}</Button>}
+            {sites.isError && <ErrorState variant="inline" error={sites.error}
+              onRetry={() => sites.isFetchNextPageError ? sites.fetchNextPage() : sites.refetch()} />}
           </div>
 
           {versions.isError && !versions.data ? (
@@ -637,11 +659,12 @@ export function ConfigVersionsPage() {
             />
           )}
 
-          {rows.length === PAGE_SIZE && (
-            <p className="text-xs text-fg-subtle">
-              {t('pages.configVersions.windowHint', { count: PAGE_SIZE })}
-            </p>
-          )}
+          {versions.hasNextPage && <Button className="self-start" size="sm" loading={versions.isFetchingNextPage}
+            disabled={versions.isFetching} onClick={() => void versions.fetchNextPage()}>
+            {t('pages.configVersions.loadOlder')}
+          </Button>}
+          {versions.isError && versions.data && <ErrorState variant="inline" error={versions.error}
+            onRetry={() => versions.isFetchNextPageError ? versions.fetchNextPage() : versions.refetch()} />}
         </CardBody>
       </Card>
 

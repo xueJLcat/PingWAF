@@ -522,6 +522,7 @@ List sites (paginated).
 | `page_size` | int | Items per page (default: 50, max: 200) |
 | `search` | string | Filter by name/domain |
 | `status` | string | Filter by status: `active`, `paused`, `pending` |
+| `ids` | string | Up to 20 comma-separated site UUIDs. Returns matching sites visible to the current account; missing IDs have no row. |
 
 **Response (200):**
 ```json
@@ -5601,6 +5602,7 @@ List versions, newest first, without their snapshot payloads.
 | `site_id` | A site UUID, `global` for the shared settings, or `deployment` for the full restorable deployment. Omit for all scopes. Anything else is a `400`. |
 | `limit` | Rows to return, default `50`, clamped to `1..=200`. |
 | `offset` | Rows to skip, default `0`. |
+| `before_id` | Return IDs strictly older than this version, within the selected scope. Use the last displayed ID with offset zero to continue while new versions are being recorded. |
 
 **Response (200):**
 ```json

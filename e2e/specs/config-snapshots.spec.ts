@@ -1,5 +1,45 @@
 import { test, expect } from '../fixtures/app'
 
+test('older snapshot batches use the last displayed ID and retain the list on failure', async ({ app }) => {
+  const { page } = app
+  let failOnce = true
+  const snapshot = (id: number) => ({
+    id, scope: 'site', site_id: '00000000-0000-0000-0000-000000000001',
+    site_domain: `history-${id}.e2e.test`, config_hash: String(id),
+    source: 'api', actor: null, summary: {}, created_at: '2026-11-25T12:00:00Z',
+  })
+  await page.route('**/api/v1/config-versions?*', async route => {
+    const params = new URL(route.request().url()).searchParams
+    if (params.has('site_id')) return route.fulfill({ json: [] })
+    if (!params.has('before_id')) {
+      return route.fulfill({ json: Array.from({ length: 51 }, (_, index) => snapshot(60 - index)) })
+    }
+    expect(params.get('before_id')).toBe('11')
+    if (failOnce) {
+      failOnce = false
+      return route.fulfill({status:400,json:{error:{code:'bad_request',message:'Cannot load older snapshots'}}})
+    }
+    return route.fulfill({ json: Array.from({ length: 10 }, (_, index) => snapshot(10 - index)) })
+  })
+  await page.goto(app.adminUrl('/config-versions'))
+  const more = page.getByRole('button', { name: 'Load older snapshots' })
+  await more.click()
+  await expect(page.getByText('Cannot load older snapshots', {exact:true}).first()).toBeVisible()
+  await expect(page.getByText('history-60.e2e.test', { exact: true })).toBeVisible()
+  await more.click()
+  await expect(more).toHaveCount(0)
+  const next = page.getByRole('button', { name:'Next', exact:true })
+  await next.click()
+  await next.click()
+  const oldest = page.getByRole('row').filter({hasText:'history-1.e2e.test'})
+  await oldest.getByRole('button', {name:'Delete snapshot'}).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('history-1.e2e.test')
+  await dialog.getByRole('button', {name:'Cancel'}).click()
+  await page.getByRole('combobox', {name:/scope/i}).selectOption('global')
+  await expect(oldest).toHaveCount(0)
+})
+
 test('refresh reconciles the visible snapshot page when the list shrinks', async ({ app }) => {
   const { page } = app
   let count = 50

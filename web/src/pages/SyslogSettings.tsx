@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from '@/api/client'
-import { sitesApi } from '@/api/sites'
+import { sitesApi, siteKeys } from '@/api/sites'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
@@ -36,6 +36,40 @@ type Confirmation={action:'remove'|'save';revision:number;target:string;discard:
 function describeTarget(config:Config){
   return [config.name,config.transport.toUpperCase(),config.host,String(config.port)].filter(Boolean).join(' · ')
 }
+
+function SelectedSites({ ids, onRemove }: { ids: string[]; onRemove: (id: string) => void }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [page, setPage] = useState(0)
+  const unique = [...new Set(ids)]
+  const pages = Math.max(1, Math.ceil(unique.length / 20))
+  const current = Math.min(page, pages - 1)
+  if (page !== current) setPage(current)
+  const visible = unique.slice(current * 20, current * 20 + 20)
+  const params = { ids: visible.join(','), page_size: 20 }
+  const names = useQuery({
+    queryKey: siteKeys.list(params), queryFn: () => sitesApi.list(params),
+    enabled: open && visible.length > 0,
+  })
+  const labels = new Map(names.data?.items.map(site => [site.id, formatSiteAddress(site)]))
+  if (!unique.length) return <p role="status">{t('syslog.noMatch')}</p>
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="pw-touch-target cursor-pointer text-sm">{t('common.batch.selected', { count: unique.length })}</summary>
+    {open && <div className="space-y-2 py-2">
+      {names.isError && <p role="alert">{names.error.message} <Button type="button" size="sm" onClick={() => void names.refetch()}>{t('syslog.reload')}</Button></p>}
+      <ul className="divide-y divide-line">{visible.map(id => <li key={id} className="flex items-center justify-between gap-3 py-1">
+        <span className="min-w-0 break-all text-sm">{labels.get(id) ?? id}</span>
+        <Button type="button" size="sm" variant="ghost" aria-label={t('syslog.removeSite', { site: labels.get(id) ?? id })}
+          onClick={() => onRemove(id)}>{t('common.remove')}</Button>
+      </li>)}</ul>
+      {pages > 1 && <div className="flex items-center gap-2">
+        <Button type="button" size="sm" disabled={current === 0} onClick={() => setPage(current - 1)}>{t('pagination.previous')}</Button>
+        <span className="text-sm tabular-nums">{current + 1} / {pages}</span>
+        <Button type="button" size="sm" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}>{t('pagination.next')}</Button>
+      </div>}
+    </div>}
+  </details>
+}
 export function SyslogSettings(){
   const {t}=useTranslation()
   const label=(k:string)=>t('syslog.'+k)
@@ -57,6 +91,7 @@ export function SyslogSettings(){
   useRegisterUnsaved(!!draft && (JSON.stringify(c)!==JSON.stringify(v?.config)||Object.keys(draft.files).length>0))
   const sites=useQuery({queryKey:['syslog-site-options',siteSearch,page],queryFn:()=>sitesApi.list({search:siteSearch,page,page_size:20}),enabled:!!c && c.sites!==null})
   function begin(value:View){
+    setPage(1);setSiteSearch('')
     setDraft({revision:value.revision,config:{...value.config},files:{}})
     setAutoPort(value.config.port===(value.config.transport==='tls'?6514:514))
     setError('');setMessage('');setConflict(false)
@@ -144,10 +179,10 @@ export function SyslogSettings(){
       <div className="flex flex-wrap gap-4"><Switch label={label('security')} checked={c.security} onCheckedChange={security=>change({security})}/><Switch label={label('access')} checked={c.access} onCheckedChange={access=>change({access})}/></div>
       <Select label={label('scope')} value={c.sites===null?'all':'selected'} onChange={e=>change({sites:e.target.value==='all'?null:[]})}><option value="all">{label('all')}</option><option value="selected">{label('selected')}</option></Select>
       {c.sites!==null && <div className="space-y-2"><Input type="search" label={label('search')} value={siteSearch} onChange={e=>{setSiteSearch(e.target.value);setPage(1)}}/>
-        <p>{label('selected')} · {c.sites.length}{!c.sites.length && ' · '+label('noMatch')}</p>
+        <SelectedSites ids={c.sites} onRemove={id=>change({sites:c.sites!.filter(site=>site!==id)})}/>
         {sites.error && <p role="alert">{sites.error.message}</p>}
         {sites.data?.items.map(site=><label key={site.id} className="flex min-h-9 items-center gap-2"><input type="checkbox" checked={c.sites!.includes(site.id)} onChange={e=>change({sites:e.target.checked?[...c.sites!,site.id]:c.sites!.filter(id=>id!==site.id)})}/>{formatSiteAddress(site)}</label>)}
-        <div className="flex gap-2"><Button type="button" disabled={page===1} onClick={()=>setPage(page-1)}>‹</Button><span>{page}</span><Button type="button" disabled={page*20>=(sites.data?.total??0)} onClick={()=>setPage(page+1)}>›</Button></div></div>}
+        {(page>1 || (sites.data?.total??0)>20) && <div className="flex items-center gap-2"><Button type="button" size="sm" disabled={page===1} onClick={()=>setPage(page-1)}>{t('pagination.previous')}</Button><span>{page}</span><Button type="button" size="sm" disabled={page*20>=(sites.data?.total??0)} onClick={()=>setPage(page+1)}>{t('pagination.next')}</Button></div>}</div>}
       {c.transport==='tls' && <fieldset className="space-y-3 rounded-lg border border-line p-3"><legend>TLS</legend><div className={grid}>{txt('server_name')}{select('trust',['system','custom'],true)}</div>
         {c.trust==='custom' && pem('ca',v?.ca_info)}<Switch label={label('mtls')} checked={c.mtls} onCheckedChange={mtls=>change({mtls})}/>
         {c.mtls && <div className={grid}>{pem('cert',v?.cert_info)}{pem('key')}</div>}</fieldset>}
