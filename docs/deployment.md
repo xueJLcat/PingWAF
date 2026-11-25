@@ -506,7 +506,7 @@ restore that backup together with the previous binaries when rolling back.
 
 ### Inventory of preconfigured static directories on Linux
 
-The **Static directories** sidebar entry lists managed nodes and opens the same directory dialog as the Agents page. **Page protection** lists site addresses with their listeners. Administrators can also open **ASN data sources** and **Log buffer directory** directly from the platform navigation. The log buffer page shows the saved directory and the directory in use by the running process.
+The **Static directories** sidebar entry preserves the selected list page and search when closing a node. It lists managed nodes and opens the same directory dialog as the Agents page. **Page protection** lists site addresses with their listeners. Administrators can also open **ASN data sources** and **Log buffer directory** directly from the platform navigation. The log buffer page shows the saved directory and the directory in use by the running process.
 
 From the Agents page, administrators can open **静态目录** for a managed
 Linux node. Register an identifier and absolute directory below `/srv/www`

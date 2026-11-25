@@ -4,6 +4,7 @@ import { apiClient } from '@/api/client'
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { directoryPathError } from '@/lib/directoryPath'
 import { useNow } from '@/hooks'
 
 interface Inventory {
@@ -33,9 +34,19 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
     write.reset();setPending(undefined)
     setEdit({action,id,path:data.paths[id]??'',revision:data.revision})
   }
-  const valid = edit && /^[a-zA-Z0-9_-]{1,64}$/.test(edit.id) &&
-    (edit.action==='remove' || edit.path.startsWith('/')) &&
-    (edit.action!=='add' || !Object.hasOwn(data?.paths??{},edit.id))
+  let idError: string | undefined
+  if (edit?.action === 'add' && edit.id) {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(edit.id)) idError = '标识须为 1–64 个英文字母、数字、下划线或短横线。'
+    else if (Object.hasOwn(data?.paths ?? {}, edit.id)) idError = '此标识已登记。'
+  }
+  let pathError: string | undefined
+  if (edit?.path && edit.action !== 'remove' && data) {
+    pathError = directoryPathError(edit.path, data.public_root, false)
+    if (!pathError && (new TextEncoder().encode(edit.path).length > 1024 || /\p{Cc}/u.test(edit.path))) {
+      pathError = '目录不能包含控制字符，UTF-8 长度最多为 1024 字节。'
+    }
+  }
+  const valid = !!edit?.id && !idError && (edit.action === 'remove' || (!!edit.path && !pathError))
   return <Dialog open onClose={write.isPending ? () => undefined : close} size="lg" className="[overflow-wrap:anywhere]" title="静态目录" description={name??node}>
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -55,8 +66,8 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
           </li>)}</ul></>}
       {edit && <form className="space-y-3 rounded-lg border border-line p-3" onSubmit={e=>{e.preventDefault();if(valid && !write.isPending)write.mutate(edit)}}>
         <Input label="目录标识" hint="使用 1–64 个英文字母、数字、下划线或短横线。" value={edit.id} required disabled={edit.action!=='add' || write.isPending}
-          error={edit.action==='add' && Object.hasOwn(data?.paths??{},edit.id) ? '此标识已登记。' : undefined} onChange={e=>setEdit({...edit,id:e.target.value})}/>
-        {edit.action!=='remove' && <Input label="节点绝对路径" disabled={write.isPending} value={edit.path} required placeholder={data?.public_root+'/public'}
+          error={idError} onChange={e=>setEdit({...edit,id:e.target.value})}/>
+        {edit.action!=='remove' && <Input label="节点绝对路径" error={pathError} disabled={write.isPending} value={edit.path} required placeholder={data?.public_root+'/public'}
           onChange={e=>setEdit({...edit,path:e.target.value})}/>}
         {edit.action==='remove' && <p>移除登记后，新增站点将无法选择该目录。源文件会保留。</p>}
         <div className="flex gap-2"><Button type="submit" variant={edit.action==='remove'?'danger':'primary'} loading={write.isPending} disabled={!valid}>{edit.action==='remove'?'确认移除':'保存到节点'}</Button>

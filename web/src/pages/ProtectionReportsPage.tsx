@@ -5,11 +5,14 @@ import { apiClient, ApiError } from '@/api/client'
 import { sitesApi } from '@/api/sites'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
-import { DownloadSimple } from '@phosphor-icons/react'
+import { DownloadSimple, FileText, Monitor } from '@phosphor-icons/react'
 import { formatSiteAddress } from '@/lib/format'
-import { useNow } from '@/hooks'
+import { useCanWrite, useNow } from '@/hooks'
 import { useAuthStore } from '@/stores/authStore'
 
 type Job = { from: string; to: string; timezone: string; id: string; created_at: string; status: string; error: string | null }
@@ -38,6 +41,9 @@ function localTime(date: Date) {
 }
 
 export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const canWrite = useCanWrite()
   const client = useQueryClient()
   const user = useAuthStore(s => s.user?.id)
   const panel = useRef<HTMLElement>(null)
@@ -53,6 +59,7 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
   const [from, setFrom] = useState(() => localTime(new Date(Date.now()-3600000)))
   const [to, setTo] = useState(() => localTime(new Date()))
   const sites = useQuery({queryKey:['report-site-options', user,page],queryFn:()=>sitesApi.list({page,page_size:40})})
+  const emptyScope = sites.isSuccess && sites.data.total === 0
   const firstSite = sites.data?.items[0]
   const addresses = chosen ?? (firstSite ? { [firstSite.id]: formatSiteAddress(firstSite) } : {})
   const ids = Object.keys(addresses).sort()
@@ -122,9 +129,12 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
   })
   const alerts=[error,download.error?.message,sites.error?.message,jobs.error?.message,create.error?.message,screen.error?.message].filter(Boolean)
   return <section ref={panel} className="min-w-0 space-y-5 text-fg fullscreen:overflow-auto fullscreen:bg-base fullscreen:p-4">
-    <PageHeader title={live?'实时防护大屏':'防护报告'} actions={live && document.fullscreenEnabled &&
+    <PageHeader title={t(live ? 'nav.liveProtection' : 'nav.protectionReports')} actions={live && document.fullscreenEnabled &&
       <Button onClick={()=>void (fullscreen ? document.exitFullscreen() : panel.current?.requestFullscreen())?.catch(e=>setError(e.message))}>{fullscreen ? '退出全屏' : '全屏显示'}</Button>} />
-    <Card><CardBody className="grid items-start gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    {emptyScope ? <Card padded><EmptyState icon={live ? <Monitor /> : <FileText />}
+      title={t('nav.emptySiteScope')} description={t(live ? 'nav.emptyLiveHelp' : 'nav.emptyReportsHelp')}
+      action={canWrite && <Button variant="primary" onClick={() => navigate('/sites?new=1')}>{t('pages.sites.addSite')}</Button>}
+    /></Card> : <Card><CardBody className="grid items-start gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <div className="min-w-0 space-y-1.5"><span className="block text-[13px] font-medium text-fg-subtle">站点范围</span>
       <details><summary aria-label={`站点范围（${ids.length}）`} className="pw-touch-target h-9 cursor-pointer content-center rounded-md border border-line bg-elevated px-3 text-sm">已选 {ids.length} 个站点</summary><fieldset className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-md border border-line p-2">
         {sites.data?.items.map(s=><label className="pw-touch-check flex items-center gap-2 break-all text-sm" key={s.id}><input type="checkbox" checked={ids.includes(s.id)}
@@ -137,12 +147,11 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
       {!live && <><Input label="开始（本机时间）" type="datetime-local" value={from} onChange={e=>setFrom(e.target.value)}/>
         <Input label="结束（本机时间）" error={rangeError} type="datetime-local" value={to} onChange={e=>setTo(e.target.value)}/>
         <Button className="justify-self-start" variant="primary" loading={create.isPending} disabled={!!rangeError || !ids.length || !from || !to || !validZone} onClick={()=>create.mutate()}>生成报告</Button></>}
-    </CardBody></Card>
-    {sites.data?.total === 0 && <p role="status">当前账号没有可选站点。</p>}
+    </CardBody></Card>}
     {sites.data && sites.data.total > 0 && !ids.length && <p role="status">请在站点范围中选择至少一个站点。</p>}
     {alerts.map((message,i)=><p key={i} role="alert">{message}</p>)}
     {!live && jobs.isPending && <p role="status">正在加载报告任务…</p>}
-    {!live && jobs.data?.length === 0 && <p role="status">暂无报告任务。选择站点和统计时段后可生成报告。</p>}
+    {!live && !emptyScope && jobs.data?.length === 0 && <p role="status">暂无报告任务。选择站点和统计时段后可生成报告。</p>}
     {!live && !!jobs.data?.length && <div className="overflow-x-auto rounded-lg border border-line bg-elevated"><table className="w-full min-w-[36rem] text-left text-sm [&_td]:px-3 [&_td]:py-2 [&_th]:p-3"><thead className="border-b border-line bg-recessed text-xs text-fg-subtle"><tr><th>提交时间</th><th>统计时段</th><th>状态</th><th>下载</th></tr></thead>
       <tbody>{jobs.data?.map(job=><tr key={job.id}><td>{new Date(job.created_at).toLocaleString()}</td>
         <td>{reportInterval(job)}</td>

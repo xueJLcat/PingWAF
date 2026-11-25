@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Improve the six console maintenance entries. Empty reports and dashboards guide users to site setup, node directory edits preserve search and pagination, directory validation follows the configured root, and ASN imports apply the exact bytes of the latest successful preview.
+
 - Add sidebar and command-search entries for protection reports, the live dashboard, page protection, node directories, ASN data and the log buffer. Site and node maintenance starts with a scoped selection. Reports distinguish listeners on the same domain. ZIP drafts survive failed replacements, and file pickers, protocol selectors and destructive confirmations follow the console controls.
 
 - Check all physical site listeners against the dashboard port, including the implicit HTTP/HTTPS pair. Configuration restore now validates terminal handlers, standard listener conflicts and uploaded release availability before writing. Migration 000117 extends the TLS policy checks to additional HTTP listeners.
