@@ -319,7 +319,7 @@ members = [
     "pingwaf-agent",
 ]
 [workspace.package]
-version = "0.32.50"
+version = "0.32.52"
 
 [workspace.dependencies]
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -343,7 +343,7 @@ chrono = { version = "0.4.45", default-features = false, features = [
     "clock",
     "serde",
 ] }
-cookie = "0.18.2"
+cookie = "0.18.3"
 crc32fast = "1.5.1"
 ctor = "1.0.13"
 derive_more = { version = "2.1.1", default-features = false, features = [
@@ -490,11 +490,11 @@ tera = { version = "2", default-features = false }
 time = { version = "0.3.55", features = ["local-offset"] }
 TinyUFO = "0.9.0"
 # Pingora 0.9.1 fixed cloudflare/pingora#1059: tokio 1.54's
-# `assert!(capacity > 0)` no longer trips the L4 read buffers. The pin stays
-# for this release only so the tokio upgrade can be tested on its own; it can
-# be raised to `>= 1.54` in a dedicated change (and the matching note in
-# .github/dependabot.yml removed then).
-tokio = { version = "=1.53.3", default-features = false, features = ["fs"] }
+# `assert!(capacity > 0)` no longer trips the L4 read buffers, so the staged
+# hold at 1.53.3 is gone and the pin tracks the version the data plane has been
+# tested against. An exact pin is kept on purpose — tokio drives the proxy's
+# whole I/O path, so an upgrade is a deliberate change, not a silent one.
+tokio = { version = "=1.54.1", default-features = false, features = ["fs"] }
 toml = "1.1.6"
 hcl-rs = "0.19"
 kdl = "6.7.1"
@@ -558,7 +558,6 @@ tower-http = { version = "0.7", features = ["cors", "compression-gzip", "set-hea
 # Shared by benches / tests across pingap-* crates.
 bytemuck = "1.25.2"
 criterion = { version = "0.8.2", features = ["html_reports"] }
-filetime = "0.2.29"
 # imageoptim: keep the feature set here so members do not restate versions.
 image = { version = "0.25.10", default-features = false, features = [
     "rayon",

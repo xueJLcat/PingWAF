@@ -101,6 +101,41 @@ verbatim for reference and attribution, and is not maintained here.
   stored hostnames are not canonical or have ambiguous ownership. Custom
   ingress ports are not enabled by this migration.
 
+## [PingWAF 0.32.52] — 2026-11-25
+
+### Fixed
+
+- **The cache tests' access-time helper stays inside the MSRV.** 0.32.51's CI
+  was red on the Rust 1.96 job that enforces `rust-version = "1.96"`:
+  `std::fs::set_times` is still behind `feature(fs_set_times)` there even
+  though it is accepted by newer toolchains. The helper now uses
+  `File::set_times` with `FileTimes::set_accessed` (stable since 1.75). Shipped
+  binaries were never affected — the code is `#[cfg(test)]`.
+
+## [PingWAF 0.32.51] — 2026-11-25
+
+### Security
+
+- **`cookie` 0.18.2 → 0.18.3 (RUSTSEC-2026-0594, medium 6.5).** Private cookie
+  nonces can repeat in processes that fork. PingWAF never forks (it is one
+  process per edge), and the console uses the crate for parsing and
+  serialisation rather than for `PrivateCookieJar` state, so the practical
+  exposure was nil — but the advisory turns `cargo audit` red on every push, so
+  the dependency is now on the patched release.
+
+### Changed
+
+- **Dependency refresh (29 crates).** tokio `1.53.3` → `1.54.1` (the staged
+  hold for cloudflare/pingora#1059 is lifted now that pingora 0.9.1 ships the
+  fix, and the note in `.github/dependabot.yml` is gone), tonic/tonic-prost
+  `0.14.9`, clap `4.6.9`, rust-embed `8.14`, bytes `1.12.2`, regex `1.13.2`,
+  uuid `1.29.3`, TinyUFO `0.9.1`, `toml` `1.2`, `rand` `0.10.4`, `psl`
+  `2.1.260` and the rest of the patch group.
+- **`filetime` dropped.** The two cache tests that backdated a file's access
+  time used `filetime::set_file_atime`, which the crate deprecated; they now use
+  `std::fs::set_times` with `FileTimes::set_accessed`, and the dependency is
+  gone from the workspace.
+
 ## [PingWAF 0.32.50] — 2026-11-25
 
 ### Changed
