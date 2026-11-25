@@ -1,3 +1,4 @@
+import type { PortProtocol } from '@/api/sites'
 import type { Site } from '@/api/types'
 
 export interface IngressDraft {
@@ -39,8 +40,17 @@ export function validIngressPort(listener: string, adminPort?: number) {
     (port !== 80 || listener === 'http:80') && (port !== 443 || listener === 'https:443') && port !== adminPort
 }
 
-export function ingressPortError(draft: IngressDraft, adminPort?: number) {
+export function claimedProtocol(port: string, claims?: PortProtocol[]) {
+  return claims?.find(claim => claim.port === Number(port))?.protocol
+}
+
+export function ingressPortError(draft: IngressDraft, adminPort?: number, claims?: PortProtocol[]) {
   const rows = [draft.listener, ...(draft.additional ?? [])]
   if (!rows.every(row => validIngressPort(row, adminPort))) return 'pages.sites.ingressPortInvalid'
   if (new Set(rows.map(row => Number(row.split(':')[1]))).size !== rows.length) return 'pages.sites.duplicatePort'
+  for (const row of rows) {
+    const [scheme, port] = row.split(':')
+    const claimed = claimedProtocol(port, claims)
+    if (claimed && claimed !== scheme) return 'pages.sites.protocolConflict'
+  }
 }

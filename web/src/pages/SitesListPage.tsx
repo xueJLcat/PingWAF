@@ -278,6 +278,12 @@ export function SitesListPage() {
     void queryClient.invalidateQueries({ queryKey: analyticsKeys.all })
   }
 
+  const refreshPortClaims = (err: unknown) => {
+    if (err instanceof ApiError && (err.code === 'site.ingress_protocol_conflict' || err.status === 409)) {
+      void ingressInventory.refetch()
+    }
+  }
+
   const createSite = useMutation({
     mutationFn: (data: CreateSiteRequest) => sitesApi.create(data),
     onSuccess: (site) => {
@@ -287,6 +293,7 @@ export function SitesListPage() {
       navigate(`/sites/${site.id}/basic`)
     },
     onError: (err) => {
+      refreshPortClaims(err)
       // The backend names the exact failure with a stable code (UX-05); show
       // the translated hint under the field instead of a raw English toast.
       if (isDomainConflictError(err)) {
@@ -313,6 +320,7 @@ export function SitesListPage() {
       invalidate()
     },
     onError: (err) => {
+      refreshPortClaims(err)
       if (isDomainConflictError(err)) {
         setFormErrors((e) => ({
           ...e,
@@ -379,6 +387,8 @@ export function SitesListPage() {
     enabled: canWrite && (dialogOpen || urlCreateOpen || cloneOpen),
     refetchInterval: dialogOpen || urlCreateOpen || cloneOpen ? 20_000 : false,
   })
+  const draftPortError = (ingress: typeof form.ingress) =>
+    ingressPortError(ingress, ingressInventory.data?.admin_port, ingressInventory.data?.port_protocols)
   const wantsNewSite = canWrite && searchParams.get('new') === '1'
   if (wantsNewSite && !urlCreateOpen) setUrlCreateOpen(true)
   useEffect(() => {
@@ -422,6 +432,7 @@ export function SitesListPage() {
       clearSelection()
     },
     onError: (err) => {
+      refreshPortClaims(err)
       // The backend names the conflict with `site.domain_conflict`; the shared
       // classifier also understands the older English message.
       if (isDomainConflictError(err)) {
@@ -469,7 +480,7 @@ export function SitesListPage() {
       alternateDomains.push(value)
     }
 
-    const portError = ingressPortError(cloneForm.ingress, ingressInventory.data?.admin_port)
+    const portError = draftPortError(cloneForm.ingress)
     if (portError) errors.top = t(portError)
     setCloneErrors(errors)
     if (Object.values(errors).some(Boolean)) return
@@ -615,7 +626,7 @@ export function SitesListPage() {
       errors.top = t('pages.sites.ingressRequireAgent')
     }
 
-    const portError = ingressPortError(form.ingress, ingressInventory.data?.admin_port)
+    const portError = draftPortError(form.ingress)
     if (portError) errors.top = t(portError)
     setFormErrors(errors)
     if (Object.values(errors).some(Boolean)) return
@@ -1054,7 +1065,7 @@ export function SitesListPage() {
             <Button variant="ghost" onClick={closeDialog} disabled={pending}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" onClick={submit} loading={pending} disabled={archiveBusy}>
+            <Button variant="primary" onClick={submit} loading={pending} disabled={archiveBusy || draftPortError(form.ingress) === 'pages.sites.protocolConflict'}>
               {editing ? t('common.save') : t('common.create')}
             </Button>
           </>
@@ -1260,7 +1271,7 @@ export function SitesListPage() {
               variant="primary"
               onClick={submitClone}
               loading={clonePending}
-              disabled={!cloneSensitiveAck}
+              disabled={!cloneSensitiveAck || draftPortError(cloneForm.ingress) === 'pages.sites.protocolConflict'}
             >
               {t('pages.sites.clone')}
             </Button>

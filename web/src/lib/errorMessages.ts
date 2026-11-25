@@ -17,6 +17,7 @@ import { ApiError } from '@/api/client'
 const CODE_KEYS: Record<string, string> = {
   // Namespaced codes (v0.32.27+).
   'auth.invalid_credentials': 'errors.invalidCredentials',
+  'site.ingress_protocol_conflict': 'pages.sites.protocolConflict',
   'site.domain_conflict': 'errors.domainConflict',
   'validation.expression_invalid': 'errors.expressionInvalid',
   // Un-namespaced aliases: older control planes and the pre-code strings that

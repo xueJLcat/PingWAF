@@ -33,7 +33,13 @@ interface SiteDeployment {
   }[]
 }
 
+export interface PortProtocol {
+  port: number
+  protocol: 'http' | 'https'
+}
+
 export interface IngressOptions {
+  port_protocols?: PortProtocol[]
   admin_port: number
   writes_enabled: boolean
   agents: { id: string; name: string; dynamic_bind: boolean; supports_site_handlers?: boolean; supports_site_archives?: boolean; static_directories?: Record<string, string>; listeners: [number, 'http' | 'https'][] }[]

@@ -400,6 +400,8 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 ## 站点访问入口
 
+管理员可从 `GET /sites/ingress-options` 的 `port_protocols` 读取按端口排序的 `{port, protocol}` 清单。暂停站点、附加入口和默认 80/443 均计入占用。编辑传 `site_id` 排除本站，新建及复制省略它。同协议可按域名共享，跨站混用协议时写入和恢复返回 HTTP 400、`site.ingress_protocol_conflict`。
+
 站点列表和详情返回 `ingress_port`、`ingress_protocol`。默认入口的两项均为 null，同一主域名下的站点用 UUID 区分。 使用 `:8443` 或 `example.com:8443` 可筛选对应端口。
 
 创建、修改和复制接口按对解析入口字段。省略两项时，新站采用默认入口，修改保留当前入口，复制继承源入口；两项均为 null 表示选择默认入口。端口须为 1 至 65535 的整数，80 和 443 保留，协议仅接受 http 或 https。迁移 000107 完成后可写入自定义入口。

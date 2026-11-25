@@ -606,6 +606,8 @@
       "ingressAddPort": "Add listening port",
       "ingressCertificate": "HTTPS certificate",
       "ingressCertificateLater": "Configure later",
+      "protocolConflict": "This port uses a different protocol on another site. Check the port and protocol.",
+      "portProtocolTaken": "Port {{port}} is configured for {{protocol}}. Share that protocol or choose another port.",
       "ingressPortInvalid": "Enter a service port from 1 to 65535. Use the default listener for 80 and 443. The management port is reserved.",
       "ingressDefault": "Default listener",
       "ingressLoadError": "Listener inventory could not be loaded.",

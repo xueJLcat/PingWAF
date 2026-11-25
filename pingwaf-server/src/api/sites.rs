@@ -46,6 +46,8 @@ use crate::models::{
 };
 use crate::site_cert::{self, CertAction, StoredCert};
 
+pub(crate) const INGRESS_PROTOCOL_CONFLICT: &str = "site.ingress_protocol_conflict";
+
 /// Specific machine-readable code for a hostname another site already serves.
 ///
 /// The console keys its localised hint on it; the HTTP status (`400`) and the
@@ -92,7 +94,7 @@ pub(crate) fn map_site_domain_conflict(err: DbErr) -> ApiError {
         }
         match db.constraint() {
             Some("sites_custom_ingress_disabled") => return ApiError::BadRequest("custom ingress writes are disabled by the installed database migration".into()).with_code("site.ingress_unavailable"),
-            Some("sites_ingress_protocol_conflict") => return ApiError::BadRequest("this port already uses a different protocol".into()).with_code("site.ingress_invalid"),
+            Some("sites_ingress_protocol_conflict") => return ApiError::BadRequest("this port already uses a different protocol".into()).with_code(INGRESS_PROTOCOL_CONFLICT),
             _ => {}
         }
     }
@@ -1428,8 +1430,15 @@ struct IngressOptionsQuery {
     site_id: Option<Uuid>,
 }
 
+#[derive(Serialize, FromQueryResult)]
+struct PortProtocol {
+    port: i32,
+    protocol: String,
+}
+
 #[derive(Serialize)]
 struct IngressOptions {
+    port_protocols: Vec<PortProtocol>,
     admin_port: u16,
     writes_enabled: bool,
     agents: Vec<crate::grpc::IngressAgentOption>,
@@ -1481,11 +1490,19 @@ async fn ingress_options(
     } else {
         (current.id, Vec::new())
     };
+    let port_protocols = PortProtocol::find_by_statement(sea_orm::Statement::from_sql_and_values(
+        tx.get_database_backend(),
+        "SELECT DISTINCT c.port, c.protocol FROM sites s
+         CROSS JOIN LATERAL site_listener_claims(s.ingress_port, s.ingress_protocol, s.additional_ingresses) c
+         WHERE $1::uuid IS NULL OR s.id <> $1 ORDER BY c.port, c.protocol",
+        [query.site_id.into()],
+    )).all(&tx).await?;
     let writes_enabled = custom_ingress_writes_enabled(&tx).await?;
     let agents =
         crate::grpc::ingress_agent_options(&tx, &state.agents, owner).await?;
     tx.commit().await?;
     Ok(Json(IngressOptions {
+        port_protocols,
         admin_port: state.agents.admin_port,
         writes_enabled,
         agents,
@@ -1499,6 +1516,16 @@ pub(crate) async fn custom_ingress_writes_enabled(
     db.query_one(sea_orm::Statement::from_string(db.get_database_backend(),
         "SELECT NOT EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'sites'::regclass AND conname = 'sites_custom_ingress_disabled')"
     )).await?.ok_or_else(|| DbErr::Custom("missing ingress migration state".into()))?.try_get_by_index(0)
+}
+
+// A single-site write has reached its final listener set. Report conflicts before
+// checking whether the node can bind the requested protocol. Bulk restore keeps
+// the deferred constraint so two sites can exchange ports in one transaction.
+async fn check_final_listeners(tx: &sea_orm::DatabaseTransaction) -> Result<(), ApiError> {
+    tx.execute_unprepared("SET CONSTRAINTS check_site_listener_set IMMEDIATE")
+        .await
+        .map_err(map_site_domain_conflict)?;
+    Ok(())
 }
 
 async fn write_ingress_assignments(
@@ -1730,6 +1757,9 @@ async fn create(
     .await
     .map_err(map_site_domain_conflict)?;
 
+    if model.ingress_port.is_some() {
+        check_final_listeners(&txn).await?;
+    }
     super::static_drafts::bind_version(&txn, id, current.id, model.site_handler.as_ref(), payload.static_draft_id).await?;
     if model.ingress_port.is_some() {
         write_ingress_assignments(
@@ -2747,6 +2777,9 @@ async fn update(
         // Same backstop as create: the uniqueness check above is a pre-check,
         // the DB constraint decides under concurrency.
         .map_err(map_site_domain_conflict)?;
+    if ingress_changed {
+        check_final_listeners(&txn).await?;
+    }
     if handler_changed || payload.static_draft_id.is_some() {
         super::static_drafts::bind_version(&txn, id, current.id, updated.site_handler.as_ref(), payload.static_draft_id).await?;
     }

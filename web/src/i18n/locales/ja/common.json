@@ -606,6 +606,8 @@
       "ingressAddPort": "待受ポートを追加",
       "ingressCertificate": "HTTPS 証明書",
       "ingressCertificateLater": "後で設定",
+      "protocolConflict": "他のサイトがこのポートを別のプロトコルで使用しています。ポートとプロトコルを確認してください。",
+      "portProtocolTaken": "ポート {{port}} は {{protocol}} 用です。同じプロトコルで共有するか、別のポートを選択してください。",
       "ingressPortInvalid": "1～65535 のサービスポートを入力してください。80 と 443 は既定の入口を使用します。管理ポートは予約済みです。",
       "ingressDefault": "既定の入口",
       "ingressLoadError": "リスナー情報を取得できません。",

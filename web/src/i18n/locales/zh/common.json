@@ -605,6 +605,8 @@
       "ingressAddPort": "添加一个监听端口",
       "ingressCertificate": "HTTPS 证书",
       "ingressCertificateLater": "稍后配置",
+      "protocolConflict": "此端口的入口协议与其他站点冲突，请核对端口和协议。",
+      "portProtocolTaken": "端口 {{port}} 已配置为 {{protocol}}。可共享此协议，或更换端口使用另一协议。",
       "ingressPortInvalid": "请输入 1–65535 范围内的业务端口。80 和 443 使用默认入口，管理端口由控制台专用。",
       "ingressDefault": "默认入口",
       "ingressLoadError": "无法加载节点监听清单。",

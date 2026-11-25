@@ -666,7 +666,7 @@ concurrent request wins the claim before creation commits.
 
 Administrators can retrieve ingress choices before creating, editing or cloning a site.
 Pass the optional `site_id` when editing to obtain the site's current assignments and the owner's eligible agents.
-Omit it for a new site or clone. The response contains `writes_enabled`, `assigned_agent_ids` and `agents`.
+Omit it for a new site or clone. `port_protocols` lists distinct configured listener claims in port order, for example `[{"port":8080,"protocol":"http"}]`. It covers all sites (including paused sites), additional listeners and the legacy default pair. Editing excludes the selected site's own claims. Different hostnames may share a protocol. Mixed protocols on one port return HTTP 400 with `site.ingress_protocol_conflict`, including restore validation. The response contains `writes_enabled`, `assigned_agent_ids` and `agents`.
 Each agent has an `id`, a `name` and a `listeners` array of pairs such as `[81, "http"]`.
 Only current authenticated selected-scope agents with a fresh bound listener are offered.
 When editing a custom site, omit `ingress_agent_ids` to preserve assignments or provide the complete replacement list.

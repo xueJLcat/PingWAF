@@ -996,7 +996,7 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             ),
             "protocol" => (
                 "restored sites use different protocols on one port",
-                "site.ingress_invalid",
+                crate::api::sites::INGRESS_PROTOCOL_CONFLICT,
             ),
             _ => ("invalid restored hostname or alias", "site.ingress_invalid"),
         };

@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { defaultIngress, ingressRequest } from './ingressForm'
+import { defaultIngress, ingressPortError, ingressRequest } from './ingressForm'
 
 describe('ingress form payload', () => {
+  it('checks primary and additional ports against other sites while allowing HTTP sharing', () => {
+    const claims = [{ port: 8080, protocol: 'http' as const }]
+    const draft = { ...defaultIngress, listener: 'http:8080' }
+    expect(ingressPortError(draft, 9080, claims)).toBeUndefined()
+    expect(ingressPortError({ ...draft, listener: 'https:8080' }, 9080, claims)).toBe('pages.sites.protocolConflict')
+    expect(ingressPortError({ ...draft, listener: 'http:81', additional: ['https:8080'] }, 9080, claims)).toBe('pages.sites.protocolConflict')
+    expect(ingressPortError({ ...draft, additional: ['https:8080'] }, 9080, claims)).toBe('pages.sites.duplicatePort')
+  })
+
   it('preserves an unchanged listener and assignments when editing', () => {
     expect(ingressRequest({ ...defaultIngress, listener: 'https:82' }, 'https:82')).toEqual({})
   })
