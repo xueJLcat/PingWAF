@@ -1,10 +1,11 @@
-//! Configuration version history: list, inspect and roll back.
+//! Configuration version history: list, inspect, delete and roll back.
 //!
 //! Versions are recorded by the configuration push path
-//! ([`crate::grpc::notify_config_changed`]); this module only reads them and
-//! restores a chosen snapshot through [`crate::config_history::rollback`].
+//! ([`crate::grpc::notify_config_changed`]). Removing a history row does not
+//! change the live configuration or notify the agents.
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -27,7 +28,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/config-versions", get(list_versions))
         .route("/config-versions/prune", post(prune_versions))
-        .route("/config-versions/{version_id}", get(show_version))
+        .route(
+            "/config-versions/{version_id}",
+            get(show_version).delete(delete_version),
+        )
         .route(
             "/config-versions/{version_id}/rollback",
             post(rollback_version),
@@ -176,6 +180,25 @@ async fn show_version(
     Ok(Json(row))
 }
 
+/// Deletes a single historical snapshot, including its rollback payload.
+async fn delete_version(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(version_id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let result = config_version::Entity::delete_by_id(version_id)
+        .exec(&state.db)
+        .await?;
+    if result.rows_affected == 0 {
+        return Err(ApiError::NotFound(format!(
+            "version {version_id} not found"
+        )));
+    }
+    tracing::info!(version_id, actor = %current.email, "configuration snapshot deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /api/v1/config-versions/{id}/rollback` — administrators only.
 ///
 /// Restores the snapshot inside a transaction, then pushes the restored
@@ -237,6 +260,54 @@ mod tests {
     use sea_orm::DbErr;
 
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn delete_snapshot_postgres() {
+        use sea_orm::{ActiveModelTrait, Database, Set};
+        use sea_orm_migration::MigratorTrait;
+
+        let db = Database::connect(
+            std::env::var("PINGWAF_TEST_DATABASE_URL").unwrap(),
+        )
+        .await
+        .unwrap();
+        crate::migration::Migrator::up(&db, None).await.unwrap();
+        let mut ids = Vec::new();
+        for scope in ["global", "deployment"] {
+            let row = config_version::ActiveModel {
+                scope: Set(scope.into()),
+                source: Set("api".into()),
+                snapshot: Set(serde_json::json!({"schema": 2, "tables": {}})),
+                created_at: Set(Utc::now()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+            ids.push(row.id);
+        }
+        let state = State(AppState::new(
+            db,
+            Default::default(),
+            crate::grpc::AgentRegistry::new(),
+        ));
+        let admin = AuthUser::new(Uuid::new_v4(), "admin@example.test", "admin");
+        let viewer = AuthUser::new(Uuid::new_v4(), "viewer@example.test", "viewer");
+        let target = ids[0];
+        let denied = delete_version(state.clone(), viewer, Path(target))
+            .await.unwrap_err();
+        assert_eq!(denied.into_response().status(), StatusCode::FORBIDDEN);
+        let removed = delete_version(state.clone(), admin.clone(), Path(target))
+            .await.unwrap();
+        assert_eq!(removed, StatusCode::NO_CONTENT);
+        let repeated = delete_version(state.clone(), admin.clone(), Path(target))
+            .await.unwrap_err();
+        assert_eq!(repeated.into_response().status(), StatusCode::NOT_FOUND);
+        assert!(show_version(state.clone(), admin.clone(), Path(ids[1])).await.is_ok());
+        let missing = rollback_version(state, admin, Path(target)).await.unwrap_err();
+        assert_eq!(missing.into_response().status(), StatusCode::NOT_FOUND);
+    }
 
     /// R-04: a rollback target that no longer exists reaches the caller as the
     /// shared 404 envelope. `config_history::rollback` reports it as

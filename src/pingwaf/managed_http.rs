@@ -957,6 +957,9 @@ mod tests {
         identity.id = Uuid::new_v4().to_string();
         identity.rules.as_mut().unwrap().site_id = identity.id.clone();
         let id = identity.id.clone();
+        identity.rules.as_mut().unwrap().ssl = Some(pingwaf_proto::SslConfig {
+            enabled: true, self_signed: true, ..Default::default()
+        });
         invalid.ingress.as_mut().unwrap().protocol = IngressProtocol::Https as i32;
         let (session, incoming) = receive(vec![healthy, invalid]);
         let temp = tempfile::tempdir().unwrap();
@@ -1160,10 +1163,18 @@ mod tests {
                 ca.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyCertSign];
                 let ca = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
                 roots.add(ca.der().clone()).unwrap();
-                let mut server = CertificateParams::new(vec![name.to_owned(), alias.to_owned()]).unwrap();
-                server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-                let server_key = KeyPair::generate().unwrap();
-                let server = server.signed_by(&server_key, &ca).unwrap();
+                let self_signed = name == "shared.example";
+                let (cert_pem, key_pem) = if self_signed {
+                    use rustls::pki_types::{CertificateDer, pem::PemObject};
+                    let leaf = pingwaf_server::site_cert::issue(name, &[alias.to_owned()], 30).unwrap();
+                    roots.add(CertificateDer::from_pem_slice(leaf.cert_pem.as_bytes()).unwrap()).unwrap();
+                    (leaf.cert_pem, leaf.key_pem)
+                } else {
+                    let mut server = CertificateParams::new(vec![name.to_owned(), alias.to_owned()]).unwrap();
+                    server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+                    let key = KeyPair::generate().unwrap();
+                    (server.signed_by(&key, &ca).unwrap().pem(), key.serialize_pem())
+                };
                 let mut client = CertificateParams::new(Vec::<String>::new()).unwrap();
                 client.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
                 let client_key = KeyPair::generate().unwrap();
@@ -1177,8 +1188,9 @@ mod tests {
                     http2_enabled: Some(name == "shared.example"),
                     mtls_require_client_cert: true,
                     mtls_client_ca: ca.pem(),
-                    cert_pem: server.pem(),
-                    key_pem: server_key.serialize_pem(),
+                    self_signed,
+                    cert_pem,
+                    key_pem,
                     ..Default::default()
                 });
                 if name == "other.example" {

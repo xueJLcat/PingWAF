@@ -28,7 +28,7 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 | WAF | `GET|PUT /sites/{id}/waf/settings`、`GET /sites/{id}/waf/posture`、`GET /managed-rules` |
 | ログ | `GET /logs/security`、`GET /logs/access`、`GET /logs/access/{id}`、`DELETE /logs/purge` |
 | エージェント | `GET /agents`、`POST /agents/enroll`、`POST /agents/{id}/commands` |
-| バージョン | `GET /config-versions`、`GET /config-versions/{id}`、`POST /config-versions/{id}/rollback` |
+| バージョン | `GET /config-versions`、`GET /config-versions/{id}`、`DELETE /config-versions/{id}`、`POST /config-versions/{id}/rollback` |
 | システム | `GET /system/metrics`、`/system/profile`、`/system/nodes`、`/system/status` |
 
 サイト単位の呼び出しはテナント境界（`load_site_read` / `load_site_write`）を通るため、トークンは管理権限のあるサイトだけを参照できます。パラメータとレスポンス形状を含む完全なリファレンスはリポジトリの `docs/api.md` です。
@@ -53,6 +53,8 @@ curl -s -X POST https://localhost:9080/api/v1/keys \
 コントロールプレーンは `POST /mcp`（ルートパス、意図的に `/api/v1` の外）で MCP の Streamable HTTP エンドポイントを提供します。`pwk_…` の API キーまたは JWT を受け付け、書き込みツールは所有者が管理者であることを要求します。`GET` と `DELETE` は `405` を返し、本文は 256 KiB までです。
 
 ## 通知
+
+通知画面で ServerChan チャネルを追加し、Turbo または ServerChan³ の SendKey を入力します。購読イベントの選択、キーの更新、テスト送信ができます。
 
 Webhook 通知は `PINGWAF_WEBHOOK_URL` で設定し、通知ルートからコンソールで現在の設定を確認できます。セキュリティイベントを既存のアラート基盤へ流すのに使えます。
 

@@ -688,6 +688,8 @@ async fn site_ingress_migration_postgres() {
     assert!(Migrator::down(&db, Some(1)).await.unwrap_err().to_string().contains("remove additional site listeners"));
     db.execute_unprepared(&format!("UPDATE sites SET additional_ingresses='{{}}' WHERE id='{a}'")).await.unwrap();
     Migrator::down(&db, Some(1)).await.unwrap();
+    // The upstream tunnel repair follows the local 107 ingress migration.
+    Migrator::down(&db, Some(1)).await.unwrap();
     let error = Migrator::down(&db, Some(1)).await.unwrap_err();
     assert_db_error(&error, "23514", Some("sites_custom_ingress_disabled"));
     assert!(scalar::<bool>(&db, "SELECT NOT EXISTS (SELECT FROM pg_constraint WHERE conrelid='sites'::regclass AND conname='sites_custom_ingress_disabled')").await);

@@ -142,6 +142,9 @@ export function GlobalSslPage() {
     },
   })
   const sites = sitesQuery.data ?? []
+  const selectedSite = sites.find((site) => site.id === form.siteId)
+  const eligibleSite = allowsCertificateIssuance(selectedSite)
+  const acmeEmail = form.acmeEmail.trim()
 
   const filter: CertificateListQuery = {
     ...(siteFilter ? { site_id: siteFilter } : {}),
@@ -351,7 +354,7 @@ export function GlobalSslPage() {
       setFormError(t('pages.sslGlobal.acmeNeedsSite'))
       return
     }
-    if (form.mode === 'acme' && !allowsCertificateIssuance(sites.find((s) => s.id === siteId))) {
+    if (form.mode === 'acme' && !eligibleSite) {
       setFormError(t('pages.ssl.issuancePorts'))
       return
     }
@@ -368,8 +371,11 @@ export function GlobalSslPage() {
     if (form.mode === 'acme') {
       payload.auto_renew = form.autoRenew
       payload.acme_challenge_type = form.challengeType
-      const email = form.acmeEmail.trim()
-      if (email) payload.acme_email = email
+      if (!acmeEmail) {
+        setFormError(t('pages.ssl.acmeEmailHint'))
+        return
+      }
+      payload.acme_email = acmeEmail
       if (form.challengeType === 'dns-01' && form.dnsProvider) {
         payload.acme_dns_provider = form.dnsProvider
         const config = Object.fromEntries(
@@ -894,8 +900,8 @@ export function GlobalSslPage() {
             <Button
               variant="primary"
               loading={createCert.isPending}
-              // ACME challenges need a site up front — block before the 400.
-              disabled={form.mode === 'acme' && !form.siteId}
+              // The control plane requires an eligible site and ACME contact email.
+              disabled={form.mode === 'acme' && (!eligibleSite || !acmeEmail)}
               onClick={submit}
             >
               {form.mode === 'acme'
@@ -917,7 +923,6 @@ export function GlobalSslPage() {
               {
                 value: 'acme',
                 label: t('pages.ssl.acme'),
-                disabled: !!form.siteId && !allowsCertificateIssuance(sites.find((s) => s.id === form.siteId)),
                 icon: <Lightning weight="duotone" className="h-4 w-4" />,
               },
               {
@@ -931,11 +936,9 @@ export function GlobalSslPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <Select
               label={t('pages.sslGlobal.site')}
-              hint={form.siteId && !allowsCertificateIssuance(sites.find((s) => s.id === form.siteId)) ? t('pages.ssl.issuancePorts') : t('pages.sslGlobal.siteHint')}
+              hint={t('pages.sslGlobal.siteHint')}
               options={[
-                // Unbound upload: the certificate is stored without a site and
-                // can be bound to one or more sites afterwards.
-                { value: '', label: t('pages.sslGlobal.noSiteOption') },
+                { value: '', label: t(form.mode === 'acme' ? 'pages.sslGlobal.selectSite' : 'pages.sslGlobal.noSiteOption') },
                 ...sites.map((s) => ({ value: s.id, label: `${formatSiteAddress(s)} · ${s.name}` })),
               ]}
               value={form.siteId}
@@ -948,8 +951,8 @@ export function GlobalSslPage() {
                   .filter((s) => s.id === siteId)
                   .flatMap((s) => [s.domain, ...s.alternate_domains])
                   .join(',')
-                const allowed = allowsCertificateIssuance(sites.find((s) => s.id === siteId))
-                setForm((f) => ({ ...f, siteId, domain: domain || f.domain, mode: siteId && !allowed ? 'manual' : f.mode }))
+                setForm((f) => ({ ...f, siteId, domain: domain || f.domain }))
+                setFormError(null)
               }}
             />
             <Input
@@ -966,20 +969,20 @@ export function GlobalSslPage() {
             />
           </div>
 
-          {/* Site selection is optional: without it the certificate is stored
-              unbound and can be bound to one or more sites afterwards. */}
-          <p className="-mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-fg-subtle">
-            <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            {t('pages.sslGlobal.multiSiteNote')}
-          </p>
+          {selectedSite && (
+            <p className="-mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-fg-subtle">
+              <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {t('pages.sslGlobal.multiSiteNote')}
+            </p>
+          )
 
-          {form.mode === 'acme' && !form.siteId && (
+          {form.mode === 'acme' && !eligibleSite && (
             <p
               role="alert"
               className="flex items-start gap-1.5 text-xs font-medium text-fg-warning"
             >
               <Warning weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              {t('pages.sslGlobal.acmeNeedsSite')}
+              {t(form.siteId ? 'pages.ssl.issuancePorts' : 'pages.sslGlobal.acmeNeedsSite')}
             </p>
           )}
 
@@ -991,6 +994,7 @@ export function GlobalSslPage() {
                   hint={t('pages.ssl.acmeEmailHint')}
                   placeholder="admin@example.com"
                   type="email"
+                  required
                   value={form.acmeEmail}
                   onChange={(e) => setForm((f) => ({ ...f, acmeEmail: e.target.value }))}
                 />

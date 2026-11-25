@@ -594,6 +594,10 @@ Queue a fixed statistics snapshot. Supply `sites` (up to 16 authorized site UUID
 `from` and `to` (timestamps spanning at most seven days), and an IANA `timezone`.
 The response contains the job UUID. A full queue returns HTTP 409.
 
+### DELETE /reports/{id}
+
+Users with write access can delete their own ready or failed report. Returns `204` on deletion or `404` when a completed report is unavailable to the caller.
+
 ### GET /reports/{id}/{format}
 
 Download the completed snapshot as a Chinese PDF or UTF-8 CSV. Use `pdf` or `csv`
@@ -640,7 +644,7 @@ Discard an owned draft. Returns 204.
 
 Create a new site. Reverse proxies require `upstream_address`. For a standalone redirect or static site, specify explicit listeners, eligible target nodes, and a `site_handler`. A ZIP publication supplies `{"kind":"zip","digest":"<sha256>"}` with the owner's `static_draft_id`. The publication and assignment commit together.
 
-A new site starts with HTTPS enabled and a **self-signed certificate** the control plane issues for its `domain` and `alternate_domains` (see [PUT /sites/{site_id}/ssl](#put-sitessite_idssl)); upload a certificate, select one, or configure ACME to replace it.
+For sites using only HTTP 80 or HTTPS 443, the control plane issues a **self-signed certificate** covering the primary and alternate domains. Sites with custom ports can upload or select an existing certificate. See [PUT /sites/{site_id}/ssl](#put-sitessite_idssl).
 
 **Request:**
 ```json
@@ -1170,7 +1174,7 @@ precedence:
 3. an ACME order (`acme_email`),
 4. `self_signed: true` — the control plane issues a leaf covering the site's
    `domain` and `alternate_domains`, records `issuer: "PingWAF Self-Signed"` and
-   renews it before expiry. New sites start in this mode.
+   renews it before expiry. Issuance requires every listener to use HTTP 80 or HTTPS 443. The managed HTTPS listener serves the panel-issued PEM pair for that site.
 
 Setting `self_signed` clears `certificate_id` and turns HTTPS on; selecting a
 certificate, uploading a pair or configuring ACME turns `self_signed` off, and
@@ -1448,6 +1452,8 @@ Restrictions on an unbound row:
   see [DELETE /certificates/{cert_id}](#delete-certificatescert_id).
 
 ### POST /certificates
+
+For ACME, supply the owning site's `site_id` and contact `acme_email`. Every configured listener must use HTTP 80 or HTTPS 443. The console preserves the selected application method and challenge settings while you change sites.
 
 Upload a certificate **without** naming a site (administrators). The body is
 the manual-upload shape — `domain` and the PEM pair are mandatory; `site_id`
@@ -2184,6 +2190,14 @@ RSS as `process_rss_bytes`), newest first. Cumulative counters (network and disk
 ### DELETE /agents/{agent_id}
 
 Deregister an agent.
+
+### GET /agents/{agent_id}/listener-policy
+
+Administrators can read the node's saved business listener addresses, site overrides and latest reported sockets.
+
+### PUT /agents/{agent_id}/listener-policy
+
+Administrators submit the current `revision`, node `addresses` and site/port `overrides`. The server saves the change atomically. A stale revision returns `409` and requires reloading the policy.
 
 ### GET /agents/{agent_id}/static-roots
 
@@ -3938,7 +3952,7 @@ rest when `PINGWAF_SECRET_KEY` is set.
     "updated_at": "2026-10-01T00:00:00Z" } ]
 ```
 
-`kind` is one of `email`, `wecom`, `dingtalk`, `webhook` (the generic one
+`kind` is one of `email`, `wecom`, `dingtalk`, `serverchan`, `webhook` (the generic one
 POSTs the full event payload as JSON). `events` lists the subscribed event
 types — an empty list subscribes to all of
 `agent.offline`, `agent.online`, `agent.resource`,
@@ -3958,7 +3972,9 @@ default / `starttls` / `none`); `wecom`, `dingtalk` and `webhook` require a
 non-empty `config.url`. An unknown `kind` or an unknown event type answers
 `400 bad_request` naming the accepted values.
 
-Secret keys (`smtp_pass`, `secret`, `secret_token`) never come back in plain
+ServerChan requires `config.send_key`. Turbo and ServerChan³ keys select their respective provider endpoints. Both test and event delivery check the HTTP status and provider response code.
+
+Secret keys (`smtp_pass`, `secret`, `secret_token`, `send_key`) never come back in plain
 text: responses carry `__REDACTED__` in their place.
 
 ### GET /notifications/channels/{channel_id}
@@ -5586,6 +5602,12 @@ which is what the console diffs against the previous version.
 
 The full snapshot, including the row payloads. Returns `404` when the version
 does not exist.
+
+### DELETE /config-versions/{version_id}
+
+Administrators can delete one recorded snapshot. Success returns `204`. A
+missing or already deleted ID returns `404`. Subsequent inspection and rollback
+of that ID return `404`. Live settings and other history entries remain available.
 
 ### POST /config-versions/{version_id}/rollback
 

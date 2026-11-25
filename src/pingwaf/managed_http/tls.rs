@@ -27,9 +27,7 @@ pub(super) struct TlsSite {
 impl TlsSite {
     pub(super) fn build(ssl: &SslConfig) -> anyhow::Result<Self> {
         ensure!(ssl.enabled, "TLS is disabled for this HTTPS site");
-        // Until issuance is integrated, require already-issued certificate
-        // material. In particular, never borrow the legacy self-signed CA.
-        ensure!(!ssl.self_signed, "managed self-signed TLS is not supported");
+        // Uploaded and panel-issued certificates both use the site PEM pair.
         let http1 = ssl.http1_enabled.unwrap_or(true);
         let http2 = ssl.http2_enabled.unwrap_or(true);
         ensure!(http1 || http2, "no HTTP protocol enabled on HTTPS site");

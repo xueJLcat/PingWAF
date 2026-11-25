@@ -61,6 +61,8 @@ export const configVersionsApi = {
   get: (id: number) =>
     apiClient.get<ConfigVersionDetail>(`/config-versions/${id}`),
 
+  remove: (id: number) => apiClient.delete<void>(`/config-versions/${id}`),
+
   rollback: (id: number) =>
     apiClient.post<RollbackResult>(`/config-versions/${id}/rollback`, {}),
 

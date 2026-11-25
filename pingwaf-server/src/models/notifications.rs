@@ -11,7 +11,8 @@ pub mod channel_kind {
     /// Generic JSON webhook: the full event payload is POSTed as-is.
     pub const WEBHOOK: &str = "webhook";
 
-    pub const ALL: [&str; 4] = [EMAIL, WECOM, DINGTALK, WEBHOOK];
+    pub const SERVERCHAN: &str = "serverchan";
+    pub const ALL: [&str; 5] = [EMAIL, WECOM, DINGTALK, WEBHOOK, SERVERCHAN];
 }
 
 /// Event types emitted by the control plane.

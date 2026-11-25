@@ -8,6 +8,13 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## Local changes based on PingWAF 0.33.1
+
+- Keep the ACME application and challenge settings when selecting a site. The form explains custom-port restrictions and requires a contact email before submission.
+- Serve panel-generated self-signed certificates on managed HTTPS listeners.
+- Add ServerChan Turbo and ServerChan³ notification channels with masked SendKeys.
+- Allow administrators to delete an individual configuration snapshot. Snapshot action icons show their labels on keyboard focus and hover.
+
 ## [PingWAF 0.33.1] — 2026-11-25
 
 ### Fixed

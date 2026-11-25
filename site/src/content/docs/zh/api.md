@@ -30,7 +30,7 @@ curl -s https://localhost:9080/api/v1/sites -H "Authorization: Bearer $TOKEN"
 | WAF | `GET|PUT /sites/{id}/waf/settings`、`GET /sites/{id}/waf/posture`、`GET /managed-rules` |
 | 日志 | `GET /logs/security`、`GET /logs/access`、`GET /logs/access/{id}`、`DELETE /logs/purge` |
 | Agent | `GET /agents`、`POST /agents/enroll`、`PUT /agents/{id}/sites`、`POST /agents/{id}/commands` |
-| 配置版本 | `GET /config-versions`、`GET /config-versions/{id}`、`POST /config-versions/{id}/rollback`、`POST /config-versions/prune` |
+| 配置版本 | `GET /config-versions`、`GET /config-versions/{id}`、`DELETE /config-versions/{id}`、`POST /config-versions/{id}/rollback`、`POST /config-versions/prune` |
 | 系统 | `GET /system/metrics`、`/system/profile`、`/system/nodes`、`/system/status` |
 
 站点级接口通过租户边界（`load_site_read` / `load_site_write`）读写，token 只能看到自己有权管理的站点。包含全部查询参数与响应结构的完整参考见仓库中的 `docs/api.md`。
@@ -100,6 +100,8 @@ curl -s -X POST https://localhost:9080/api/v1/keys \
 控制面在 `POST /mcp` 暴露 Streamable HTTP 的 MCP 端点（根路径，刻意不在 `/api/v1` 下）。它接受 `pwk_…` API Key 或 JWT；写操作还要求密钥拥有者是管理员。`GET` 与 `DELETE` 返回 `405`，请求体上限 256 KiB。这是让助手查看站点、规则与日志而无需交付控制台凭据的推荐方式。
 
 ## 通知
+
+在「通知」中添加 Server酱渠道，填写 Turbo 或 Server酱³ 的 SendKey。可设置订阅事件、编辑或替换密钥，也可通过「测试」检查投递结果。
 
 Webhook 通知通过 `PINGWAF_WEBHOOK_URL` 配置，通知路由可以从控制台读取当前配置。可以用它把安全事件投递到现有的告警链路。
 

@@ -46,6 +46,7 @@ const KIND_TONE: Record<string, 'info' | 'success' | 'warning' | 'neutral'> = {
   email: 'info',
   wecom: 'success',
   dingtalk: 'info',
+  serverchan: 'info',
   webhook: 'neutral',
 }
 
@@ -929,11 +930,15 @@ function ChannelDialog({ initial, onClose, onSaved }: ChannelDialogProps) {
           <Select
             label={t('pages.notifications.colKind')}
             value={kind}
-            onChange={(e) => setKind(e.target.value as NotificationChannel['kind'])}
+            onChange={(e) => {
+              setKind(e.target.value as NotificationChannel['kind'])
+              setConfig(initial && e.target.value === initial.kind ? initial.config : {})
+            }}
             options={[
               { value: 'email', label: t('pages.notifications.kind_email') },
               { value: 'wecom', label: t('pages.notifications.kind_wecom') },
               { value: 'dingtalk', label: t('pages.notifications.kind_dingtalk') },
+              { value: 'serverchan', label: t('pages.notifications.kind_serverchan') },
               { value: 'webhook', label: t('pages.notifications.kind_webhook') },
             ]}
           />
@@ -1014,6 +1019,16 @@ function ChannelDialog({ initial, onClose, onSaved }: ChannelDialogProps) {
                   ? 'https://oapi.dingtalk.com/robot/send?access_token=…'
                   : 'https://example.com/hooks/pingwaf'
             }
+          />
+        )}
+        {kind === 'serverchan' && (
+          <Input
+            label="SendKey"
+            type="password"
+            autoComplete="off"
+            value={fieldValue('send_key')}
+            onChange={(e) => setField('send_key', e.target.value)}
+            hint={t('pages.notifications.serverchanHint')}
           />
         )}
         {kind === 'dingtalk' && (

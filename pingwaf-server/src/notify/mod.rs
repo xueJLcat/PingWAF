@@ -537,6 +537,9 @@ async fn deliver_to(
         crate::models::channel_kind::WECOM => {
             webhook::send_wecom(http, &channel.config, event).await
         },
+        crate::models::channel_kind::SERVERCHAN => {
+            webhook::send_serverchan(http, &channel.config, event).await
+        },
         crate::models::channel_kind::DINGTALK => {
             webhook::send_dingtalk(http, &channel.config, event).await
         },

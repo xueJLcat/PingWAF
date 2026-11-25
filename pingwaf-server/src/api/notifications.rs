@@ -79,6 +79,9 @@ fn validate_config(kind: &str, config: &Value) -> Result<(), ApiError> {
         channel_kind::WECOM | channel_kind::DINGTALK => {
             get_url()?;
         },
+        channel_kind::SERVERCHAN => {
+            crate::notify::webhook::serverchan_url(config).map_err(ApiError::BadRequest)?;
+        },
         channel_kind::WEBHOOK => {
             get_url()?;
         },
@@ -288,7 +291,9 @@ async fn update_channel(
     // so open them first — the unredacted values are then re-sealed below.
     let mut stored = row.config.clone();
     crate::notify::secretbox::open_config(&mut stored);
-    unredact(&mut config, &stored);
+    if row.kind == payload.kind {
+        unredact(&mut config, &stored);
+    }
     validate_config(&payload.kind, &config)?;
     validate_events(&payload.events)?;
     crate::notify::secretbox::seal_config(&mut config);

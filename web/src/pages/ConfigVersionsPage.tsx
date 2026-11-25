@@ -1,11 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowCounterClockwise,
+  Broom,
   ClockCounterClockwise,
   Eye,
   Trash,
+  X,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { BackupsCard } from '@/components/config/BackupsCard'
@@ -22,6 +24,8 @@ import { Select } from '@/components/ui/Select'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { Table, type Column } from '@/components/ui/Table'
 import { useToast } from '@/components/ui/Toast'
+import { Tooltip } from '@/components/ui/Tooltip'
+import { ApiError } from '@/api/client'
 import {
   configVersionsApi,
   configVersionKeys,
@@ -42,6 +46,21 @@ const PAGE_SIZE = 50
 /** Scope filter values for settings-only and full-deployment versions. */
 const GLOBAL_SCOPE = 'global'
 const DEPLOYMENT_SCOPE = 'deployment'
+
+function SnapshotAction({ label, icon, onClick, loading, danger }: {
+  label: string
+  icon: ReactNode
+  onClick: () => void
+  loading?: boolean
+  danger?: boolean
+}) {
+  return (
+    <Tooltip content={label} align="end">
+      <Button variant="ghost" size="icon" aria-label={label} onClick={onClick}
+        loading={loading} className={danger ? 'hover:text-fg-danger' : undefined} icon={icon} />
+    </Tooltip>
+  )
+}
 
 /* ── Snapshot diffing ───────────────────────────────────────────────── */
 
@@ -180,6 +199,7 @@ function VersionDetailDialog({
 }) {
   const { t } = useTranslation()
 
+  const canWrite = useCanWrite()
   const detail = useQuery({
     queryKey: configVersionKeys.detail(versionId),
     queryFn: () => configVersionsApi.get(versionId),
@@ -220,17 +240,10 @@ function VersionDetailDialog({
       description={t('pages.configVersions.detailDescription')}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose}>
-            {t('common.close')}
-          </Button>
-          {data && (
-            <Button
-              variant="danger"
-              onClick={() => onRollback(data)}
-            >
-              <ArrowCounterClockwise className="h-4 w-4" />
-              {t('pages.configVersions.rollback')}
-            </Button>
+          <SnapshotAction label={t('common.close')} icon={<X className="h-4 w-4" />} onClick={onClose} />
+          {canWrite && data && (
+            <SnapshotAction label={t('pages.configVersions.rollback')}
+              icon={<ArrowCounterClockwise className="h-4 w-4" />} onClick={() => onRollback(data)} />
           )}
         </>
       }
@@ -377,6 +390,7 @@ export function ConfigVersionsPage() {
   const [detail, setDetail] = useState<ConfigVersionSummary | null>(null)
   const [pending, setPending] = useState<ConfigVersionSummary | null>(null)
   const [confirmPrune, setConfirmPrune] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<ConfigVersionSummary | null>(null)
 
   const sites = useSitesList({ page: 1, page_size: 200 })
 
@@ -421,6 +435,26 @@ export function ConfigVersionsPage() {
       })
     },
     onError: (error) => toast.error(errorMessage(error)),
+  })
+
+  const forgetSnapshot = (id: number) => {
+    setDeleteTarget(null)
+    queryClient.removeQueries({ queryKey: configVersionKeys.detail(id), exact: true })
+    return queryClient.invalidateQueries({ queryKey: configVersionKeys.all })
+  }
+  const remove = useMutation({
+    mutationFn: configVersionsApi.remove,
+    onSuccess: (_, id) => {
+      toast.success(t('pages.configVersions.deleteDone', { id }))
+      return forgetSnapshot(id)
+    },
+    onError: (error, id) => {
+      if (error instanceof ApiError && error.status === 404) {
+        toast.error(t('pages.configVersions.alreadyDeleted', { id }))
+        return forgetSnapshot(id)
+      }
+      toast.error(errorMessage(error))
+    },
   })
 
   /**
@@ -512,24 +546,16 @@ export function ConfigVersionsPage() {
         align: 'right',
         width: '1%',
         cell: (row) => (
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setDetail(row)}
-            >
-              <Eye className="h-4 w-4" />
-              {t('pages.configVersions.view')}
-            </Button>
+          <div className="flex justify-end gap-1">
+            <SnapshotAction label={t('pages.configVersions.view')} icon={<Eye className="h-4 w-4" />}
+              onClick={() => setDetail(row)} />
             {canWrite && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setPending(row)}
-              >
-                <ArrowCounterClockwise className="h-4 w-4" />
-                {t('pages.configVersions.rollback')}
-              </Button>
+              <>
+                <SnapshotAction label={t('pages.configVersions.rollback')}
+                  icon={<ArrowCounterClockwise className="h-4 w-4" />} onClick={() => setPending(row)} />
+                <SnapshotAction label={t('pages.configVersions.deleteSnapshot')} danger
+                  icon={<Trash className="h-4 w-4" />} onClick={() => setDeleteTarget(row)} />
+              </>
             )}
           </div>
         ),
@@ -562,22 +588,11 @@ export function ConfigVersionsPage() {
         actions={
           <div className="flex items-center gap-2">
             {canWrite && (
-              <Button
-                variant="secondary"
-                onClick={() => setConfirmPrune(true)}
-                icon={<Trash weight="duotone" className="h-4 w-4" />}
-              >
-                {t('pages.configVersions.pruneAction')}
-              </Button>
+              <SnapshotAction label={t('pages.configVersions.pruneAction')} icon={<Broom className="h-4 w-4" />}
+                onClick={() => setConfirmPrune(true)} />
             )}
-            <Button
-              variant="ghost"
-              onClick={() => void versions.refetch()}
-              loading={versions.isFetching}
-            >
-              <ClockCounterClockwise className="h-4 w-4" />
-              {t('common.refresh')}
-            </Button>
+            <SnapshotAction label={t('common.refresh')} icon={<ClockCounterClockwise className="h-4 w-4" />}
+              loading={versions.isFetching} onClick={() => void versions.refetch()} />
           </div>
         }
       />
@@ -666,6 +681,20 @@ export function ConfigVersionsPage() {
         })}
         confirmLabel={t('pages.configVersions.rollback')}
         cancelLabel={t('common.cancel')}
+      />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onClose={() => { if (!remove.isPending) setDeleteTarget(null) }}
+        onConfirm={() => { if (deleteTarget) remove.mutate(deleteTarget.id) }}
+        tone="danger"
+        loading={remove.isPending}
+        title={t('pages.configVersions.deleteTitle', { id: deleteTarget?.id })}
+        description={t('pages.configVersions.deleteDescription', {
+          scope: deleteTarget?.site_domain ?? deleteTarget?.site_id ?? t(deleteTarget?.scope === DEPLOYMENT_SCOPE
+            ? 'pages.configVersions.deploymentScope' : 'pages.configVersions.globalScope'),
+          time: formatDateTime(deleteTarget?.created_at),
+        })}
+        confirmLabel={t('pages.configVersions.deleteSnapshot')}
       />
       <ConfirmDialog
         open={confirmPrune}

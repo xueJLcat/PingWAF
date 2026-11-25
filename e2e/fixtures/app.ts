@@ -58,7 +58,8 @@ async function createSite(
   },
 ) {
   await page.goto(adminPath('/sites'))
-  await page.getByRole('button', { name: 'Add site' }).click()
+  // The empty state repeats the same action beneath the page-header button.
+  await page.getByRole('button', { name: 'Add site', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: 'Add site' })
   await dialog.getByRole('textbox', { name: /Name/ }).fill(input.name)
   await dialog.getByRole('textbox', { name: /Domain/ }).fill(input.domain)

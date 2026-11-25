@@ -294,9 +294,163 @@ pub async fn send_generic(
     Ok(())
 }
 
+/// The provider embeds the secret in the URL. Never return a URL-bearing error.
+pub(crate) fn serverchan_url(config: &Value) -> Result<String, String> {
+    let invalid = || "invalid ServerChan SendKey".to_owned();
+    let key = config
+        .get("send_key")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if !key
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err(invalid());
+    }
+    if let Some(suffix) = key.strip_prefix("sctp") {
+        let (uid, token) = suffix.split_once('t').ok_or_else(invalid)?;
+        if uid.is_empty()
+            || uid.len() > 63
+            || !uid.bytes().all(|b| b.is_ascii_digit())
+            || token.is_empty()
+        {
+            return Err(invalid());
+        }
+        return Ok(format!("https://{uid}.push.ft07.com/send/{key}.send"));
+    }
+    if key
+        .strip_prefix("SCT")
+        .is_some_and(|token| !token.is_empty())
+    {
+        return Ok(format!("https://sctapi.ftqq.com/{key}.send"));
+    }
+    Err(invalid())
+}
+
+pub async fn send_serverchan(
+    http: &reqwest::Client,
+    config: &Value,
+    event: &AlertEvent,
+) -> Result<(), String> {
+    let url = serverchan_url(config)?;
+    post_serverchan(http, &url, event).await
+}
+
+async fn post_serverchan(
+    http: &reqwest::Client,
+    url: &str,
+    event: &AlertEvent,
+) -> Result<(), String> {
+    let title: String = event
+        .title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(32)
+        .collect();
+    let body = format!(
+        "title={}&desp={}",
+        urlencoding::encode(&title),
+        urlencoding::encode(&markdown(event))
+    );
+    let response = http
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| {
+            if err.is_timeout() {
+                "ServerChan request timed out"
+            } else {
+                "ServerChan request failed"
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("ServerChan replied {status}"));
+    }
+    let reply = response
+        .json::<Value>()
+        .await
+        .map_err(|_| "invalid ServerChan response")?;
+    serverchan_result(&reply)
+}
+
+fn serverchan_result(reply: &Value) -> Result<(), String> {
+    match reply.get("code").and_then(Value::as_i64) {
+        Some(0) => Ok(()),
+        Some(code) => Err(format!("ServerChan returned code {code}")),
+        None => Err("missing ServerChan response code".to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn serverchan_posts_encoded_alert_and_checks_reply() {
+        use axum::{Form, Router, routing::post};
+        use std::collections::HashMap;
+        let app = Router::new().route(
+            "/test",
+            post(|Form(fields): Form<HashMap<String, String>>| async move {
+                assert_eq!(fields["title"], "磁盘 & I/O");
+                assert!(fields["desp"].contains("详情 + 50%"));
+                axum::Json(json!({"code": 0}))
+            }),
+        );
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/test", listener.local_addr().unwrap());
+        let server =
+            tokio::spawn(
+                async move { axum::serve(listener, app).await.unwrap() },
+            );
+        let event = AlertEvent {
+            event_type: "test".into(),
+            severity: "info",
+            title: "磁盘\n& I/O".into(),
+            message: "详情 + 50%".into(),
+            details: None,
+            dedup_key: None,
+        };
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        post_serverchan(&http, &url, &event).await.unwrap();
+        assert!(
+            post_serverchan(&http, &format!("{url}/missing"), &event)
+                .await
+                .unwrap_err()
+                .contains("404")
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn serverchan_keys_and_delivery_status() {
+        assert_eq!(
+            serverchan_url(&json!({"send_key":"SCTtest"})).unwrap(),
+            "https://sctapi.ftqq.com/SCTtest.send"
+        );
+        assert_eq!(
+            serverchan_url(&json!({"send_key":"sctp123ttest"})).unwrap(),
+            "https://123.push.ft07.com/send/sctp123ttest.send"
+        );
+        for key in ["", "SCT", "sctpXtkey", "sctp1t", "SCT/key", "__REDACTED__"]
+        {
+            assert!(serverchan_url(&json!({"send_key":key})).is_err());
+        }
+        assert!(serverchan_result(&json!({"code":0})).is_ok());
+        assert!(serverchan_result(&json!({})).is_err());
+        assert_eq!(
+            serverchan_result(&json!({"code":400, "message":"sensitive"}))
+                .unwrap_err(),
+            "ServerChan returned code 400"
+        );
+    }
 
     #[test]
     fn truncation_respects_char_boundaries() {

@@ -10,6 +10,7 @@ export interface TooltipProps {
   children: ReactElement
   /** 气泡方向，默认上方。 */
   side?: Side
+  align?: 'center' | 'end'
 }
 
 interface ChildHandlers {
@@ -27,7 +28,7 @@ interface ChildHandlers {
  * 主题一致、触屏点击（聚焦）也能拿到提示，并且 `disabled` 的按钮也能显示
  * （事件挂在包裹层而不是按钮本身）。不引入第三方依赖。
  */
-export function Tooltip({ content, children, side = 'top' }: TooltipProps) {
+export function Tooltip({ content, children, side = 'top', align = 'center' }: TooltipProps) {
   const [open, setOpen] = useState(false)
   const id = useId()
   const handlers = (children.props ?? {}) as ChildHandlers
@@ -75,7 +76,8 @@ export function Tooltip({ content, children, side = 'top' }: TooltipProps) {
           role="tooltip"
           id={id}
           className={cn(
-            'pointer-events-none absolute left-1/2 z-50 -translate-x-1/2 whitespace-nowrap rounded-md border border-line bg-elevated px-2 py-1 text-xs text-fg shadow-lg',
+            'pointer-events-none absolute z-50 whitespace-nowrap rounded-md border border-line bg-elevated px-2 py-1 text-xs text-fg shadow-lg',
+            align === 'end' ? 'right-0' : 'left-1/2 -translate-x-1/2',
             side === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
           )}
         >

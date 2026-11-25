@@ -272,7 +272,8 @@ describe('certificate unbound / multi-site binding contract', () => {
     expect(src).toContain('...(siteId ? { site_id: siteId } : {})')
     expect(src).toContain('...(siteId ? { activate: form.activate } : {})')
     // ACME 无站点：提交按钮禁用 + 就地提示。
-    expect(src).toContain('disabled={form.mode === \'acme\' && !form.siteId}')
+    // The browser regression covers missing, mixed-port and eligible sites.
+    expect(src).toContain("if (form.mode === 'acme' && !siteId)")
     expect(src).toContain("t('pages.sslGlobal.acmeNeedsSite')")
     // 未绑定徽标（warning tone）。
     expect(src).toContain("t('pages.sslGlobal.unbound')")
