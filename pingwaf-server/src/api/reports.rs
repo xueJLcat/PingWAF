@@ -69,6 +69,7 @@ pub(super) fn routes() -> Router<AppState> {
 }
 
 async fn remove(State(s): State<AppState>, user: AuthUser, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+    super::common::require_write(&user)?;
     let result = s.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "DELETE FROM protection_reports WHERE id=$1 AND owner_id=$2 AND status IN ('ready','failed')",
         [id.into(), user.id.into()])).await?;

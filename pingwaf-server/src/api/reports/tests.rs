@@ -127,6 +127,8 @@ async fn fixed_report_postgres() {
         .await
         .is_err());
     assert!(remove(state.clone(), outsider, Path(id)).await.is_err());
+    let other_owner = AuthUser::new(Uuid::new_v4(), "other@example.test", "admin");
+    assert!(remove(state.clone(), other_owner, Path(id)).await.is_err());
     assert_eq!(remove(state.clone(), user.clone(), Path(id)).await.unwrap(), StatusCode::NO_CONTENT);
     assert!(download(state.clone(), user.clone(), Path((id, "csv".into()))).await.is_err());
     assert!(remove(state.clone(), user.clone(), Path(id)).await.is_err());
