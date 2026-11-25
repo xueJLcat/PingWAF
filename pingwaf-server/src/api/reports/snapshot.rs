@@ -73,19 +73,23 @@ pub(super) async fn collect(
       events AS (SELECT site_id,date_bin(step,timestamp,'2000-01-01'::timestamptz) AS t,
         count(*) FILTER(WHERE action='block') AS blocked,count(*) FILTER(WHERE action='challenge') AS challenged
         FROM security_events JOIN chosen ON chosen.id=site_id CROSS JOIN params WHERE timestamp >= $2 AND timestamp < $3 GROUP BY 1,2),
-      covered AS (SELECT site_id,date_bin(step,minute,'2000-01-01'::timestamptz) AS t,count(*) FILTER(WHERE samples=15) AS n
-        FROM report_coverage JOIN chosen ON chosen.id=site_id CROSS JOIN params WHERE minute>=date_trunc('minute',$2::timestamptz) AND minute<$3 GROUP BY 1,2)
+      covered AS (SELECT site_id,date_bin(step,minute,'2000-01-01'::timestamptz) AS t,count(*) AS slots
+        FROM report_coverage JOIN chosen ON chosen.id=site_id CROSS JOIN params CROSS JOIN generate_series(0,3) AS slot
+        WHERE minute>=date_trunc('minute',$2::timestamptz) AND minute<$3 AND (samples & (1 << slot))<>0
+          AND minute+slot*interval '15 seconds'<$3 AND minute+(slot+1)*interval '15 seconds'>$2 GROUP BY 1,2)
       SELECT c.id,c.domain,b.t,to_char(timezone($4,b.t),'YYYY-MM-DD HH24:MI') AS local_time,
         coalesce(a.n,0) AS requests,coalesce(e.blocked,0) AS blocked,coalesce(e.challenged,0) AS challenged,
-        coalesce(cv.n,0)>=ceil(extract(epoch FROM least(b.t+p.step,$3)-date_trunc('minute',greatest(b.t,$2)))/60) AS covered
+        coalesce(cv.slots,0)>0 AS sampled,
+        coalesce(cv.slots,0)>=ceil(extract(epoch FROM least(b.t+p.step,$3)-date_bin(interval '15 seconds',greatest(b.t,$2),'2000-01-01'::timestamptz))/15) AS covered
       FROM chosen c CROSS JOIN buckets b CROSS JOIN params p LEFT JOIN access a ON (a.site_id,a.t)=(c.id,b.t)
       LEFT JOIN events e ON (e.site_id,e.t)=(c.id,b.t) LEFT JOIN covered cv ON (cv.site_id,cv.t)=(c.id,b.t) ORDER BY b.t,c.domain,c.id",
       [ids.clone().into(),selection.from.into(),selection.to.into(),selection.timezone.clone().into(),(seconds as f64).into()])).await?;
     let mut metrics = Vec::with_capacity(rows.len());
     for row in rows {
         let covered: bool = row.try_get("", "covered")?;
+        let sampled: bool = row.try_get("", "sampled")?;
         let metric = |value: i64| {
-            if covered || value > 0 {
+            if covered || (live && sampled) || value > 0 {
                 Some(value)
             } else {
                 None
@@ -113,7 +117,7 @@ pub(super) async fn collect(
     let rows=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,"
       SELECT DISTINCT a.id,coalesce(a.display_name,a.hostname) AS name, a.last_heartbeat,
       (a.status='online' AND coalesce(a.last_heartbeat>now()-interval '90 seconds',false)) AS online
-      FROM agents a JOIN agent_sites s ON s.agent_id=a.id WHERE s.site_id IN (SELECT jsonb_array_elements_text($1)::uuid) ORDER BY name,id",
+      FROM agents a JOIN panel_site_listeners s ON s.agent_id=a.id WHERE s.site_id IN (SELECT jsonb_array_elements_text($1)::uuid) ORDER BY name,id",
       [ids.into()])).await?;
     let mut nodes = Vec::new();
     for row in rows {

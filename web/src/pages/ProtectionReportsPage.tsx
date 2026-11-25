@@ -20,7 +20,7 @@ type Job = { from: string; to: string; timezone: string; id: string; created_at:
 type Measures = { requests: number | null; blocked: number | null; challenged: number | null }
 type Row = Measures & { site: string; domain: string; bucket: string; local_time: string; covered: boolean }
 type Live = { generated_at: string; metrics: Row[]; nodes: { id: string; name: string; heartbeat: string | null; online: boolean }[] }
-const labels = { requests: '请求', blocked: '拦截', challenged: '挑战' }
+const labels = { requests: '已记录请求', blocked: '拦截', challenged: '挑战' }
 const blank = (): Measures => ({ requests: null, blocked: null, challenged: null })
 function totals(target: Measures, row: Measures) {
   for (const key of ['requests','blocked','challenged'] as const) {
@@ -107,7 +107,8 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
     setLastOnline({scope: scopeKey, value: screen.data})
   }
   const offline=screen.data?.nodes.some(n=>!n.online)
-  const data=denied?undefined:offline && lastOnline?.scope===scopeKey?lastOnline.value:screen.data
+  const allOffline = offline && screen.data?.nodes.every(n=>!n.online)
+  const data=denied?undefined:allOffline && lastOnline?.scope===scopeKey?lastOnline.value:screen.data
   const buckets=new Map<string,{label:string;covered:boolean} & Measures>()
   const ranked=new Map<string,{domain:string;covered:boolean} & Measures>()
   const summary = blank()
@@ -118,12 +119,6 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
     const site=ranked.get(row.site)??{...blank(),domain:row.domain,covered:true}
     totals(bucket,row);totals(site,row);bucket.covered&&=row.covered;site.covered&&=row.covered
     buckets.set(row.bucket,bucket);ranked.set(row.site,site)
-  }
-  for (const bucket of buckets.values()) {
-    if (bucket.covered) continue
-    for (const metric of ['requests', 'blocked', 'challenged'] as const) {
-      if (bucket[metric] === 0) bucket[metric] = null
-    }
   }
   const download = useMutation({
     mutationFn: async ({id, format}: {id:string; format:string}) => {
@@ -181,12 +176,12 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
     {live && ids.length > 0 && validZone && screen.isLoading && <p role="status">正在读取实时防护数据…</p>}
     {live && data && <><p>更新于 {new Date(data.generated_at).toLocaleString()} · 每 15 秒刷新
       {(offline || screen.isError || now-Date.parse(data.generated_at)>45000) && ' · 部分节点或数据已过期'}
-      {data.metrics.some(r=>!r.covered) && ' · 部分时段缺少采集记录'}</p>
+      {incomplete && ' · 部分时段缺少采集记录'} · 请求按访问日志计数，已过滤的静态请求不计入。</p>
       <dl className="grid gap-3 sm:grid-cols-3">
         {(['requests','blocked','challenged'] as const).map(key=><div key={key} className="rounded-lg border border-border p-4">
           <dt className="text-sm text-fg-subtle">{labels[key]} · 最近 15 分钟</dt>
-          <dd className="mt-1 text-2xl font-semibold tabular-nums">{summary[key]===null || (incomplete && summary[key]===0) ? '缺失' : summary[key]?.toLocaleString()}</dd>
-          {incomplete && (summary[key]??0)>0 && <span className="text-xs text-fg-subtle">已观测数量</span>}
+          <dd className="mt-1 text-2xl font-semibold tabular-nums">{summary[key]?.toLocaleString() ?? '缺失'}</dd>
+          {incomplete && summary[key]!==null && <span className="text-xs text-fg-subtle">已观测数量</span>}
         </div>)}
       </dl>
       <Card padded><h2 className="mb-3 font-medium">最近 15 分钟请求与处置趋势</h2><div className="h-64"><ResponsiveContainer width="100%" height="100%">
@@ -195,7 +190,7 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
         </LineChart></ResponsiveContainer></div></Card>
       <div className="grid gap-5 md:grid-cols-2"><Card padded className="min-w-0"><h2 className="mb-3 font-medium">站点排行</h2><table className="w-full text-left text-sm [&_td]:py-1 [&_th]:pr-2"><thead><tr><th>站点</th><th>请求</th><th>拦截</th><th>挑战</th></tr></thead>
         <tbody>{[...ranked.entries()].sort((a,b)=>(b[1].requests??-1)-(a[1].requests??-1)).map(([id,r])=><tr key={id}><td className="break-all pr-2">{addresses[id] || r.domain}{!r.covered?'（部分）':''}</td>
-          {(['requests','blocked','challenged'] as const).map(k=><td key={k}>{r[k]===null || (!r.covered && r[k]===0)?'缺失':r[k]}</td>)}</tr>)}</tbody></table></Card>
+          {(['requests','blocked','challenged'] as const).map(k=><td key={k}>{r[k]??'缺失'}</td>)}</tr>)}</tbody></table></Card>
       <Card padded className="min-w-0"><h2 className="mb-3 font-medium">节点状态</h2>{data.nodes.length===0 && <p>所选站点无已分派节点</p>}
         {(screen.data?.nodes??data.nodes).map(n=><p key={n.id} className="break-all py-1 text-sm">{n.name} · {n.online?'在线':'离线'} · {n.heartbeat?new Date(n.heartbeat).toLocaleString():'无心跳'}</p>)}</Card></div>
     </>}

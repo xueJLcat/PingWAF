@@ -139,4 +139,43 @@ async fn fixed_report_postgres() {
         .metrics
         .iter()
         .all(|r| !r.covered && r.requests.is_none()));
+
+    // The default static-access-log filter does not stop the security-event
+    // collector, or the collection of requests that are actually logged.
+    db.execute_unprepared("UPDATE log_retention_settings SET skip_static_access_logs=true").await.unwrap();
+    let key = Uuid::new_v4();
+    let node = Uuid::new_v4();
+    let foreign_owner = Uuid::new_v4();
+    let foreign_site = Uuid::new_v4();
+    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "INSERT INTO users(id,email,password_hash,created_at,updated_at) VALUES($1,'foreign@example.test','unused',now(),now())",
+        [foreign_owner.into()])).await.unwrap();
+    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "INSERT INTO sites(id,user_id,name,domain,created_at,updated_at) VALUES($1,$2,'foreign','foreign.example.test',now(),now())",
+        [foreign_site.into(), foreign_owner.into()])).await.unwrap();
+    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "INSERT INTO api_keys(id,user_id,name,key_hash,key_prefix,created_at) VALUES($1,$2,'coverage','unused','test',now())",
+        [key.into(), user.id.into()])).await.unwrap();
+    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "INSERT INTO agents(id,api_key_id,hostname,ip_address,status,site_scope,last_heartbeat,registered_at)
+         VALUES($1,$2,'coverage','127.0.0.1','online','all',now(),now())",
+        [node.into(), key.into()])).await.unwrap();
+    worker::coverage(&db).await.unwrap();
+    assert!(db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT 1 FROM report_coverage WHERE site_id=$1", [foreign_site.into()])).await.unwrap().is_none());
+    let row = db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT minute FROM report_coverage WHERE site_id=$1 ORDER BY minute DESC LIMIT 1",
+        [idle.into()])).await.unwrap().unwrap();
+    let minute: DateTime<Utc> = row.try_get("", "minute").unwrap();
+    let window = Selection { sites: vec![idle], timezone: "UTC".into(), from: minute-chrono::Duration::minutes(1), to: Utc::now() };
+    let live = snapshot::collect(&db, &user, window.clone(), true).await.unwrap();
+    assert_eq!(live.nodes.len(), 1);
+    assert!(live.nodes[0].online);
+    assert!(live.metrics.iter().any(|r| r.requests==Some(0) && r.blocked==Some(0) && r.challenged==Some(0)));
+    assert!(live.metrics.iter().any(|r| r.requests.is_none() && !r.covered));
+    db.execute_unprepared("DELETE FROM report_coverage; UPDATE agents SET last_heartbeat=now()-interval '10 minutes'").await.unwrap();
+    worker::coverage(&db).await.unwrap();
+    let offline = snapshot::collect(&db, &user, window, true).await.unwrap();
+    assert!(!offline.nodes[0].online);
+    assert!(offline.metrics.iter().all(|r| !r.covered && r.requests.is_none() && r.blocked.is_none()));
 }

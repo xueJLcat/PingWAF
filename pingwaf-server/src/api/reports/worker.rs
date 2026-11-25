@@ -24,13 +24,13 @@ pub(crate) fn start(state: AppState) -> tokio::task::JoinHandle<()> {
     })
 }
 
-async fn coverage(db: &DatabaseConnection) -> Result<(), DbErr> {
+pub(super) async fn coverage(db: &DatabaseConnection) -> Result<(), DbErr> {
     db.execute_unprepared("
       INSERT INTO report_coverage(minute,site_id,samples)
-      SELECT date_trunc('minute',now()),s.id,1 << (floor(extract(second FROM now()))::int/15)
-      FROM sites s JOIN agent_sites x ON x.site_id=s.id JOIN agents a ON a.id=x.agent_id
-      WHERE s.status='active' AND NOT coalesce((SELECT skip_static_access_logs FROM log_retention_settings WHERE id=1),true)
-      GROUP BY s.id HAVING bool_and(a.status='online' AND coalesce(a.last_heartbeat>now()-interval '30 seconds',false))
+      SELECT date_trunc('minute',now()),l.site_id,1 << (floor(extract(second FROM now()))::int/15)
+      FROM panel_site_listeners l JOIN agents a ON a.id=l.agent_id
+      WHERE l.status='active'
+      GROUP BY l.site_id HAVING bool_and(a.status='online' AND coalesce(a.last_heartbeat>now()-interval '30 seconds',false))
       ON CONFLICT(site_id,minute) DO UPDATE SET samples=report_coverage.samples | excluded.samples
     ").await?;
     Ok(())
