@@ -2734,6 +2734,8 @@
       "eventDetails": "Details",
       "dnsConfigLabel": "DNS provider credentials",
       "dnsConfigHint": "Key–value pairs passed to the provider API (e.g. token, access_key_id, access_key_secret). An `endpoint` entry overrides the API host.",
+      "dnsConfigRoute53Hint": "Set hosted_zone_id to select a public hosted zone, or omit it for discovery. The agent uses AWS credentials from its runtime, such as an EC2 instance role.",
+      "dnsProviderNone": "Select a provider",
       "dnsConfigRegionRequired": "Huawei Cloud needs a `region` entry (e.g. cn-north-4); it builds the dns.<region>.myhuaweicloud.com endpoint.",
       "multiSiteNote": "A certificate is created bound to one site. Other sites can reuse it from their SSL page via “Shared certificates”, and can unbind it at any time.",
       "unbound": "Unbound",

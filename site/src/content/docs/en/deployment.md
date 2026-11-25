@@ -106,6 +106,8 @@ Agents are currently **unbound**: an agent receives every site owned by the API 
 
 For ACME, the control plane must be **0.32.40 or newer** so the PEMs issued by its embedded data plane are synced into `site_certificates` and pushed to agents. An older control plane sends `acme_email` without a PEM, so each agent starts its own HTTP-01 order; the CA validation request reaches the host that owns port 80 (usually the control plane), not the agent, and fails. If the control plane cannot be upgraded yet, set `PINGAP_DISABLE_ACME=true` in the agent unit and upload certificates instead.
 
+DNS-01 with Amazon Route 53 is supported from 0.33.2: select `dns-01` + `route53`, optionally pin `acme_dns_config.hosted_zone_id`, and give the issuing process an AWS credential (an EC2 instance role is the simplest). The issuer needs `GetHostedZone`, `ListResourceRecordSets` and `ChangeResourceRecordSets` on the zone (plus `ListHostedZones` for discovery); consumer agents need no AWS permission.
+
 The installer copies `--server-ca-cert` to `/etc/pingwaf/grpc-ca.pem` and references that durable path; the console's generated command does not include the CA or `--server-tls-name`, so add them for a self-signed control plane.
 
 ## Tunnels (internal services without an inbound port)

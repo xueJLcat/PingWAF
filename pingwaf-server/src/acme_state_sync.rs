@@ -205,7 +205,11 @@ pub(crate) async fn sync_certificate(
     let Some(row) = row else {
         // The file can outlive a deleted certificate row. Not an error: the
         // next issuance or a site edit removes it.
-        debug!(site_id = %site_id, domains, "ACME certificate has no row");
+        if rows.is_empty() {
+            debug!(%site_id, domains, "ACME certificate has no active order");
+        } else {
+            warn!(%site_id, domains, "ACME state has no unique matching order");
+        }
         return Ok(false);
     };
 
@@ -223,7 +227,7 @@ pub(crate) async fn sync_certificate(
         warn!(%site_id, "ACME state has no currently valid certificate");
         return Ok(false);
     };
-    if !site_cert::covers(cert_pem, &names) || crate::pki::tls::certified_key(cert_pem, key_pem).is_err() ||
+    if !site_cert::covers(cert_pem, &names) || crate::api::validation::validate_certificate_and_key(cert_pem, key_pem).is_err() ||
         row.cert_pem.as_deref().and_then(parse_certificate_meta).is_some_and(|previous| previous.not_before > meta.not_before) {
         warn!(%site_id, "ACME material does not match the current order or is superseded");
         return Ok(false);

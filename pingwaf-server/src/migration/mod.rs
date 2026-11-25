@@ -123,6 +123,7 @@ mod m20240101_000106_ingress_tls_policy;
 mod m20240101_000106_tunnel_sessions;
 mod m20240101_000107_enable_site_ingress;
 mod m20240101_000107_tunnel_listener_error;
+mod m20240101_000108_acme_dns_provider_backfill;
 mod m20240101_000108_site_listeners;
 mod m20240101_000109_static_drafts;
 mod m20240101_000110_site_handlers;
@@ -269,6 +270,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000106_tunnel_sessions::Migration),
             Box::new(m20240101_000107_enable_site_ingress::Migration),
             Box::new(m20240101_000107_tunnel_listener_error::Migration),
+            Box::new(m20240101_000108_acme_dns_provider_backfill::Migration),
             Box::new(m20240101_000108_site_listeners::Migration),
             Box::new(m20240101_000109_static_drafts::Migration),
             Box::new(m20240101_000110_site_handlers::Migration),
@@ -293,7 +295,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 124);
+        assert_eq!(migrations.len(), 125);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

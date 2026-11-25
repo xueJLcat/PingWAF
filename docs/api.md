@@ -1381,7 +1381,21 @@ Add a certificate (manual upload or ACME request).
 }
 ```
 
-`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `digitalocean`, `aliyun`, `dnspod`, `cloudxns`, `manual`.
+`acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of
+`cloudflare`/`cf`, `route53`, `aliyun`/`ali`, `dnspod`/`tencent`, or `huawei`
+for automated DNS-01. An empty provider or `manual` uses manual TXT verification.
+New orders with an unknown provider or Route 53 without DNS-01 return `400`.
+The migration clears unused unsupported providers and Route 53 settings on
+HTTP-01 rows. Existing DNS-01 orders keep their challenge and provider;
+choose a supported provider before retrying an unsupported order.
+
+With `route53`, use `dns-01` and set `acme_dns_config` to
+`{"hosted_zone_id":"Z123EXAMPLE"}` or `{}` for public hosted zone discovery.
+The issuer uses the AWS SDK credential chain (typically an EC2 instance role)
+and only needs `GetHostedZone`, `ListResourceRecordSets` and
+`ChangeResourceRecordSets` on the zone; discovery additionally needs
+`ListHostedZones`. A failed order reports the Route 53 error code in the
+certificate event.
 
 The response is the saved certificate, `warnings` included (see
 [Certificate `warnings`](#certificate-warnings)).

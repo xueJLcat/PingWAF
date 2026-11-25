@@ -627,6 +627,73 @@ pub(super) fn certificate_issuance_port_error() -> ApiError {
         .with_code("site.certificate_issuance_ports")
 }
 
+/// Validate Route 53 settings before they are stored or sent to agents.
+pub(super) fn validate_acme_dns_provider(
+    provider: Option<&str>,
+    challenge: Option<&str>,
+    config: Option<&serde_json::Value>,
+) -> Result<(), ApiError> {
+    let provider =
+        pingap_config::normalize_dns_provider(provider.unwrap_or_default())
+            .ok_or_else(|| {
+                ApiError::BadRequest("unsupported ACME DNS provider".into())
+            })?;
+    if provider != "route53" {
+        return Ok(());
+    }
+    if challenge != Some(acme_challenge::DNS_01) {
+        return Err(ApiError::BadRequest("Route 53 requires dns-01".into()));
+    }
+    if let Some(config) = config.filter(|value| !value.is_null()) {
+        let valid = config.as_object().is_some_and(|map| {
+            map.iter().all(|(key, value)| {
+                key == "hosted_zone_id"
+                    && value
+                        .as_str()
+                        .and_then(pingap_config::route53_zone_id)
+                        .is_some()
+            })
+        });
+        if !valid {
+            return Err(ApiError::BadRequest(
+                "Route 53 configuration only accepts a valid hosted_zone_id"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn validates_route53_credential_free_configuration() {
+    let dns01 = Some(acme_challenge::DNS_01);
+    assert!(validate_acme_dns_provider(Some("Route53"), dns01, None).is_ok());
+    assert!(validate_acme_dns_provider(
+        Some("route53"),
+        dns01,
+        Some(&serde_json::json!({"hosted_zone_id": "/hostedzone/Z123"})),
+    )
+    .is_ok());
+    assert!(validate_acme_dns_provider(Some("route53"), None, None).is_err());
+    assert!(validate_acme_dns_provider(Some("unknown"), dns01, None).is_err());
+    assert!(validate_acme_dns_provider(Some("dnspod"), dns01, None).is_ok());
+    assert!(validate_acme_dns_provider(None, dns01, None).is_ok());
+    assert!(validate_acme_dns_provider(Some("manual"), dns01, None).is_ok());
+    for config in [
+        serde_json::json!({"hosted_zone_id": "bad id"}),
+        serde_json::json!({"endpoint": "https://example.com"}),
+        serde_json::json!({"access_key_id": "example"}),
+    ] {
+        assert!(validate_acme_dns_provider(
+            Some("route53"),
+            dns01,
+            Some(&config)
+        )
+        .is_err());
+    }
+}
+
 /// Checks a site's hostname set against every other site in the database.
 ///
 /// `exclude` is the site being edited, so that a site does not conflict with

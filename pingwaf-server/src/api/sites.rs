@@ -3652,6 +3652,16 @@ async fn upsert_ssl(
         .one(&txn)
         .await?;
 
+    super::common::validate_acme_dns_provider(
+        payload.acme_dns_provider.as_deref(),
+        payload.acme_challenge_type.as_deref(),
+        payload.acme_dns_config.as_ref().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|row| row.acme_dns_config.as_ref())
+        }),
+    )?;
+
     let model = match existing {
         Some(row) => {
             let row_id = row.id;

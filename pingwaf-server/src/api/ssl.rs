@@ -1325,6 +1325,11 @@ async fn insert_certificate<C: ConnectionTrait>(
     site: Option<&site::Model>,
     payload: CreateCertificateRequest,
 ) -> Result<site_certificates::Model, ApiError> {
+    super::common::validate_acme_dns_provider(
+        payload.acme_dns_provider.as_deref(),
+        Some(&payload.acme_challenge_type),
+        payload.acme_dns_config.as_ref(),
+    )?;
     let domain = validate_cert_domain_list(&payload.domain)?;
     if !acme_challenge::is_valid(&payload.acme_challenge_type) {
         return Err(ApiError::BadRequest(format!(
@@ -1653,6 +1658,19 @@ async fn apply_certificate_update(
         }
     }
 
+    super::common::validate_acme_dns_provider(
+        payload
+            .acme_dns_provider
+            .as_deref()
+            .or(row.acme_dns_provider.as_deref()),
+        non_empty(&payload.acme_challenge_type)
+            .as_deref()
+            .or(Some(&row.acme_challenge_type)),
+        payload
+            .acme_dns_config
+            .as_ref()
+            .or(row.acme_dns_config.as_ref()),
+    )?;
     let mut active: site_certificates::ActiveModel = row.into();
 
     if let Some(domain) = next_domain {
@@ -1919,7 +1937,7 @@ async fn renew_certificate(
     notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(serde_json::json!({
-        "message": "renewal initiated",
+        "message": "Renewal requested. The issuer checks certificate expiry and hostnames on its scheduled cycle.",
         "certificate_id": target,
         "status": cert_status::PENDING,
     })))

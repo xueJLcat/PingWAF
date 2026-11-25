@@ -18,6 +18,64 @@ verbatim for reference and attribution, and is not maintained here.
 - Allow administrators to delete an individual configuration snapshot. Snapshot action icons show their labels on keyboard focus and hover.
 - Give site types their own aligned table column and show the same labels beneath the site name on mobile. Page protection is accessible through the sidebar and site settings.
 
+## [PingWAF 0.33.2] — 2026-11-26
+
+### Added
+
+- **Route 53 DNS-01 issuance.** `acme_dns_provider = "route53"` now works for
+  managed certificates, including a single order covering an apex and its
+  wildcard. The issuer uses the AWS SDK credential chain (an EC2 instance role
+  needs no configuration), pins the commercial Route 53 endpoint and signs in
+  `us-east-1`, and accepts an optional `acme_dns_config.hosted_zone_id`. With
+  no zone ID it lists public hosted zones, selects the closest DNS-label
+  match and verifies the zone's public NS delegation before touching it. TXT
+  updates read the current record set and submit an exact `DELETE` + `CREATE`
+  in one batch, so an unrelated value, the TTL and a concurrent writer's edit
+  survive; cleanup removes only the value the task added. Failed orders carry
+  the bounded, query-redacted Route 53 error code (for example `AccessDenied`
+  or `InvalidChangeBatch`) instead of a generic message.
+- **Reverse-proxy identity for trusted hops.** The standard origin headers
+  (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, `X-Forwarded-Host`)
+  are now derived from the configured trust boundary instead of echoing the
+  client's fields: the chain starts at the first untrusted hop, the RFC 7239
+  `Forwarded` header is cleared, and a duplicate or malformed forwarding field
+  is ignored. The behaviour is opt-in per location
+  (`enable_reverse_proxy_headers`, or `PINGWAF_ENABLE_REVERSE_PROXY_HEADERS=true`
+  for generated data-plane routes) and follows the site's trusted-proxy ranges
+  when set, falling back to the legacy private/loopback rule otherwise.
+- **ACME state import is validated.** The control plane only imports a
+  certificate whose state entry is ACME-managed, whose hostname set exactly
+  matches the database row, and whose key matches the leaf; ambiguous rows and
+  malformed material are skipped with a warning instead of overwriting another
+  certificate's key.
+
+### Changed
+
+- The managed certificate API rejects an unknown DNS provider, `manual` with
+  `dns-01`, and a Route 53 row without `dns-01` (`400`), matching what the data
+  plane can actually issue. The console's provider list now offers only the
+  supported values and no longer defaults a new certificate to Cloudflare.
+- Migration `000108` clears provider values the data plane never implemented
+  (`digitalocean`, `cloudxns`, `manual`) and moves their DNS-01 challenge back
+  to HTTP-01 — the behaviour those rows already had — so existing certificates
+  remain editable. Route 53 rows stored with HTTP-01 are cleared the same way.
+- A synced ACME PEM keeps its renewal settings for every provider and for
+  HTTP-01, not only Route 53. Previously the first config sync after issuance
+  dropped the ACME marker and renewal stopped silently.
+- Turning on the reverse-proxy headers no longer changes the WAF, rate-limit or
+  GeoIP client identity of locations that did not enable them.
+
+### Fixed
+
+- **The forwarded chain and the logged client IP now agree** when
+  `basic.trusted_proxies` is unset: both use the private/loopback peer rule, so
+  a same-host or private-network proxy forwards the real client instead of
+  only its own address.
+- The Huawei `region` option no longer rewrites the endpoint of other DNS
+  providers, and Route 53 configuration only accepts `hosted_zone_id` (the AWS
+  credential chain replaces the URL-embedded credentials the other providers
+  use).
+
 ## [PingWAF 0.33.1] — 2026-11-25
 
 ### Fixed

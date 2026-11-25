@@ -2734,6 +2734,8 @@
       "eventDetails": "詳細",
       "dnsConfigLabel": "DNS プロバイダー認証情報",
       "dnsConfigHint": "プロバイダー API に渡すキーと値のペア（例: token、access_key_id、access_key_secret）。`endpoint` を指定すると API ホストを上書きします。",
+      "dnsConfigRoute53Hint": "公開ホストゾーンを指定するには hosted_zone_id を設定します。空欄の場合は自動検出します。エージェントは EC2 インスタンスロールなど、実行環境の AWS 認証情報を使用します。",
+      "dnsProviderNone": "プロバイダーを選択",
       "dnsConfigRegionRequired": "Huawei Cloud は `region`（例: cn-north-4）が必要です。dns.<region>.myhuaweicloud.com エンドポイントを生成します。",
       "multiSiteNote": "証明書は作成時に 1 つのサイトに紐付ける必要があります（サーバー仕様）。他のサイトは各 SSL ページの「共有証明書」からこの証明書を再利用でき、いつでも解除できます。",
       "unbound": "未バインド",

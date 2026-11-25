@@ -17,6 +17,7 @@ use crate::dns_ali::AliDnsTask;
 use crate::dns_cf::CfDnsTask;
 use crate::dns_huawei::HuaweiDnsTask;
 use crate::dns_manual::{MANUAL_DNS_REMARK, ManualDnsTask};
+use crate::dns_route53::Route53DnsTask;
 use crate::dns_tencent::TencentDnsTask;
 use async_trait::async_trait;
 use hickory_resolver::Resolver;
@@ -196,7 +197,7 @@ const ACME_FAILURE_MARKER: &str = "acme_failed";
 /// errors can include the request URL, and those URLs carry credentials as
 /// query parameters; the text is persisted, shown in the console and sent to
 /// notification channels, so query strings must never travel with it.
-fn redact_url_queries(text: &str) -> String {
+pub(crate) fn redact_url_queries(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for part in text.split_inclusive(char::is_whitespace) {
         if !part.contains("://") {
@@ -357,7 +358,6 @@ async fn do_update_certificates(
                 let message = acme_failure_event_message(domains, &e);
                 error!(
                     target: LOG_TARGET,
-                    error = %e,
                     domains = domains.join(","),
                     name,
                     retry_in_secs = delay.as_secs(),
@@ -937,7 +937,7 @@ async fn create_account(
 /// record exists, and a cached NXDOMAIN (negative TTL is the SOA minimum -
 /// often 600s, longer than the whole wait) would be replayed for every
 /// remaining attempt, so the check could never see the record appear.
-fn new_txt_resolver() -> Result<Resolver<TokioRuntimeProvider>> {
+pub(crate) fn new_txt_resolver() -> Result<Resolver<TokioRuntimeProvider>> {
     // The system resolver, like everything else on this host uses; the
     // previous hardcoded default (Google public DNS) is only the fallback
     // when the system configuration is unreadable.
@@ -1146,6 +1146,9 @@ async fn new_lets_encrypt(
                     "huawei" => {
                         Box::new(HuaweiDnsTask::new(&params.dns_service_url)?)
                     },
+                    "route53" => {
+                        Box::new(Route53DnsTask::new(&params.dns_service_url).await?)
+                    },
                     _ => Box::new(ManualDnsTask::new(config_manager.clone())),
                 };
 
@@ -1155,7 +1158,9 @@ async fn new_lets_encrypt(
                     dns_txt_value,
                     "start add dns txt record for {acme_dns_name}"
                 );
-                task.add_txt_record(&acme_dns_name, &dns_txt_value).await?;
+                let added = task.add_txt_record(&acme_dns_name, &dns_txt_value).await;
+                dns_tasks.push(task);
+                added?;
                 info!(
                     target: LOG_TARGET,
                     dns_provider = params.dns_provider,
@@ -1230,7 +1235,6 @@ async fn new_lets_encrypt(
                         "dns txt record of {acme_dns_name} was not confirmed, proceeding to let the CA validate"
                     );
                 }
-                dns_tasks.push(task);
                 challenge
             } else {
                 let challenge = authz
@@ -1304,7 +1308,7 @@ async fn new_lets_encrypt(
         if let Err(err) = task.done().await {
             error!(
                 target: LOG_TARGET,
-                error = err.to_string(),
+                error = redact_url_queries(&err.to_string()),
                 "remove acme dns text record fail"
             );
         }

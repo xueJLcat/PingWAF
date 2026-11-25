@@ -1045,6 +1045,14 @@ fn convert_proxy_config_with_handler(
     include_default_listeners: bool,
     handler: Option<&PluginConf>,
 ) -> (PingapConfig, Vec<String>) {
+    // Opt-in: forward standard reverse-proxy headers to upstreams.
+    // Disabled by default for backward compatibility.
+    let enable_reverse_proxy_headers = env_flag_is_true(
+        std::env::var("PINGWAF_ENABLE_REVERSE_PROXY_HEADERS")
+            .ok()
+            .as_deref(),
+    );
+
     // The cache plugin carries no per-site settings of its own — rules,
     // namespaces and quotas all flow from the agent's rule cache at request
     // time. It only earns a slot in the config when some site actually has
@@ -1400,6 +1408,9 @@ fn convert_proxy_config_with_handler(
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
                     plugins: Some(site_plugins.clone()),
+                    enable_reverse_proxy_headers: Some(
+                        enable_reverse_proxy_headers,
+                    ),
                     // The fallback must sort behind every route: with the
                     // auto weight (128) any route whose priority was 127 or
                     // less ranked below this catch-all `/` location and
@@ -1473,6 +1484,9 @@ fn convert_proxy_config_with_handler(
                     upstream: Some(target),
                     host: Some(host.clone()),
                     path: Some(path),
+                    enable_reverse_proxy_headers: Some(
+                        enable_reverse_proxy_headers,
+                    ),
                     weight: route
                         .priority
                         .map(|p| p.clamp(1, u16::MAX as i32) as u16),
@@ -1511,10 +1525,7 @@ fn convert_proxy_config_with_handler(
             location_names.push(loc_name);
         }
 
-        // Convert SSL certificate: an uploaded PEM is served as-is, while a
-        // site asking for ACME without one gets a certificate entry the
-        // lets-encrypt task issues against — and later fills in — inside
-        // this config.
+        // Convert the TLS material and renewal settings for the site.
         if let Some(ref ssl) = site.ssl_config
             && ssl.enabled
         {
@@ -1529,15 +1540,7 @@ fn convert_proxy_config_with_handler(
                 );
                 d.join(",")
             };
-            let mut cert = if ssl.acme_enabled && !ssl.acme_email.is_empty() {
-                acme_certificate_conf(ssl, domains.clone())
-            } else { None };
-            if !ssl.cert_pem.is_empty() && !ssl.key_pem.is_empty() {
-                let entry = cert.get_or_insert_with(CertificateConf::default);
-                entry.domains = Some(domains);
-                entry.tls_cert = Some(ssl.cert_pem.clone());
-                entry.tls_key = Some(ssl.key_pem.clone());
-            }
+            let cert = site_certificate_conf(ssl, domains);
             if let Some(cert) = cert {
                 certificates.insert(format!("{site_id}_cert"), cert);
             }
@@ -1701,13 +1704,43 @@ fn convert_proxy_config_with_handler(
 }
 
 
+fn site_certificate_conf(
+    ssl: &SslConfig,
+    domains: String,
+) -> Option<CertificateConf> {
+    let acme_enabled = ssl.acme_enabled && !ssl.acme_email.is_empty();
+    if ssl.cert_pem.is_empty() || ssl.key_pem.is_empty() {
+        return acme_enabled
+            .then(|| acme_certificate_conf(ssl, domains))
+            .flatten();
+    }
+
+    // An issued PEM comes back through config sync (the control plane imports
+    // the issuer's ACME state and pushes the material back). Keep its ACME
+    // settings so the issuer can check expiry and renew it after reload; the
+    // previous provider-specific gate silently stopped renewal for every other
+    // DNS provider (and for HTTP-01) once the synced PEM reached the config.
+    if acme_enabled
+        && let Some(mut config) = acme_certificate_conf(ssl, domains.clone())
+    {
+        config.tls_cert = Some(ssl.cert_pem.clone());
+        config.tls_key = Some(ssl.key_pem.clone());
+        return Some(config);
+    }
+    Some(CertificateConf {
+        domains: Some(domains),
+        tls_cert: Some(ssl.cert_pem.clone()),
+        tls_key: Some(ssl.key_pem.clone()),
+        ..Default::default()
+    })
+}
+
 /// Build the certificate entry a lets-encrypt issuance is driven by.
 ///
 /// `acme` is only a marker (never parsed); the email keeps the convention
 /// legacy pingap used so operators recognize it in a config dump. DNS-01
-/// carries the provider plus credentials: the endpoint defaults to the
-/// provider's API host and every `acme_dns_config` entry becomes a query
-/// pair — the layout pingap's DNS tasks parse.
+/// passes provider options through `dns_service_url`. Route 53 uses the AWS
+/// credential chain and only passes the optional hosted zone ID.
 /// Returns `None` when the order cannot be issued and must be skipped:
 /// a wildcard hostname only validates through DNS-01, so an entry that would
 /// fall back to HTTP-01 is dropped (with an error log) instead of making the
@@ -1753,23 +1786,32 @@ fn acme_certificate_conf(
     Some(cert)
 }
 
-/// The DNS provider endpoint with credentials appended as query pairs.
+/// The DNS provider endpoint with provider-specific options as query pairs.
 ///
-/// An explicit `endpoint` entry (full URL, or host getting the default
-/// scheme) wins; `region` is only used to build the Huawei cloud host.
-/// Without either, the provider's documented API host applies — Huawei has
-/// per-region hosts and cannot have one. Every other entry becomes
-/// `key=value` — names match what the provider task expects, e.g.
-/// `access_key_id` / `access_key_secret` / `token`.
+/// Route 53 uses its fixed service endpoint and the optional hosted zone ID.
+/// Other providers accept an explicit `endpoint` and pass their remaining
+/// options as query pairs. Huawei uses `region` to build the endpoint when
+/// one is absent.
 fn acme_dns_service_url(
     provider: &str,
     config: &HashMap<String, String>,
 ) -> Option<String> {
+    if provider == "route53" {
+        let base = pingap_config::ROUTE53_SERVICE_URL;
+        return Some(match config.get("hosted_zone_id") {
+            Some(id) => {
+                format!("{base}?hosted_zone_id={}", urlencoding::encode(id))
+            },
+            None => base.to_string(),
+        });
+    }
     let base = match config.get("endpoint").filter(|v| !v.is_empty()) {
         Some(v) if v.contains("://") => v.clone(),
         Some(v) => format!("https://{v}"),
         None => {
-            if let Some(region) = config.get("region").filter(|r| !r.is_empty())
+            if provider == "huawei"
+                && let Some(region) =
+                    config.get("region").filter(|r| !r.is_empty())
             {
                 format!("https://dns.{region}.myhuaweicloud.com")
             } else if provider == "huawei" {
@@ -1953,7 +1995,7 @@ async fn start_legacy_data_plane(
     );
     let config_manager =
         try_init_memory_config_manager(&toml_str, Some(acme_state)).map_err(
-            |e| anyhow::anyhow!("failed to init config manager: {}", e),
+            |_| anyhow::anyhow!("failed to initialize proxy configuration"),
         )?;
 
     // The lets-encrypt task scans current_config for certificates to issue,
@@ -1963,9 +2005,8 @@ async fn start_legacy_data_plane(
         .and_then(|toml_config| toml_config.to_pingap_config(true))
     {
         Ok(merged) => merged,
-        Err(e) => {
+        Err(_) => {
             warn!(target: LOG_TARGET,
-                error = %e,
                 "data plane: merged config failed validation, using freshly converted config"
             );
             config
@@ -2159,6 +2200,32 @@ async fn start_legacy_data_plane(
     };
     let make_proxy = move |server_conf: &ServerConf| -> anyhow::Result<ProxyServer> {
         let mut ps = ProxyServer::new(server_conf, proxy_context.clone())?;
+        if env_flag_is_true(
+            std::env::var("PINGWAF_ENABLE_REVERSE_PROXY_HEADERS")
+                .ok()
+                .as_deref(),
+        ) {
+            ps.site_proxy_trust = Some(|host| {
+                let Some(site) = pingwaf_agent::PingWafAgent::instance()
+                    .and_then(|agent| agent.get_rules_for_domain(host))
+                else {
+                    return pingap_core::ProxyTrust::default();
+                };
+                let trust = &site.proxy_trust;
+                // Most sites do not configure a trust boundary. Return the
+                // disabled policy without parsing CIDR strings and allocating
+                // a header name on every request.
+                if !trust.enabled {
+                    return pingap_core::ProxyTrust::default();
+                }
+                pingap_core::ProxyTrust::new(
+                    trust.enabled,
+                    trust.effective_header(),
+                    trust.last_hop_only,
+                    &trust.trusted_ranges,
+                )
+            });
+        }
         // The HTTP-01 challenge must be reachable on port 80, so every
         // data-plane server whose address list includes :80 intercepts
         // /.well-known/acme-challenge before proxying.
@@ -2546,12 +2613,11 @@ async fn apply_reload(
         .await
     {
         Ok(config) => config,
-        Err(e) => {
+        Err(_) => {
             warn!(target: LOG_TARGET,
-                error = %e,
                 "data plane: merged reload config failed, using freshly converted config"
             );
-            errors.push(format!("merge config: {e}"));
+            errors.push("merge config failed".to_string());
             converted
         },
     };
@@ -5292,6 +5358,79 @@ mod tests {
         assert!(url.starts_with("https://alidns.aliyuncs.com?"), "{url}");
         assert!(url.contains("access_key_id=AK%201%2F2"), "{url}");
         assert!(url.contains("access_key_secret=s3cret"), "{url}");
+    }
+
+    #[test]
+    fn route53_keeps_apex_and_wildcard_in_one_dns_order() {
+        let mut ssl = acme_ssl();
+        ssl.acme_challenge_type = "AcmeDns01".to_string();
+        ssl.acme_dns_provider = "Route53".to_string();
+        ssl.acme_dns_config
+            .insert("hosted_zone_id".into(), "/hostedzone/Z123".into());
+        let domains = "example.com,*.example.com";
+        let cert = acme_certificate_conf(&ssl, domains.into()).unwrap();
+        assert_eq!(cert.domains.as_deref(), Some(domains));
+        assert_eq!(cert.dns_challenge, Some(true));
+        assert_eq!(cert.dns_provider.as_deref(), Some("route53"));
+        assert_eq!(
+            pingap_config::parse_route53_service_url(
+                cert.dns_service_url.as_deref().unwrap()
+            )
+            .unwrap(),
+            Some("Z123".into()),
+        );
+    }
+
+    #[test]
+    fn synced_route53_pem_retains_renewal_configuration() {
+        let mut ssl = acme_ssl();
+        ssl.acme_enabled = true;
+        ssl.acme_challenge_type = "AcmeDns01".into();
+        ssl.acme_dns_provider = "route53".into();
+        ssl.cert_pem = "issued PEM".into();
+        ssl.key_pem = "issued key".into();
+        let domains = "example.com,*.example.com";
+        let cert = site_certificate_conf(&ssl, domains.into()).unwrap();
+        assert_eq!(cert.tls_cert.as_deref(), Some("issued PEM"));
+        assert!(cert.acme.is_some());
+        assert_eq!(cert.dns_provider.as_deref(), Some("route53"));
+
+        // Every managed provider keeps renewing after the synced PEM comes
+        // back, not just Route 53.
+        ssl.acme_dns_provider = "cf".into();
+        let cert = site_certificate_conf(&ssl, domains.into()).unwrap();
+        assert!(cert.acme.is_some());
+        assert_eq!(cert.dns_provider.as_deref(), Some("cf"));
+
+        // HTTP-01 certificates are managed the same way. The wildcard domain set
+        // cannot be validated over HTTP-01, so use an apex-only set here.
+        ssl.acme_challenge_type = "AcmeHttp01".into();
+        ssl.acme_dns_provider.clear();
+        let cert = site_certificate_conf(&ssl, "example.com".into()).unwrap();
+        assert!(cert.acme.is_some());
+        assert_eq!(cert.dns_challenge, None);
+
+        ssl.acme_enabled = false;
+        let cert = site_certificate_conf(&ssl, domains.into()).unwrap();
+        assert_eq!(cert.tls_cert.as_deref(), Some("issued PEM"));
+        assert!(cert.acme.is_none());
+    }
+
+    #[test]
+    fn regional_endpoint_applies_only_to_huawei() {
+        let config = HashMap::from([("region".into(), "test-region".into())]);
+        for (provider, endpoint) in [
+            ("huawei", "https://dns.test-region.myhuaweicloud.com"),
+            ("route53", "https://route53.amazonaws.com"),
+            ("cf", "https://api.cloudflare.com"),
+            ("ali", "https://alidns.aliyuncs.com"),
+            ("tencent", "https://dnspod.tencentcloudapi.com"),
+        ] {
+            assert_eq!(
+                acme_dns_service_url(provider, &config).as_deref(),
+                Some(endpoint)
+            );
+        }
     }
 
     #[test]

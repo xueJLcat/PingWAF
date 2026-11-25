@@ -90,6 +90,7 @@ mod dns_ali;
 mod dns_cf;
 mod dns_huawei;
 mod dns_manual;
+mod dns_route53;
 mod dns_tencent;
 mod lets_encrypt;
 

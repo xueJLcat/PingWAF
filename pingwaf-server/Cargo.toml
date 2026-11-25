@@ -6,6 +6,7 @@ description = "PingWAF control plane: REST API for the dashboard, gRPC control p
 license = "Apache-2.0"
 
 [dependencies]
+pingap-config = { workspace = true }
 regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
 pingwaf-proto = { path = "../pingwaf-proto" }
 # Target normalization and the credential digest are the tunnel crate's, so the

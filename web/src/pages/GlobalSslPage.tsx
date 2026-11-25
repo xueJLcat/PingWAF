@@ -1017,7 +1017,7 @@ export function GlobalSslPage() {
                     value={form.dnsProvider}
                     onChange={(e) => setForm((f) => ({ ...f, dnsProvider: e.target.value }))}
                   />
-                  {form.dnsProvider && form.dnsProvider !== 'manual' && (
+                  {form.dnsProvider && (
                     <div className="flex flex-col gap-2">
                       <div className="flex items-center justify-between">
                         <span className="text-[13px] font-medium text-fg">
@@ -1038,7 +1038,9 @@ export function GlobalSslPage() {
                         </Button>
                       </div>
                       <p className="text-xs text-fg-subtle">
-                        {t('pages.sslGlobal.dnsConfigHint')}
+                        {t(form.dnsProvider === 'route53'
+                          ? 'pages.sslGlobal.dnsConfigRoute53Hint'
+                          : 'pages.sslGlobal.dnsConfigHint')}
                       </p>
                       {form.dnsProvider === 'huawei' && (
                         <p className="text-xs text-fg-subtle">

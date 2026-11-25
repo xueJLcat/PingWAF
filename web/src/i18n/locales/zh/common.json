@@ -2734,6 +2734,8 @@
       "eventDetails": "详情",
       "dnsConfigLabel": "DNS 服务商凭据",
       "dnsConfigHint": "以键值对形式传给服务商 API（如 token、access_key_id、access_key_secret）；填写 `endpoint` 可覆盖默认 API 地址。",
+      "dnsConfigRoute53Hint": "填写 hosted_zone_id 以选择公有托管区域，留空则自动发现。代理从运行环境获取 AWS 凭证，例如 EC2 实例角色。",
+      "dnsProviderNone": "请选择服务商",
       "dnsConfigRegionRequired": "华为云需要填写 `region`（如 cn-north-4），将生成 dns.<region>.myhuaweicloud.com 端点。",
       "multiSiteNote": "证书创建时必须绑定一个站点（后端要求）。其它站点可在各自 SSL 页通过「共享证书」复用该证书，并可随时解绑。",
       "unbound": "未绑定",

@@ -256,6 +256,38 @@ pub fn convert_header_value(
     match buf {
         HOST_TAG => get_host(session.req_header())
             .and_then(|host| to_header_value(&host)),
+        b"$proxy_request_host" => session
+            .req_header()
+            .uri
+            .authority()
+            .and_then(|authority| to_header_value(authority.as_str()))
+            .or_else(|| session.get_header("host").cloned()),
+        b"$proxy_client_ip" => ctx
+            .conn
+            .forwarded
+            .as_ref()
+            .map(|f| f.client.as_str())
+            .or(ctx.conn.remote_addr.as_deref())
+            .and_then(to_header_value),
+        b"$proxy_client_chain" => ctx
+            .conn
+            .forwarded
+            .as_ref()
+            .map(|f| f.chain.as_str())
+            .or(ctx.conn.remote_addr.as_deref())
+            .and_then(to_header_value),
+        b"$proxy_client_scheme" => Some(HeaderValue::from_static(
+            ctx.conn.forwarded.as_ref().map_or_else(
+                || {
+                    if ctx.conn.tls_version.is_some() {
+                        "https"
+                    } else {
+                        "http"
+                    }
+                },
+                |f| f.scheme,
+            ),
+        )),
         SCHEME_TAG => Some(if ctx.conn.tls_version.is_some() {
             SCHEME_HTTPS.clone()
         } else {
@@ -625,6 +657,102 @@ impl ProxyTrust {
     }
 }
 
+/// Values for the standard origin-facing headers. The first untrusted hop is
+/// the client. Everything to its left was supplied outside the trust boundary.
+#[derive(Debug)]
+pub struct ForwardedIdentity {
+    pub client: String,
+    pub chain: String,
+    pub scheme: &'static str,
+}
+
+fn trusted_chain(
+    peer: IpAddr,
+    value: Option<&str>,
+    nearest: bool,
+    trusted: impl Fn(IpAddr) -> bool,
+) -> Vec<IpAddr> {
+    let mut hops = vec![peer];
+    let mut current = peer;
+    for raw in value.unwrap_or_default().rsplit(',') {
+        if !trusted(current) {
+            break;
+        }
+        let Ok(ip) = raw.trim().parse::<IpAddr>() else {
+            break;
+        };
+        current = canonical_ip(ip);
+        hops.push(current);
+        if nearest {
+            break;
+        }
+    }
+    hops.reverse();
+    hops
+}
+
+pub fn forwarded_identity(
+    session: &Session,
+    ctx: &Ctx,
+    site: Option<&ProxyTrust>,
+) -> Option<ForwardedIdentity> {
+    let peer = canonical_ip(session.client_addr()?.as_inet()?.ip());
+    let trusted = |ip| match site {
+        Some(policy) => policy.enabled && policy.peer_is_trusted(ip),
+        // No per-site policy: use the same trust resolution as
+        // `get_client_ip`, or the client IP the WAF/logs see and the chain
+        // forwarded upstream would disagree. When `trusted_proxies` is
+        // configured it is the strict list; when it is not, the legacy
+        // private/loopback heuristic applies.
+        None => {
+            if TRUSTED_PROXIES_ENABLED.load(Ordering::Relaxed) {
+                is_trusted_proxy(ip)
+            } else {
+                is_plausible_internal_proxy(ip)
+            }
+        },
+    };
+    let header =
+        site.map_or(HTTP_HEADER_X_FORWARDED_FOR, |p| p.header.as_str());
+    // Reject ambiguous duplicate fields. Proxies should emit one canonical field.
+    let single = |key: &str| {
+        let mut values = session.req_header().headers.get_all(key).iter();
+        let first = values.next()?.to_str().ok()?;
+        values.next().is_none().then_some(first)
+    };
+    let value = single(header);
+    let hops = if header == HTTP_HEADER_X_FORWARDED_FOR {
+        trusted_chain(
+            peer,
+            value,
+            site.is_some_and(|p| p.last_hop_only),
+            trusted,
+        )
+    } else if trusted(peer)
+        && let Some(ip) = value.and_then(|v| v.trim().parse().ok())
+    {
+        vec![canonical_ip(ip), peer]
+    } else {
+        vec![peer]
+    };
+    let scheme =
+        match single(HTTP_HEADER_X_FORWARDED_PROTO).filter(|_| trusted(peer)) {
+            Some("https") => "https",
+            Some("http") => "http",
+            _ if ctx.conn.tls_version.is_some() => "https",
+            _ => "http",
+        };
+    Some(ForwardedIdentity {
+        client: hops[0].to_string(),
+        chain: hops
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        scheme,
+    })
+}
+
 /// Resolves the client IP from the site-trusted forwarded header.
 ///
 /// Trust is strict: the direct TCP peer must fall inside one of the
@@ -652,25 +780,24 @@ pub fn resolve_client_ip_with_trust(
     if !trust.peer_is_trusted(peer) {
         return Some(peer.to_string());
     }
-    let value = session.get_header(trust.header.as_str())?;
-    let value = value.to_str().ok()?;
-    let raw = if trust.header == HTTP_HEADER_X_FORWARDED_FOR {
-        // `X-Forwarded-For` is a comma separated list. The last entry is
-        // appended by the closest proxy and cannot be spoofed by the client.
-        if trust.last_hop_only {
-            value.rsplit(',').next().unwrap_or_default()
-        } else {
-            value.split(',').next().unwrap_or_default()
-        }
-    } else {
-        value
-    };
-    match raw.trim().parse::<IpAddr>() {
-        Ok(ip) => Some(canonical_ip(ip).to_string()),
-        // A trusted proxy sent something unusable: fall back to its own
-        // address rather than to a spoofable header.
-        Err(_) => Some(canonical_ip(peer).to_string()),
+    let mut fields = session.req_header().headers.get_all(&trust.header).iter();
+    let value = fields.next().and_then(|field| field.to_str().ok());
+    if fields.next().is_some() {
+        return Some(peer.to_string());
     }
+    if trust.header == HTTP_HEADER_X_FORWARDED_FOR {
+        let hops = trusted_chain(peer, value, trust.last_hop_only, |ip| {
+            trust.peer_is_trusted(ip)
+        });
+        return Some(hops[0].to_string());
+    }
+    Some(
+        value
+            .and_then(|raw| raw.trim().parse().ok())
+            .map(canonical_ip)
+            .unwrap_or(peer)
+            .to_string(),
+    )
 }
 
 /// The scheme a request actually arrived over, honouring a trusted proxy's
@@ -698,6 +825,9 @@ pub fn resolve_scheme_with_trust(
     ctx: &Ctx,
     trust: &ProxyTrust,
 ) -> &'static str {
+    if let Some(identity) = &ctx.conn.forwarded {
+        return identity.scheme;
+    }
     let from_connection = || {
         if ctx.conn.tls_version.is_some() {
             SCHEME_HTTPS_STR
@@ -1091,6 +1221,37 @@ mod tests {
             "https",
             resolve_scheme_with_trust(&session, &tls_ctx, &trust)
         );
+    }
+
+    #[tokio::test]
+    async fn forwarded_identity_strips_untrusted_prefix_and_replaces_scheme() {
+        let session = new_test_session_with_peer(
+            &[
+                "Host: example.test",
+                "X-Forwarded-For: 192.0.2.99, 203.0.113.8, 10.0.0.1",
+                "X-Forwarded-Proto: https",
+            ],
+            "/",
+            "10.0.0.2".parse().unwrap(),
+        )
+        .await;
+        let trust = ProxyTrust::new(
+            true,
+            "x-forwarded-for",
+            false,
+            &["10.0.0.0/24".into()],
+        );
+        let ctx = Ctx::default();
+        let identity =
+            forwarded_identity(&session, &ctx, Some(&trust)).unwrap();
+        assert_eq!("203.0.113.8", identity.client);
+        assert_eq!("203.0.113.8, 10.0.0.1, 10.0.0.2", identity.chain);
+        assert_eq!("https", identity.scheme);
+        let identity =
+            forwarded_identity(&session, &ctx, Some(&ProxyTrust::default()))
+                .unwrap();
+        assert_eq!("10.0.0.2", identity.chain);
+        assert_eq!("http", identity.scheme);
     }
 
     #[tokio::test]
@@ -1570,6 +1731,11 @@ mod tests {
         )
         .await;
         assert_eq!(get_client_ip(&session), "192.168.1.1");
+        // The forwarded chain must use the same trust rule, or the origin
+        // receives only the proxy address while the WAF/logs see the client.
+        let identity = forwarded_identity(&session, &Ctx::default(), None)
+            .expect("the mock peer has an address");
+        assert_eq!(identity.client, "192.168.1.1");
 
         let session = new_test_session_with_peer(
             &["X-Real-Ip:192.168.1.2"],
