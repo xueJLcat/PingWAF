@@ -33,6 +33,7 @@ pub mod notify;
 pub mod pki;
 pub mod site_cert;
 pub mod subscription;
+mod syslog;
 pub mod tls;
 pub mod tunnel_policy;
 pub mod tunnel_token;
@@ -259,7 +260,9 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     let control_tls =
         Arc::new(tls::ControlPlaneTls::new(shared_config.tls_enabled));
 
+    let (syslog, _syslog_workers) = syslog::Service::start(db.clone()).await;
     let state = AppState {
+        syslog: Some(syslog.clone()),
         live_reports: Default::default(),
         db: db.clone(),
         config: shared_config.clone(),
@@ -443,13 +446,14 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
         );
     }
 
-    let control_plane_service = ControlPlaneService::new(
+    let mut control_plane_service = ControlPlaneService::new(
         db.clone(),
         shared_config.clone(),
         agents.clone(),
         es_client.clone(),
         cache_status,
     );
+    control_plane_service.syslog = Some(syslog);
     let grpc_server = ControlPlaneServer::new(control_plane_service);
 
     // ── 9. Start agent health monitor ───────────────────────────────────────

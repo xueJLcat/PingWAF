@@ -1,0 +1,55 @@
+import { createSocket } from 'node:dgram'
+import { once } from 'node:events'
+import { test, expect } from '../fixtures/app'
+
+test('maintain a log destination across desktop and mobile with a real UDP receiver', async ({ app }) => {
+  test.skip(process.env.PINGWAF_SMOKE_SYSLOG !== '1', 'Requires disposable control plane and same loopback namespace')
+  const { page } = app
+  const socket = createSocket('udp4')
+  socket.bind(0, '127.0.0.1')
+  await once(socket, 'listening')
+  const endpoint = app.adminUrl('/log-buffer')
+  try {
+    await page.goto(endpoint)
+    await expect(page.getByRole('heading', {name:'Log services', exact:true})).toBeVisible()
+    await page.getByRole('button', {name:'Configure forwarding'}).click()
+    const host = page.getByLabel('Server address', {exact:true})
+    const transport = page.getByLabel('Transport', {exact:true})
+    await transport.selectOption('udp')
+    await expect(page.getByRole('spinbutton', {name:/^Port/})).toHaveValue('514')
+    await host.fill('127.0.0.1')
+    await page.getByRole('spinbutton', {name:/^Port/}).fill(String(socket.address().port))
+    const received = once(socket,'message', {signal:AbortSignal.timeout(10000)})
+    const testResponse = page.waitForResponse(r => r.url().endsWith('/settings/syslog/test') && r.request().method()==='POST')
+    await page.getByRole('button',{name:'Test draft'}).click()
+    const testId = (await (await testResponse).json()).id
+    expect((await received)[0].toString()).toContain(testId)
+    await page.getByRole('switch',{name:'Enable forwarding'}).click()
+    const second = await page.context().newPage()
+    await second.goto(endpoint)
+    await second.getByRole('button',{name:'Configure forwarding'}).click()
+    await second.getByLabel('Destination name').fill('Stale draft')
+    await page.getByRole('button',{name:'Save and apply'}).click()
+    await expect(page.getByText('Configuration saved', {exact:true})).toBeVisible()
+    await second.getByRole('button',{name:'Save and apply'}).click()
+    await expect(second.getByRole('alert').filter({hasText:/revision/})).toBeVisible()
+    await expect(second.getByLabel('Destination name')).toHaveValue('Stale draft')
+    await second.getByRole('button',{name:'Reload',exact:true}).click()
+    await expect(second.getByLabel('Server address')).toHaveValue('127.0.0.1')
+    await second.close()
+    await page.setViewportSize({width:390,height:844})
+    await page.reload()
+    await page.getByRole('button',{name:'Edit',exact:true}).click()
+    await page.getByRole('switch',{name:'Enable forwarding'}).click()
+    await page.getByRole('button',{name:'Save and apply'}).click()
+    await expect(page.getByText(/Paused.*UDP/)).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await page.getByRole('button',{name:'Remove destination'}).click()
+    await page.getByRole('dialog').getByRole('button',{name:'Cancel'}).click()
+    await page.getByRole('button',{name:'Remove destination'}).click()
+    await page.getByRole('dialog').getByRole('button',{name:'Confirm'}).click()
+    await expect(page.getByRole('button',{name:'Configure forwarding'})).toBeVisible()
+  } finally {
+    socket.close()
+  }
+})

@@ -138,6 +138,7 @@ static LAST_CERT_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
+    pub(crate) syslog: Option<Arc<crate::syslog::Service>>,
     /// `pub(crate)` so the visitor-auth RPCs in `grpc/visitor_auth.rs` can
     /// reach the same connection; everything else stays private to this file.
     pub(crate) db: DatabaseConnection,
@@ -168,6 +169,7 @@ impl ControlPlaneService {
         cache_status: CacheStatusRegistry,
     ) -> Self {
         Self {
+            syslog: None,
             db,
             config,
             agents,
@@ -1355,10 +1357,8 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         let mut received: u64 = 0;
         let mut dropped: u64 = 0;
-        let mut access_batch: Vec<access_log::ActiveModel> =
-            Vec::with_capacity(batch_size);
-        let mut event_batch: Vec<security_event::ActiveModel> =
-            Vec::with_capacity(batch_size);
+        let mut access_batch = Vec::with_capacity(batch_size);
+        let mut event_batch = Vec::with_capacity(batch_size);
         let mut batch_bytes: usize = 0;
 
         loop {
@@ -1455,20 +1455,22 @@ impl ControlPlaneTrait for ControlPlaneService {
                 now,
             );
             let waf_event = is_waf_event(&message);
+            let project = |security| self.syslog.as_ref().and_then(|sender|
+                sender.project(&message, authenticated_id, site_id, timestamp, security));
 
             // WAF-decision entries are routed to `security_events` only: the
             // agent always emits a second, access-shaped entry for the same
             // request (at deny time or response time), so writing both would
             // duplicate every blocked or monitored request in `access_logs`.
             if !waf_event {
-                access_batch.push(access_log_row(
+                access_batch.push((access_log_row(
                     &message, site_id, agent_id, timestamp,
-                ));
+                ), project(false)));
             }
             if let Some(event) =
                 security_event_row(&message, site_id, agent_id, timestamp)
             {
-                event_batch.push(event);
+                event_batch.push((event, project(true)));
             }
 
             // Two OIDC failures are operational events, not traffic: a login
@@ -1531,12 +1533,12 @@ impl ControlPlaneTrait for ControlPlaneService {
                 || event_batch.len() >= batch_size
                 || batch_bytes >= LOG_BATCH_BYTES
             {
-                flush(&self.db, &mut access_batch, &mut event_batch).await?;
+                flush(&self.db, self.syslog.as_deref(), &mut access_batch, &mut event_batch).await?;
                 batch_bytes = 0;
             }
         }
 
-        flush(&self.db, &mut access_batch, &mut event_batch).await?;
+        flush(&self.db, self.syslog.as_deref(), &mut access_batch, &mut event_batch).await?;
 
         if dropped > 0 {
             tracing::warn!(
@@ -3220,73 +3222,38 @@ fn estimate_log_entry_bytes(entry: &LogEntry) -> usize {
         + tags
 }
 
-/// Inserts access rows in bounded chunks, moving each chunk out of the Vec.
-async fn insert_access_chunks(
-    db: &DatabaseConnection,
-    mut rows: Vec<access_log::ActiveModel>,
-) -> Result<(), Status> {
-    while rows.len() > LOG_INSERT_CHUNK {
-        let tail = rows.split_off(LOG_INSERT_CHUNK);
-        if let Err(err) = access_log::Entity::insert_many(rows).exec(db).await {
-            tracing::error!(error = %err, "failed to persist access logs");
-            return Err(db_status(err));
-        }
-        rows = tail;
-    }
-    if !rows.is_empty() {
-        if let Err(err) = access_log::Entity::insert_many(rows).exec(db).await {
-            tracing::error!(error = %err, "failed to persist access logs");
-            return Err(db_status(err));
-        }
-    }
-    Ok(())
-}
+type Projected<Row> = (Row, Option<crate::syslog::Packet>);
 
-/// Inserts security-event rows in the same bounded chunks as access logs.
-async fn insert_event_chunks(
-    db: &DatabaseConnection,
-    mut rows: Vec<security_event::ActiveModel>,
-) -> Result<(), Status> {
-    while rows.len() > LOG_INSERT_CHUNK {
-        let tail = rows.split_off(LOG_INSERT_CHUNK);
-        if let Err(err) =
-            security_event::Entity::insert_many(rows).exec(db).await
-        {
-            tracing::error!(error = %err, "failed to persist security events");
-            return Err(db_status(err));
-        }
-        rows = tail;
-    }
-    if !rows.is_empty() {
-        if let Err(err) =
-            security_event::Entity::insert_many(rows).exec(db).await
-        {
-            tracing::error!(error = %err, "failed to persist security events");
-            return Err(db_status(err));
-        }
-    }
-    Ok(())
-}
-
-/// Writes the accumulated rows, clearing both buffers.
+/// Forward each projection only after its own database chunk commits.
 async fn flush(
     db: &DatabaseConnection,
-    access: &mut Vec<access_log::ActiveModel>,
-    events: &mut Vec<security_event::ActiveModel>,
+    sender: Option<&crate::syslog::Service>,
+    access: &mut Vec<Projected<access_log::ActiveModel>>,
+    events: &mut Vec<Projected<security_event::ActiveModel>>,
 ) -> Result<(), Status> {
+    async fn commit_chunks<A, F, Fut>(rows: &mut Vec<Projected<A>>, sender: Option<&crate::syslog::Service>, insert: F) -> Result<(), Status>
+    where F: Fn(Vec<A>) -> Fut, Fut: std::future::Future<Output = Result<(), sea_orm::DbErr>> {
+        let mut rows = rows.drain(..);
+        while rows.len() > 0 {
+            let (entries, pending): (Vec<_>, Vec<_>) = rows.by_ref().take(LOG_INSERT_CHUNK).unzip();
+            insert(entries).await.map_err(db_status)?;
+            if let Some(sender) = sender {
+                for packet in pending.into_iter().flatten() { sender.enqueue(packet); }
+            }
+        }
+        Ok(())
+    }
     if !access.is_empty() {
-        let rows = std::mem::take(access);
-        let _timer = pingwaf_profiler::timed_method(
-            pingwaf_profiler::Method::DbPersistLogs,
-        );
-        insert_access_chunks(db, rows).await?;
+        let _timer = pingwaf_profiler::timed_method(pingwaf_profiler::Method::DbPersistLogs);
+        commit_chunks(access, sender, |rows| async move {
+            access_log::Entity::insert_many(rows).exec(db).await.map(|_|())
+        }).await?;
     }
     if !events.is_empty() {
-        let rows = std::mem::take(events);
-        let _timer = pingwaf_profiler::timed_method(
-            pingwaf_profiler::Method::DbPersistEvents,
-        );
-        insert_event_chunks(db, rows).await?;
+        let _timer = pingwaf_profiler::timed_method(pingwaf_profiler::Method::DbPersistEvents);
+        commit_chunks(events, sender, |rows| async move {
+            security_event::Entity::insert_many(rows).exec(db).await.map(|_|())
+        }).await?;
     }
     Ok(())
 }

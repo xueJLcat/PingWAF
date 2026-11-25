@@ -24,7 +24,11 @@ use crate::es::{
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
+    use crate::syslog::api as syslog;
     Router::new()
+        .route("/settings/syslog", get(syslog::show).put(syslog::update).delete(syslog::remove))
+        .route("/settings/syslog/test", post(syslog::test))
+        .route("/settings/syslog/status", get(syslog::status))
         .route("/settings/elasticsearch", get(show).put(update))
         .route("/settings/elasticsearch/test", post(test))
         .route(

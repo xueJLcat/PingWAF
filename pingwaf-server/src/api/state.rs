@@ -18,6 +18,7 @@ use crate::tls::ControlPlaneTls;
 /// internally reference counted.
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) syslog: Option<Arc<crate::syslog::Service>>,
     pub(crate) live_reports: super::reports::LiveCache,
     /// SeaORM connection pool (PostgreSQL).
     pub db: DatabaseConnection,
@@ -45,6 +46,7 @@ impl AppState {
         agents: AgentRegistry,
     ) -> Self {
         Self {
+            syslog: None,
             live_reports: Default::default(),
             db,
             config: Arc::new(config),
@@ -65,6 +67,7 @@ impl AppState {
         cache_status: CacheStatusRegistry,
     ) -> Self {
         Self {
+            syslog: None,
             live_reports: Default::default(),
             db,
             config: Arc::new(config),

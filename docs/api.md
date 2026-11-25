@@ -5081,6 +5081,28 @@ Delete an error page.
 > `GET/PUT /login-security` and the `/notifications/*` endpoints. In a
 > multi-instance deployment each instance must be configured separately.
 
+### GET /settings/syslog
+
+Administrator only. Returns `configured`, `revision`, the complete configuration with its defaults, certificate fingerprints and expiry, and `has_key`. The initial target is disabled. Private keys and PEM contents are never returned.
+
+### PUT /settings/syslog
+
+Send the expected `revision` and `config`. The optional PEM fields `ca`, `cert` and `key` retain their previous values when omitted. An empty string clears a field. Storing a private key requires the instance encryption key. Enabled TCP/TLS targets are checked before committing. An outdated revision returns 409 (`syslog.revision`). Changing the target or narrowing what may be sent with pending messages returns 409 (`syslog.queue_not_empty`), unless the administrator resubmits with `discard: true`. Disabling forwarding preserves the durable queue until resumed or expired.
+
+For example, send `{"revision":0,"config":{"enabled":true,"name":"Local collector","transport":"udp","host":"127.0.0.1","port":514,"max_bytes":480,"access":true,"security":true}}` to configure a local receiver. Defaults are available from GET. Site scope is all sites for `null`, no sites for an empty array, or the specified UUIDs. Transport, TLS trust, message format and framing, severity, IP handling, timeouts, retry interval and storage limits are available in the Log Service editor.
+
+### DELETE /settings/syslog
+
+Send `{"revision":n}` to remove the destination and its credentials. Explicitly set `discard` to true to remove queued records as well. Returns the empty configuration with an incremented revision.
+
+### POST /settings/syslog/test
+
+Accepts the same draft and optional credentials as PUT. Writes one synthetic event and returns its ID, peer address, time, transport and write stage. Match that ID at the receiver to confirm receipt. The draft remains unsaved. Tests are limited to one attempt per two seconds per control-plane process.
+
+### GET /settings/syslog/status
+
+Returns effective revision, target, queue count, payload bytes, oldest enqueue time and counters since process startup. Successful writes are counted separately for access and security events. Syslog has no collector acknowledgement. A crash between write and commit can redeliver an event with its original ID.
+
 ### GET /settings/elasticsearch/buffer
 
 Read the active and saved disk buffer directory (administrator only).

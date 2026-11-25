@@ -135,6 +135,7 @@ mod m20240101_000116_dynamic_review;
 mod m20240101_000117_listener_tls;
 mod m20240101_000118_panel_listeners;
 mod m20240101_000119_tunnel_listener_error;
+mod m20240101_000120_syslog;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -280,6 +281,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000117_listener_tls::Migration),
             Box::new(m20240101_000118_panel_listeners::Migration),
             Box::new(m20240101_000119_tunnel_listener_error::Migration),
+            Box::new(m20240101_000120_syslog::Migration),
         ]
     }
 }
@@ -291,7 +293,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 123);
+        assert_eq!(migrations.len(), 124);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

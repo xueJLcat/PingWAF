@@ -30,6 +30,7 @@ const RECENT_KEY = 'pingwaf.palette.recent'
 const DOCS_URL = 'https://www.pingwaf.com/docs'
 
 interface Command {
+  aliases?: string
   id: string
   label: string
   group: string
@@ -118,6 +119,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     const navCmds: Command[] = navigationGroups(isAdmin).flatMap(group => group.items.map(p => ({
       id: `nav:${p.to}`,
       label: t(p.labelKey),
+      aliases: p.to === '/log-buffer' ? 'syslog 日志缓冲目录 log buffer directory ログバッファディレクトリ' : undefined,
       group: t(group.labelKey),
       icon: p.icon,
       run: () => go(p.to),
@@ -213,7 +215,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     }
     const filtered = commands.filter(
       (c) =>
-        c.label.toLowerCase().includes(q) ||
+        c.label.toLowerCase().includes(q) || c.aliases?.includes(q) ||
         c.id.toLowerCase().includes(q.replace(/^nav:|^site:/, '')),
     )
     return filtered.slice(0, MAX_RESULTS)

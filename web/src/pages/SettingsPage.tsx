@@ -42,6 +42,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useAnyUnsaved, useRegisterUnsaved, useUnsavedGuard } from '@/hooks/useUnsavedGuard'
+import { SyslogSettings } from './SyslogSettings'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows, SkeletonCard } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
@@ -3213,7 +3214,9 @@ export function LogBufferPage() {
   const { t } = useTranslation()
   const canWrite = useCanWrite()
   const guard = useUnsavedGuard(useAnyUnsaved())
-  return <div>{guard}<PageHeader title={t('nav.logBuffer')} /><Card><CardBody><EsBufferDirectory canWrite={canWrite} /></CardBody></Card></div>
+  return <div className="space-y-4">{guard}<PageHeader title={t('nav.logBuffer')} /><SyslogSettings />
+    <Card><CardBody className="space-y-3"><h2 className="text-base font-semibold">{t('syslog.buffer')}</h2><EsBufferDirectory canWrite={canWrite} /></CardBody></Card>
+  </div>
 }
 
 function EsBufferDirectory({canWrite}: {canWrite: boolean}) {
