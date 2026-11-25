@@ -974,7 +974,7 @@ export function GlobalSslPage() {
               <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               {t('pages.sslGlobal.multiSiteNote')}
             </p>
-          )
+          )}
 
           {form.mode === 'acme' && !eligibleSite && (
             <p

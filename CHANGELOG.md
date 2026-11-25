@@ -14,6 +14,7 @@ verbatim for reference and attribution, and is not maintained here.
 - Serve panel-generated self-signed certificates on managed HTTPS listeners.
 - Add ServerChan Turbo and ServerChan³ notification channels with masked SendKeys.
 - Allow administrators to delete an individual configuration snapshot. Snapshot action icons show their labels on keyboard focus and hover.
+- Give site types their own aligned table column and show the same labels beneath the site name on mobile. Page protection is accessible through the sidebar and site settings.
 
 ## [PingWAF 0.33.1] — 2026-11-25
 

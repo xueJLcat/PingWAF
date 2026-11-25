@@ -710,13 +710,13 @@ export function SitesListPage() {
     </div>
   )
 
-  const siteMaintenance = (site: Site) => (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      <Badge tone="neutral">{t('pages.sites.' + ({zip:'modeZip', static:'modeDirectory', redirect:'modeRedirect', proxy:'modeProxy'}[site.site_handler?.kind ?? 'proxy']))}</Badge>
-      {!!site.ingress_port && site.site_handler?.kind !== 'redirect' && <Link className="py-1 text-fg-brand-strong underline"
-        onClick={event => event.stopPropagation()} to={`/sites/${site.id}/security/protection?tab=integrity`}>{t('pages.sites.pageProtection')}</Link>}
-    </div>
-  )
+  const siteTypes = {
+    proxy: t('pages.sites.modeProxy'),
+    zip: t('pages.sites.typeZip'),
+    static: t('pages.sites.typeDirectory'),
+    redirect: t('pages.sites.modeRedirect'),
+  }
+  const siteType = (site: Site) => siteTypes[site.site_handler?.kind ?? 'proxy']
   const columns: Column<Site>[] = [
     {
       key: 'select',
@@ -766,10 +766,14 @@ export function SitesListPage() {
               )}
             </p>
             <p className="truncate text-xs text-fg-subtle">{r.name}</p>
-            {siteMaintenance(r)}
           </div>
         </div>
       ),
+    },
+    {
+      key: 'type',
+      header: t('pages.sites.siteMode'),
+      cell: (r) => <span className="whitespace-nowrap text-[13px] text-fg-subtle">{siteType(r)}</span>,
     },
     {
       key: 'status',
@@ -834,7 +838,7 @@ export function SitesListPage() {
   ]
 
   /* ── Mobile cards (UX-08) ─────────────────────────────────────
-     Below 768px the seven-column table cannot be read without a blind
+     Below 768px the desktop table cannot be read without a blind
      horizontal scroll, so each site becomes a card: identity + status first,
      traffic counters next, actions as 44px targets. Desktop keeps the table. */
   const CARD_PAGE_SIZE = 20
@@ -879,6 +883,7 @@ export function SitesListPage() {
             </Badge>
           </span>
           <span className="truncate text-xs text-fg-subtle">{r.name}</span>
+          <span className="text-xs text-fg-subtle">{siteType(r)}</span>
           <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-subtle">
             <span>
               {t('pages.sites.requests')}:{' '}
@@ -905,7 +910,7 @@ export function SitesListPage() {
           </span>
         </button>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 pl-8">{siteMaintenance(r)}{renderSiteActions(r)}</div>
+      {renderSiteActions(r)}
     </li>
   )
 

@@ -580,6 +580,8 @@
       "cloneNameSuffix": "copy",
       "ingressLabel": "Access listener",
       "ingressPort": "Site listening port",
+      "typeZip": "Static ZIP",
+      "typeDirectory": "Static directory",
       "siteMode": "Site type",
       "modeStatic": "Static files",
       "staticSource": "Static content source",

@@ -580,6 +580,8 @@
       "cloneNameSuffix": "副本",
       "ingressLabel": "访问入口",
       "ingressPort": "站点监听端口",
+      "typeZip": "静态 ZIP",
+      "typeDirectory": "静态目录",
       "siteMode": "站点类型",
       "modeStatic": "静态文件",
       "staticSource": "静态内容来源",

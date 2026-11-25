@@ -580,6 +580,8 @@
       "cloneNameSuffix": "コピー",
       "ingressLabel": "アクセス入口",
       "ingressPort": "サイトの待受ポート",
+      "typeZip": "静的 ZIP",
+      "typeDirectory": "静的ディレクトリ",
       "siteMode": "サイト種別",
       "modeStatic": "静的ファイル",
       "staticSource": "静的コンテンツの取得元",
