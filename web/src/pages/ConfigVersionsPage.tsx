@@ -20,8 +20,7 @@ import { Card, CardBody } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog } from '@/components/ui/Dialog'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { Select } from '@/components/ui/Select'
-import { Input } from '@/components/ui/Input'
+import { ConfigSiteSelect } from '@/components/config/ConfigSiteSelect'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { Table, type Column } from '@/components/ui/Table'
 import { useToast } from '@/components/ui/Toast'
@@ -35,9 +34,8 @@ import {
 } from '@/api/configVersions'
 import { configBackupsApi, configBackupKeys } from '@/api/configBackups'
 import { errorMessage } from '@/api/errors'
-import { useCanWrite, useDebouncedValue } from '@/hooks'
-import { sitesApi, siteKeys } from '@/api/sites'
-import { formatSiteAddress, formatDateTime } from '@/lib/format'
+import { useCanWrite } from '@/hooks'
+import { formatDateTime } from '@/lib/format'
 
 /**
  * Keep one extra row per request to detect whether older snapshots exist.
@@ -388,20 +386,10 @@ export function ConfigVersionsPage() {
   const canWrite = useCanWrite()
 
   const [scope, setScope] = useState('')
-  const [scopeLabel, setScopeLabel] = useState('')
-  const [siteSearch, setSiteSearch] = useState('')
-  const search = useDebouncedValue(siteSearch.trim())
   const [detail, setDetail] = useState<ConfigVersionSummary | null>(null)
   const [pending, setPending] = useState<ConfigVersionSummary | null>(null)
   const [confirmPrune, setConfirmPrune] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ConfigVersionSummary | null>(null)
-
-  const sites = useInfiniteQuery({
-    queryKey: [...siteKeys.all, 'snapshot-scope-options', search],
-    initialPageParam: 1,
-    queryFn: ({ pageParam }) => sitesApi.list({ search, page: pageParam, page_size: 200 }),
-    getNextPageParam: (last, _pages, page) => page * 200 < last.total ? page + 1 : undefined,
-  })
 
   const versions = useInfiniteQuery({
     queryKey: configVersionKeys.list(scope || undefined),
@@ -574,22 +562,6 @@ export function ConfigVersionsPage() {
     [t, canWrite],
   )
 
-  const scopeOptions = useMemo(
-    () => [
-      { value: '', label: t('pages.configVersions.allScopes') },
-      { value: GLOBAL_SCOPE, label: t('pages.configVersions.globalScope') },
-      {
-        value: DEPLOYMENT_SCOPE,
-        label: t('pages.configVersions.deploymentScope'),
-      },
-      ...(sites.data?.pages.flatMap(page => page.items) ?? []).map((site) => ({
-        value: site.id,
-        label: formatSiteAddress(site),
-      })),
-    ],
-    [t, sites.data],
-  )
-
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
@@ -613,25 +585,13 @@ export function ConfigVersionsPage() {
 
       <Card>
         <CardBody className="flex flex-col gap-4">
-          <div className="max-w-sm space-y-2">
-            {(siteSearch || (sites.data?.pages[0].total ?? 0) > 200) && (
-              <Input type="search" label={t('syslog.search')} value={siteSearch}
-                onChange={event => setSiteSearch(event.target.value)} />
-            )}
-            <Select
-              label={t('pages.configVersions.scopeFilter')}
-              value={scope}
-              options={scopeOptions.some(option => option.value === scope) ? scopeOptions
-                : [...scopeOptions, { value: scope, label: scopeLabel }]}
-              onChange={event => {
-                setScopeLabel(event.target.selectedOptions[0].text)
-                setScope(event.target.value)
-              }}
-            />
-            {sites.hasNextPage && <Button size="sm" loading={sites.isFetchingNextPage}
-              onClick={() => void sites.fetchNextPage()}>{t('pages.configVersions.moreSites')}</Button>}
-            {sites.isError && <ErrorState variant="inline" error={sites.error}
-              onRetry={() => sites.isFetchNextPageError ? sites.fetchNextPage() : sites.refetch()} />}
+          <div className="max-w-sm">
+            <ConfigSiteSelect label={t('pages.configVersions.scopeFilter')} value={scope} onChange={setScope}
+              options={[
+                { value: '', label: t('pages.configVersions.allScopes') },
+                { value: GLOBAL_SCOPE, label: t('pages.configVersions.globalScope') },
+                { value: DEPLOYMENT_SCOPE, label: t('pages.configVersions.deploymentScope') },
+              ]} />
           </div>
 
           {versions.isError && !versions.data ? (

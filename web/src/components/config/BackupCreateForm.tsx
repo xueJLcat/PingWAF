@@ -1,4 +1,4 @@
-import { formatSiteAddress } from '@/lib/format'
+import { ConfigSiteSelect } from './ConfigSiteSelect'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -8,13 +8,11 @@ import { Select } from '@/components/ui/Select'
 import { useToast } from '@/components/ui/Toast'
 import { configBackupsApi, configBackupKeys, type BackupScope, type BackupTarget } from '@/api/configBackups'
 import { errorMessage } from '@/api/errors'
-import { useSitesList } from '@/hooks'
 
 export function BackupCreateForm({ targets, canWrite }: { targets: BackupTarget[]; canWrite: boolean }) {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const sites = useSitesList({ page: 1, page_size: 200 })
   const [scope, setScope] = useState<BackupScope>('deployment')
   const [siteId, setSiteId] = useState('')
   const [password, setPassword] = useState('')
@@ -50,13 +48,12 @@ export function BackupCreateForm({ targets, canWrite }: { targets: BackupTarget[
         ]}
       />
       {scope === 'site' ? (
-        <Select
+        <ConfigSiteSelect
           label={t('pages.backups.siteId')}
           value={siteId}
-          onChange={(event) => setSiteId(event.target.value)}
+          onChange={setSiteId}
           options={[
             { value: '', label: t('pages.backups.selectSite') },
-            ...(sites.data ?? []).map((site) => ({ value: site.id, label: formatSiteAddress(site) })),
           ]}
         />
       ) : <div />}

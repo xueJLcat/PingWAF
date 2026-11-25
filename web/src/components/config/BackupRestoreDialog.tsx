@@ -1,4 +1,4 @@
-import { formatSiteAddress } from '@/lib/format'
+import { ConfigSiteSelect } from './ConfigSiteSelect'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -6,19 +6,16 @@ import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
-import { useSitesList } from '@/hooks'
 import type { BackupScope } from '@/api/configBackups'
 import { useToast } from '@/components/ui/Toast'
 import { configBackupsApi, type BackupPreview, type BackupSummary } from '@/api/configBackups'
 import { errorMessage } from '@/api/errors'
 
 export function BackupRestoreDialog({
-  open,
   backup,
   onClose,
   onRestored,
 }: {
-  open: boolean
   backup: BackupSummary | null
   onClose: () => void
   onRestored: () => void
@@ -26,7 +23,6 @@ export function BackupRestoreDialog({
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const sites = useSitesList({ page: 1, page_size: 200 })
   const [scope, setScope] = useState<BackupScope>('deployment')
   const [siteId, setSiteId] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -41,10 +37,7 @@ export function BackupRestoreDialog({
     setUploaded(null)
   }
   const close = () => {
-    setFile(null)
-    setPassword('')
-    setPreview(null)
-    setUploaded(null)
+    invalidatePreview()
     onClose()
   }
 
@@ -68,12 +61,10 @@ export function BackupRestoreDialog({
       return { requestId, preview: result.preview, uploaded: result.backup }
     },
     onSuccess: (result) => {
+      if (result.uploaded) void queryClient.invalidateQueries({ queryKey: ['config-backups'] })
       if (result.requestId !== previewGeneration.current) return
       setPreview(result.preview)
       setUploaded(result.uploaded)
-      void queryClient.invalidateQueries({
-        queryKey: ['config-backups'],
-      })
     },
     onError: (error) => toast.error(errorMessage(error)),
   })
@@ -100,14 +91,14 @@ export function BackupRestoreDialog({
   const restoreId = backup?.id ?? uploaded?.id
   return (
     <Dialog
-      open={open}
-      onClose={close}
+      open
+      onClose={() => { if (!restoreMutation.isPending) close() }}
       size="lg"
       title={backup ? t('pages.backups.restoreTitle') : t('pages.backups.uploadTitle')}
       description={t('pages.backups.preRestoreHint')}
       footer={
         <>
-          <Button variant="secondary" onClick={close}>{t('common.cancel')}</Button>
+          <Button variant="secondary" disabled={restoreMutation.isPending} onClick={close}>{t('common.cancel')}</Button>
           {!preview ? (
             <Button
               disabled={
@@ -149,16 +140,15 @@ export function BackupRestoreDialog({
               ]}
             />
             {scope === 'site' && (
-              <Select
+              <ConfigSiteSelect
                 label={t('pages.backups.siteId')}
                 value={siteId}
-                onChange={(event) => {
+                onChange={(value) => {
                   invalidatePreview()
-                  setSiteId(event.target.value)
+                  setSiteId(value)
                 }}
                 options={[
                   { value: '', label: t('pages.backups.selectSite') },
-                  ...(sites.data ?? []).map((site) => ({ value: site.id, label: formatSiteAddress(site) })),
                 ]}
               />
             )}

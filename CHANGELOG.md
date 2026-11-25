@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## Local changes based on PingWAF 0.33.1
 
+- Search and page through all permitted sites when creating or uploading a backup. Reopening the upload dialog starts a fresh preview, and backup actions wrap below the filename on small screens.
+
 - Keep the ACME application and challenge settings when selecting a site. The form explains custom-port restrictions and requires a contact email before submission.
 - Serve panel-generated self-signed certificates on managed HTTPS listeners.
 - Add ServerChan Turbo and ServerChan³ notification channels with masked SendKeys.

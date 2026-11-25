@@ -1,5 +1,61 @@
 import { test, expect } from '../fixtures/app'
 
+test('backup forms can select a later site and discard a cancelled upload preview', async ({ app }) => {
+  const { page } = app
+  const sites = Array.from({ length: 201 }, (_, index) => ({
+    id: String(index + 1), domain: `site-${index + 1}.test`,
+  }))
+  await page.route('**/api/v1/sites?*', route => {
+    const params = new URL(route.request().url()).searchParams
+    const matches = sites.filter(site => site.domain.includes(params.get('search') ?? ''))
+    const start = (Number(params.get('page') ?? 1) - 1) * 200
+    return route.fulfill({ json: { items: matches.slice(start, start + 200), total: matches.length } })
+  })
+  await page.goto(app.adminUrl('/config-versions'))
+  await page.getByLabel('Backup scope', { exact: true }).selectOption('site')
+  const field = page.getByRole('group', { name: 'Site', exact: true })
+  const site = field.getByRole('combobox')
+  await field.getByRole('button', { name: 'Load more sites' }).click()
+  await site.selectOption('201')
+  await field.getByRole('searchbox').fill('site-101')
+  await expect(site.locator('option')).toHaveCount(3)
+  await expect(site).toHaveValue('201')
+
+  const open = page.getByRole('button', { name: 'Upload backup file' })
+  await open.click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Backup scope').selectOption('site')
+  await dialog.getByRole('searchbox').fill('site-201')
+  await dialog.getByRole('combobox', { name: 'Site', exact: true }).selectOption('201')
+  await dialog.getByLabel('Backup password').fill('fixture-only-passphrase')
+  await dialog.locator('input[type=file]').setInputFiles({
+    name: 'fixture.pwb.json', mimeType: 'application/json', buffer: Buffer.from('{}'),
+  })
+  const uploadPath = '**/api/v1/config-backups/upload'
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route(uploadPath, async route => {
+    await gate
+    await route.fulfill({ json: { backup: { id: 'old' }, preview: {
+      tables: [], warnings: [], owner_changes: [], sites_to_remove: [],
+    } } })
+  })
+  const request = page.waitForRequest(uploadPath)
+  await dialog.getByRole('button', { name: 'Validate and preview' }).click()
+  await request
+  try {
+    await dialog.getByRole('button', { name: 'Cancel' }).click()
+    await open.click()
+    const response = page.waitForResponse(uploadPath)
+    release()
+    await (await response).finished()
+    await expect(dialog.getByRole('button', { name: 'Validate and preview' })).toBeDisabled()
+    await expect(dialog.getByRole('button', { name: 'Confirm full replacement' })).toHaveCount(0)
+  } finally {
+    release()
+  }
+})
+
 test('older snapshot batches use the last displayed ID and retain the list on failure', async ({ app }) => {
   const { page } = app
   let failOnce = true

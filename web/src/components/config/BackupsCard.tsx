@@ -83,7 +83,7 @@ export function BackupsCard({ targets, canWrite }: { targets: BackupTarget[]; ca
             </div>
             <ul className="flex flex-col">
               {(backups.data ?? []).map((backup) => (
-                <li key={backup.id} className="flex items-center justify-between gap-3 border-t border-line py-3 first:border-t-0">
+                <li key={backup.id} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-t border-line py-3 first:border-t-0">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium text-fg-strong">{backup.file_name}</span>
@@ -94,7 +94,7 @@ export function BackupsCard({ targets, canWrite }: { targets: BackupTarget[]; ca
                     </p>
                     {backup.error && <p className="mt-1 text-xs text-fg-danger">{backup.error}</p>}
                   </div>
-                  <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                  <div className="flex flex-wrap sm:justify-end gap-1">
                     <Button variant="ghost" size="sm" onClick={() => void download(backup)} icon={<Download weight="duotone" className="h-4 w-4" />}>
                       {t('pages.backups.download')}
                     </Button>
@@ -115,8 +115,8 @@ export function BackupsCard({ targets, canWrite }: { targets: BackupTarget[]; ca
           </>
         )}
       </CardBody>
-      <BackupRestoreDialog key={restoring?.id ?? 'restore'} open={restoring !== null} backup={restoring} onClose={() => setRestoring(null)} onRestored={() => void queryClient.invalidateQueries()} />
-      <BackupRestoreDialog key="upload" open={uploadingNew} backup={null} onClose={() => setUploadingNew(false)} onRestored={() => void queryClient.invalidateQueries()} />
+      {restoring && <BackupRestoreDialog key={restoring.id} backup={restoring} onClose={() => setRestoring(null)} onRestored={() => void queryClient.invalidateQueries()} />}
+      {uploadingNew && <BackupRestoreDialog key="upload" backup={null} onClose={() => setUploadingNew(false)} onRestored={() => void queryClient.invalidateQueries()} />}
       {targetsQuery.isError && <p className="px-5 pb-4 text-xs text-fg-danger">{errorMessage(targetsQuery.error)}</p>}
     </Card>
   )
