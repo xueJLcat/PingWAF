@@ -111,6 +111,8 @@ Webhook 通知通过 `PINGWAF_WEBHOOK_URL` 配置，通知路由可以从控制�
 
 ### 受管静态目录和重定向站点
 
+在控制台左侧「平台 → 静态目录」选择目标节点，可打开与节点页共用的目录登记表单。在「安全资产 → 页面防护」按域名和监听端口选择站点，可维护公开路径的防篡改规则和动态防护。报告与大屏位于「总览」，按协议、域名和端口选择统计范围。
+
 创建站点时可设置 `site_handler`。已有反向代理使用空值。重定向示例为 `{"kind":"redirect","target":"https://www.example.org","status":302,"preserve_path":true,"preserve_query":true}`。预置目录站点使用 `{"kind":"static","directory_id":"public","digest":"<节点报告的 SHA-256>"}`。两种模式都需要显式配置监听端口，启用时须选择支持该类型的节点。站点管理端口保留规则继续生效。
 
 在节点的 `/etc/pingwaf/static-roots.json` 登记目录，例如 `{"public":"/srv/www/public"}`。目录需要包含 `index.html`。控制台显示目录标识和内容摘要，发布时节点验证并复制到 `/var/lib/pingwaf/site-content`。通过 `PINGWAF_STATIC_ROOTS_FILE` 和 `PINGWAF_SITE_CONTENT_DIR` 可指定其他位置。确保运行服务的账户能读取源目录、写入版本目录。

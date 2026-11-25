@@ -61,6 +61,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
               error ? 'border-danger focus:border-danger focus:ring-danger/25' : 'border-line',
               prefixIcon ? 'pl-9' : 'pl-3',
               suffixIcon ? 'pr-9' : 'pr-3',
+              props.type === 'file' && 'min-w-0 cursor-pointer truncate px-0 file:mr-3 file:h-full file:cursor-pointer file:border-0 file:border-r file:border-line file:bg-recessed file:px-3 file:text-sm file:font-medium file:text-fg',
               className,
             )}
             {...props}

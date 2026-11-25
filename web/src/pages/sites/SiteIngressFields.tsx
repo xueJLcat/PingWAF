@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next'
 import type { IngressOptions } from '@/api/sites'
 import type { IngressDraft } from './ingressForm'
 import { Input } from '@/components/ui/Input'
+import { Select } from '@/components/ui/Select'
 import { Plus, Trash } from '@phosphor-icons/react'
 import { Button } from '@/components/ui/Button'
 
@@ -46,30 +47,29 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
       return <div key={index} className="flex items-end gap-2">
         <div className="min-w-0 flex-1"><Input label={t('pages.sites.ingressPort')} type="number" min={1} max={65535} value={port}
           disabled={!inventory?.writes_enabled} onChange={event => edit(`${scheme}:${event.target.value}`)} required /></div>
-        <div className="flex rounded-md border border-border p-1" role="group" aria-label={t('pages.sites.ingressLabel')}>
-          {['http', 'https'].map(protocol => <button type="button" key={protocol} aria-pressed={scheme === protocol}
-            disabled={!inventory?.writes_enabled} className={`rounded px-2 py-1 text-xs ${scheme === protocol ? 'bg-brand text-white' : 'text-fg-subtle'}`}
-            onClick={() => edit(`${protocol}:${port}`)}>{protocol.toUpperCase()}</button>)}
-        </div>
-        <Button variant="ghost" disabled={rows.length === 1 || !inventory?.writes_enabled}
+        <Select label={t('pages.sites.ingressLabel')} value={scheme}
+          disabled={!inventory?.writes_enabled} onChange={event => edit(`${event.target.value}:${port}`)}>
+          <option value="http">HTTP</option><option value="https">HTTPS</option>
+        </Select>
+        <Button size="icon" variant="ghost" disabled={rows.length === 1 || !inventory?.writes_enabled}
           aria-label={t('common.delete')} onClick={() => changeRows(rows.filter((_, i) => i !== index))}><Trash /></Button>
       </div>
     })}
-    <Button variant="ghost" className="w-full border border-border" icon={<Plus />} disabled={!inventory?.writes_enabled || rows.length >= 32}
+    <Button variant="secondary" icon={<Plus />} disabled={!inventory?.writes_enabled || rows.length >= 32}
       onClick={() => changeRows([...rows, 'http:'])}>{t('pages.sites.ingressAddPort')}</Button>
     {loadError && <p role="alert">{t('pages.sites.ingressLoadError')}</p>}
-    {value.listener.startsWith('http:') && <p className="text-xs text-fg-subtle">{t('pages.sites.ingressHsts')}</p>}
+    {value.listener && rows.some(row => row.startsWith('http:')) && <p className="text-xs text-fg-subtle">{t('pages.sites.ingressHsts')}</p>}
     {value.listener && !clone && <fieldset className="space-y-1.5 text-sm">
       <legend className="mb-1 text-fg-subtle">{t('pages.sites.ingressAgents')}</legend>
       {terminal && inventory?.agents.filter(agent => !supports(agent)).map(agent =>
         <p key={agent.id} className="text-xs text-fg-subtle">{agent.name} · {t('pages.sites.handlerUpgrade')}</p>)}
-      {eligible.map(agent => <label key={agent.id} className="flex items-center gap-2">
+      {eligible.map(agent => <label key={agent.id} className="pw-touch-check flex items-center gap-2">
         <input type="checkbox" checked={selected.includes(agent.id)} onChange={() => toggle(agent.id)} />{agent.name}
       </label>)}
-      {unavailable.map(id => <label key={id} className="flex items-center gap-2">
+      {unavailable.map(id => <label key={id} className="pw-touch-check flex items-center gap-2 break-all">
         <input type="checkbox" checked onChange={() => toggle(id)} />{inventory?.agents.find(node => node.id === id)?.name ?? id} · {t('pages.sites.ingressUnavailable')}
       </label>)}
-      {canPause && <label className="flex items-center gap-2">
+      {canPause && <label className="pw-touch-check flex items-center gap-2">
         <input type="checkbox" checked={value.paused} onChange={event => onChange({ ...value, paused: event.target.checked })} />
         {t('pages.sites.ingressStage')}
       </label>}

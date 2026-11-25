@@ -270,7 +270,7 @@ export function NotificationsPage() {
         )}
 
         {/* Login security */}
-        <LoginSecurityCard canWrite={canWrite} />
+        {canWrite && <LoginSecurityCard canWrite={canWrite} />}
 
         {/* Alert history */}
         <Card>
@@ -633,6 +633,8 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
   const toast = useToast()
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [geoFile, setGeoFile] = useState<File | null>(null)
+  const [confirmGeo, setConfirmGeo] = useState<'replace' | 'remove' | null>(null)
 
   const settingsQuery = useQuery({
     queryKey: ['login-security'],
@@ -686,16 +688,20 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
   const removeGeo = useMutation({
     mutationFn: loginSecurityApi.removeGeoip,
     onSuccess: () => queryClient.invalidateQueries({queryKey:['login-security', 'geoip']}),
+    onSettled: () => setConfirmGeo(null),
     onError: e => toast.error(e.message),
   })
   const uploadMutation = useMutation({
     mutationFn: (file: File) => loginSecurityApi.uploadGeoip(file),
     onSuccess: (result) => {
+      setGeoFile(null)
+      if (fileInputRef.current) fileInputRef.current.value = ''
       toast.success(t('pages.notifications.geoipUploaded', { bytes: result.bytes }))
       queryClient.invalidateQueries({ queryKey: ['login-security'] })
     },
     onError: (error) =>
       toast.error(error.message || t('pages.notifications.geoipUploadFailed')),
+    onSettled: () => setConfirmGeo(null),
   })
 
   const history = useMemo(() => historyQuery.data ?? [], [historyQuery.data])
@@ -738,7 +744,7 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
             placeholder="x-forwarded-for"
           />
           <Input
-            className="md:col-span-2"
+            containerClassName="md:col-span-2"
             label={t('pages.notifications.geoUrl')}
             value={geoUrl === '' ? current?.online_geo_url ?? '' : geoUrl}
             onChange={(e) => setGeoUrl(e.target.value)}
@@ -757,33 +763,40 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
         </label>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <input
+          <Input
             ref={fileInputRef}
+            label="登录地理位置数据库（MMDB）"
+            containerClassName="w-full"
             type="file"
             accept=".mmdb"
-            className="hidden"
+            error={uploadMutation.error?.message}
+            disabled={!canWrite || !geo.data || uploadMutation.isPending || removeGeo.isPending}
             onChange={(e) => {
-              const file = e.target.files?.[0]
-              if (file) uploadMutation.mutate(file)
-              e.target.value = ''
+              setGeoFile(e.target.files?.[0] ?? null)
+              uploadMutation.reset()
             }}
           />
           {canWrite && (
             <Button
-              size="sm"
-              variant="ghost"
-              disabled={uploadMutation.isPending}
-              onClick={() => fileInputRef.current?.click()}
+              disabled={!geoFile || !geo.data || removeGeo.isPending}
+              loading={uploadMutation.isPending}
+              onClick={() => { if (geoFile) { if (geo.data?.external) setConfirmGeo('replace'); else uploadMutation.mutate(geoFile) } }}
             >
               <UploadSimple className="h-4 w-4" />
               {t('pages.notifications.uploadGeoip')}
             </Button>
           )}
           <span className="break-all text-xs">{geo.error?.message || (geo.data && ((geo.data.external ? '运维指定' : '控制台维护') + ' · ' + geo.data.path + (geo.data.installed ? '（已安装）' : '（未安装）')))}</span>
-          {canWrite && <Button size="sm" variant="ghost" disabled={!geo.data?.installed || geo.data.external || uploadMutation.isPending || removeGeo.isPending} onClick={() => { if (window.confirm('移除登录地理位置数据库？')) removeGeo.mutate() }}>移除数据库</Button>}
-          <label className="flex items-center gap-2"><input type="checkbox" checked={current?.geoip_local_enabled ?? false} disabled={!current || !canWrite} onChange={e => setUseGeo(e.target.checked)} />优先使用本地地理库</label>
-          <Badge tone={current?.geoip_local_enabled ? 'success' : 'neutral'}>
-            {current?.geoip_local_enabled
+          {canWrite && <Button disabled={!geo.data?.installed || geo.data.external || uploadMutation.isPending || removeGeo.isPending} onClick={() => setConfirmGeo('remove')}>移除数据库</Button>}
+          <ConfirmDialog open={!!confirmGeo} loading={uploadMutation.isPending || removeGeo.isPending}
+            title={confirmGeo === 'replace' ? '替换运维指定的地理位置数据库？' : '移除登录地理位置数据库？'} description={geo.data?.path}
+            onClose={() => setConfirmGeo(null)} onConfirm={() => {
+              if (confirmGeo === 'remove') removeGeo.mutate()
+              if (confirmGeo === 'replace' && geoFile) uploadMutation.mutate(geoFile)
+            }} />
+          <label className="pw-touch-check flex items-center gap-2"><input type="checkbox" checked={current?.geoip_local_enabled ?? false} disabled={!current || !canWrite} onChange={e => setUseGeo(e.target.checked)} />优先使用本地地理库</label>
+          <Badge tone={stored?.geoip_local_enabled ? 'success' : 'neutral'}>
+            {stored?.geoip_local_enabled
               ? t('pages.notifications.geoipLocalOn')
               : t('pages.notifications.geoipLocalOff')}
           </Badge>

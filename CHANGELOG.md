@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+- Add sidebar and command-search entries for protection reports, the live dashboard, page protection, node directories, ASN data and the log buffer. Site and node maintenance starts with a scoped selection. Reports distinguish listeners on the same domain. ZIP drafts survive failed replacements, and file pickers, protocol selectors and destructive confirmations follow the console controls.
+
 - Check all physical site listeners against the dashboard port, including the implicit HTTP/HTTPS pair. Configuration restore now validates terminal handlers, standard listener conflicts and uploaded release availability before writing. Migration 000117 extends the TLS policy checks to additional HTTP listeners.
 
 - Add console maintenance for ASN databases and institution name tables, login GeoIP file status and removal, and persistent Elasticsearch buffer directories.

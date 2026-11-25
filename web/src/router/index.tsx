@@ -16,7 +16,9 @@ import { RateLimitingPage } from '@/pages/RateLimitingPage'
 import { LogsPage } from '@/pages/LogsPage'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { AssistantPage } from '@/pages/AssistantPage'
-import { SettingsPage } from '@/pages/SettingsPage'
+import { SettingsPage, LogBufferPage } from '@/pages/SettingsPage'
+import { AsnDataPage } from '@/pages/AsnDataCard'
+import { MaintenanceTargetsPage } from '@/pages/MaintenanceTargetsPage'
 import { NotificationsPage } from '@/pages/NotificationsPage'
 import { AccountPage } from '@/pages/AccountPage'
 import { ProfilePage } from '@/pages/ProfilePage'
@@ -80,6 +82,10 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <DashboardPage /> },
       { path: 'reports', element: <ProtectionReportsPage /> },
+      { path: 'page-protection', element: <MaintenanceTargetsPage key="sites" target="sites" /> },
+      { path: 'static-directories', element: <RequireAdmin><MaintenanceTargetsPage key="agents" target="agents" /></RequireAdmin> },
+      { path: 'asn-data', element: <RequireAdmin><AsnDataPage /></RequireAdmin> },
+      { path: 'log-buffer', element: <RequireAdmin><LogBufferPage /></RequireAdmin> },
       { path: 'live-protection', element: <ProtectionReportsPage live /> },
       { path: 'sites', element: <SitesListPage /> },
       {

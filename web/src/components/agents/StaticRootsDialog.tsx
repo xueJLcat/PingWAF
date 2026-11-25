@@ -4,6 +4,7 @@ import { apiClient } from '@/api/client'
 import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { useNow } from '@/hooks'
 
 interface Inventory {
   revision: string
@@ -22,7 +23,8 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
   const query = useQuery({queryKey:['agent-static-roots',node], queryFn:()=>apiClient.get<Inventory>(endpoint),
     retry:false, refetchInterval: q => pending && q.state.data?.last_command !== pending.id && Date.now() < pending.deadline ? 2000 : false})
   const data = query.data
-  const waiting = !!pending && data?.last_command !== pending.id && Date.now() < pending.deadline
+  const now = useNow(2000)
+  const waiting = !!pending && data?.last_command !== pending.id && now < pending.deadline
   const write = useMutation({mutationFn:(value:Edit)=>apiClient.put<{command_id:string}>(endpoint,
     {identifier:value.id, path:value.action==='remove'?null:value.path, revision:value.revision}),
     onSuccess:r=>{ setPending({id:r.command_id,deadline:Date.now()+90000});setEdit(undefined);void query.refetch() }})
@@ -34,9 +36,9 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
   const valid = edit && /^[a-zA-Z0-9_-]{1,64}$/.test(edit.id) &&
     (edit.action==='remove' || edit.path.startsWith('/')) &&
     (edit.action!=='add' || !Object.hasOwn(data?.paths??{},edit.id))
-  return <Dialog open onClose={close} size="lg" className="[overflow-wrap:anywhere]" title="静态目录" description={name??node}>
+  return <Dialog open onClose={write.isPending ? () => undefined : close} size="lg" className="[overflow-wrap:anywhere]" title="静态目录" description={name??node}>
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <Button onClick={()=>void query.refetch()} loading={query.isFetching}>刷新节点清单</Button>
         <Button variant="primary" disabled={!data?.revision || waiting || !!edit} onClick={()=>start('add')}>登记目录</Button>
       </div>
@@ -51,12 +53,13 @@ export function StaticRootsDialog({node, name, close}: {node: string; name?: str
             <div className="flex gap-1">{(['edit','remove'] as const).map(action=><Button key={action}
               disabled={waiting || !!edit || !!data.sites[id]?.length} onClick={()=>start(action,id)}>{action==='edit'?'改路径':'移除'}</Button>)}</div>
           </li>)}</ul></>}
-      {edit && <form className="space-y-3 rounded-lg border border-border p-3" onSubmit={e=>{e.preventDefault();if(valid)write.mutate(edit)}}>
-        <Input label="目录标识" value={edit.id} required disabled={edit.action!=='add'} onChange={e=>setEdit({...edit,id:e.target.value})}/>
-        {edit.action!=='remove' && <Input label="节点绝对路径" value={edit.path} required placeholder={data?.public_root+'/public'}
+      {edit && <form className="space-y-3 rounded-lg border border-line p-3" onSubmit={e=>{e.preventDefault();if(valid && !write.isPending)write.mutate(edit)}}>
+        <Input label="目录标识" hint="使用 1–64 个英文字母、数字、下划线或短横线。" value={edit.id} required disabled={edit.action!=='add' || write.isPending}
+          error={edit.action==='add' && Object.hasOwn(data?.paths??{},edit.id) ? '此标识已登记。' : undefined} onChange={e=>setEdit({...edit,id:e.target.value})}/>
+        {edit.action!=='remove' && <Input label="节点绝对路径" disabled={write.isPending} value={edit.path} required placeholder={data?.public_root+'/public'}
           onChange={e=>setEdit({...edit,path:e.target.value})}/>}
         {edit.action==='remove' && <p>移除登记后，新增站点将无法选择该目录。源文件会保留。</p>}
-        <div className="flex gap-2"><Button type="submit" variant="primary" loading={write.isPending} disabled={!valid}>{edit.action==='remove'?'确认移除':'保存到节点'}</Button>
+        <div className="flex gap-2"><Button type="submit" variant={edit.action==='remove'?'danger':'primary'} loading={write.isPending} disabled={!valid}>{edit.action==='remove'?'确认移除':'保存到节点'}</Button>
           <Button type="button" disabled={write.isPending} onClick={()=>setEdit(undefined)}>取消</Button></div>
       </form>}
       {write.error && <p role="alert">{write.error.message}</p>}

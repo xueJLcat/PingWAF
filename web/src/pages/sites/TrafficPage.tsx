@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -103,6 +103,7 @@ const tooltipStyle = {
  */
 export function TrafficPanels({ siteId }: { siteId?: string }) {
   const { t } = useTranslation()
+  const canManageData = useCanWrite()
   const navigate = useNavigate()
   const [range, setRange] = useState<TrafficRange>('24h')
 
@@ -594,7 +595,7 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
               <CardHeader
                 title={t('pages.traffic.topAsns')}
                 description={t('pages.traffic.topAsnsHint')}
-                action={<Buildings weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+                action={canManageData ? <Link className="text-xs text-fg-brand-strong underline" to="/asn-data">{t('nav.asnData')}</Link> : <Buildings weight="duotone" className="h-4 w-4 text-fg-subtle" />}
               />
               <CardBody className="p-0">
                 <TopAsnsTable

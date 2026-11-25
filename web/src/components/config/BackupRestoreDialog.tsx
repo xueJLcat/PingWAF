@@ -165,21 +165,16 @@ export function BackupRestoreDialog({
           </div>
         )}
         {!backup && (
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[13px] font-medium text-fg" htmlFor="backup-file">
-              {t('pages.backups.file')}
-            </label>
-            <input
-              id="backup-file"
-              type="file"
-              accept=".json,.pwb.json,application/json"
-              className="text-sm text-fg file:mr-3 file:rounded-md file:border file:border-line file:bg-recessed file:px-3 file:py-2 file:text-sm file:text-fg"
-              onChange={(event) => {
-                invalidatePreview()
-                setFile(event.target.files?.[0] ?? null)
-              }}
-            />
-          </div>
+          <Input
+            label={t('pages.backups.file')}
+            id="backup-file"
+            type="file"
+            accept=".json,.pwb.json,application/json"
+            onChange={(event) => {
+              invalidatePreview()
+              setFile(event.target.files?.[0] ?? null)
+            }}
+          />
         )}
         <Input
           label={t('pages.backups.password')}

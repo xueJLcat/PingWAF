@@ -39,6 +39,10 @@ const langLabels: Record<string, string> = {
 const crumbKeys: Record<string, string> = {
   dashboard: 'pages.dashboard.title',
   reports: 'nav.protectionReports',
+  'page-protection': 'pages.sites.pageProtection',
+  'static-directories': 'nav.staticDirectories',
+  'asn-data': 'nav.asnData',
+  'log-buffer': 'nav.logBuffer',
   'live-protection': 'nav.liveProtection',
   sites: 'pages.sites.title',
   security: 'nav.security',

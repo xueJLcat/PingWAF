@@ -32,7 +32,7 @@ import { sitesApi, siteKeys } from '@/api/sites'
 import { sslApi } from '@/api/ssl'
 import { useAuthStore } from '@/stores/authStore'
 import { Select } from '@/components/ui/Select'
-import { validIngressPort } from './sites/ingressForm'
+import { ingressPortError } from './sites/ingressForm'
 import { SiteArchiveField } from './sites/SiteArchiveField'
 import { SiteIngressFields } from './sites/SiteIngressFields'
 import { defaultIngress, ingressRequest, siteListener, type IngressDraft } from './sites/ingressForm'
@@ -141,6 +141,7 @@ export function SitesListPage() {
   const [editing, setEditing] = useState<Site | null>(null)
   const [form, setForm] = useState<SiteFormState>(emptyForm)
   const [formErrors, setFormErrors] = useState<SiteFormErrors>({})
+  const [archiveBusy, setArchiveBusy] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batch, setBatch] = useState<{
     kind: 'pause' | 'resume' | 'delete'
@@ -468,9 +469,8 @@ export function SitesListPage() {
       alternateDomains.push(value)
     }
 
-    if (![cloneForm.ingress.listener, ...(cloneForm.ingress.additional ?? [])].every(row => validIngressPort(row, ingressInventory.data?.admin_port))) {
-      errors.top = t('pages.sites.ingressPortInvalid')
-    }
+    const portError = ingressPortError(cloneForm.ingress, ingressInventory.data?.admin_port)
+    if (portError) errors.top = t(portError)
     setCloneErrors(errors)
     if (Object.values(errors).some(Boolean)) return
 
@@ -523,15 +523,14 @@ export function SitesListPage() {
     const domain = normaliseDomainInput(form.domain)
     setFormErrors((e) => ({
       ...e,
-      domain: DOMAIN_PATTERN.test(domain) ? undefined : t('pages.sites.domainInvalid'),
+      domain: !domain || DOMAIN_PATTERN.test(domain) ? undefined : t('pages.sites.domainInvalid'),
     }))
   }
 
   /** Same blur-level format check, but for the clone dialog's fields. */
   const validateCloneDomainField = () => {
     const domain = normaliseDomainInput(cloneForm.domain)
-    if (DOMAIN_PATTERN.test(domain)) return
-    setCloneErrors((e) => ({ ...e, domain: t('pages.sites.domainInvalid') }))
+    setCloneErrors((e) => ({ ...e, domain: !domain || DOMAIN_PATTERN.test(domain) ? undefined : t('pages.sites.domainInvalid') }))
   }
 
   const validateAlternateDomain = (index: number) => {
@@ -554,16 +553,23 @@ export function SitesListPage() {
   const activeHandler = form.directory ?? form.handler ?? form.zip
   const siteMode = activeHandler?.kind === 'zip' ? 'static' : activeHandler?.kind ?? 'proxy'
   function changeHandler(kind: 'proxy' | 'static' | 'zip' | 'redirect') {
-    setForm(previous => ({
-      ...previous,
-      draftId: undefined,
-      zip: kind === 'zip' ? {kind, digest: ''} : null,
-      directory: kind === 'static' ? {kind, directory_id: '', digest: ''} : null,
-      handler: kind === 'redirect' ? {kind, target: '', status: 302, preserve_path: true, preserve_query: true} : null,
-      ingress: previous.ingress.listener || kind === 'proxy' ? previous.ingress : {
-        ...previous.ingress, listener: 'http:80', additional: ['https:443'],
-      },
-    }))
+    setForm(previous => {
+      let ingress = previous.ingress
+      if (kind !== 'proxy' && !ingress.listener) {
+        ingress = { ...ingress, listener: 'http:80', additional: ['https:443'] }
+      } else if (kind === 'proxy' && ingress.listener === 'http:80' && ingress.additional?.length === 1 &&
+        ingress.additional[0] === 'https:443' && !ingress.agents?.length && !ingress.paused) {
+        ingress = defaultIngress
+      }
+      return {
+        ...previous,
+        draftId: undefined,
+        zip: kind === 'zip' ? {kind, digest: ''} : null,
+        directory: kind === 'static' ? {kind, directory_id: '', digest: ''} : null,
+        handler: kind === 'redirect' ? {kind, target: '', status: 302, preserve_path: true, preserve_query: true} : null,
+        ingress,
+      }
+    })
   }
   const selectedAgents = form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []
   const directoryNodes = (ingressInventory.data?.agents ?? []).filter(node => selectedAgents.includes(node.id))
@@ -577,7 +583,8 @@ export function SitesListPage() {
     const errors: SiteFormErrors = {}
 
     if (!name) errors.name = t('pages.sites.nameRequired')
-    if (!DOMAIN_PATTERN.test(domain)) errors.domain = t('pages.sites.domainInvalid')
+    if (!domain) errors.domain = t('pages.sites.domainRequired')
+    else if (!DOMAIN_PATTERN.test(domain)) errors.domain = t('pages.sites.domainInvalid')
 
     const alternateDomains: string[] = []
     for (const raw of form.alternateDomains) {
@@ -608,12 +615,8 @@ export function SitesListPage() {
       errors.top = t('pages.sites.ingressRequireAgent')
     }
 
-    const listenerRows = [form.ingress.listener, ...(form.ingress.additional ?? [])]
-    if (!listenerRows.every(row => validIngressPort(row, ingressInventory.data?.admin_port))) {
-      errors.top = t('pages.sites.ingressPortInvalid')
-    } else if (new Set(listenerRows.map(row => Number(row.split(':')[1]))).size !== listenerRows.length) {
-      errors.top = t('pages.sites.duplicatePort')
-    }
+    const portError = ingressPortError(form.ingress, ingressInventory.data?.admin_port)
+    if (portError) errors.top = t(portError)
     setFormErrors(errors)
     if (Object.values(errors).some(Boolean)) return
 
@@ -696,6 +699,13 @@ export function SitesListPage() {
     </div>
   )
 
+  const siteMaintenance = (site: Site) => (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <Badge tone="neutral">{t('pages.sites.' + ({zip:'modeZip', static:'modeDirectory', redirect:'modeRedirect', proxy:'modeProxy'}[site.site_handler?.kind ?? 'proxy']))}</Badge>
+      {!!site.ingress_port && site.site_handler?.kind !== 'redirect' && <Link className="py-1 text-fg-brand-strong underline"
+        onClick={event => event.stopPropagation()} to={`/sites/${site.id}/security/protection?tab=integrity`}>{t('pages.sites.pageProtection')}</Link>}
+    </div>
+  )
   const columns: Column<Site>[] = [
     {
       key: 'select',
@@ -745,11 +755,7 @@ export function SitesListPage() {
               )}
             </p>
             <p className="truncate text-xs text-fg-subtle">{r.name}</p>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-              <Badge tone="neutral">{t('pages.sites.' + ({zip:'modeZip',static:'modeDirectory',redirect:'modeRedirect',proxy:'modeProxy'}[r.site_handler?.kind ?? 'proxy']))}</Badge>
-              {r.ingress_port && r.site_handler?.kind !== 'redirect' && <Link className="text-fg-brand-strong underline" onClick={e=>e.stopPropagation()}
-                to={`/sites/${r.id}/security/protection?tab=integrity`}>{t('pages.sites.pageProtection')}</Link>}
-            </div>
+            {siteMaintenance(r)}
           </div>
         </div>
       ),
@@ -888,7 +894,7 @@ export function SitesListPage() {
           </span>
         </button>
       </div>
-      <div className="pl-8">{renderSiteActions(r)}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2 pl-8">{siteMaintenance(r)}{renderSiteActions(r)}</div>
     </li>
   )
 
@@ -1048,7 +1054,7 @@ export function SitesListPage() {
             <Button variant="ghost" onClick={closeDialog} disabled={pending}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" onClick={submit} loading={pending}>
+            <Button variant="primary" onClick={submit} loading={pending} disabled={archiveBusy}>
               {editing ? t('common.save') : t('common.create')}
             </Button>
           </>
@@ -1133,7 +1139,7 @@ export function SitesListPage() {
             <legend className="text-sm font-medium">{t('pages.sites.siteMode')}</legend>
             <div className="grid gap-2 sm:grid-cols-3">
               {(['proxy','static','redirect'] as const).map(kind => <label key={kind}
-                className="flex items-center gap-2 rounded-md border border-border p-3 has-[:checked]:border-brand">
+                className="pw-touch-check flex min-h-9 items-center gap-2 rounded-md border border-line px-3 text-sm has-checked:border-brand has-checked:bg-brand-soft has-checked:text-fg-brand-strong">
                 <input type="radio" name="site-type" value={kind} checked={siteMode === kind}
                   onChange={() => changeHandler(kind === 'static' ? 'zip' : kind)} />
                 {t('pages.sites.' + ({proxy:'modeProxy',static:'modeStatic',redirect:'modeRedirect'}[kind]))}
@@ -1154,7 +1160,8 @@ export function SitesListPage() {
             {(certificates.data?.items ?? []).filter(cert => cert.has_certificate && cert.has_private_key).map(cert =>
               <option key={cert.id} value={cert.id}>{cert.domain}</option>)}
           </Select>}
-          {form.zip && <SiteArchiveField site={editing?.id} digest={form.zip.digest}
+          {showCertificate && certificates.isError && <ErrorState variant="inline" error={certificates.error} onRetry={() => void certificates.refetch()} />}
+          {form.zip && <SiteArchiveField site={editing?.id} digest={form.zip.digest} onBusy={setArchiveBusy} disabled={pending}
             onChange={(digest, draftId) => setForm(f => ({ ...f, zip: { kind: 'zip', digest }, draftId }))} />}
           {form.directory && <Select label={t('pages.sites.selectDirectory')} value={form.directory.directory_id}
             onChange={e => setForm(f => ({ ...f, directory: { kind: 'static', directory_id: e.target.value,
@@ -1189,8 +1196,9 @@ export function SitesListPage() {
               <summary>{id} · {t('pages.sites.directoryMismatch')}</summary>
               {directoryNodes.map(node => <p key={node.id} className="break-all">{node.name} · {node.static_directories?.[id] || t('pages.sites.directoryMissing')}</p>)}
             </details>)}
+          {form.directory && editing && directoryHistory.isError && <ErrorState variant="inline" error={directoryHistory.error} onRetry={() => void directoryHistory.refetch()} />}
           {form.handler && <div className="flex flex-col gap-3">
-            <Input label={t('pages.sites.redirectTarget')} value={form.handler.target} error={formErrors.upstream}
+            <Input required type="url" label={t('pages.sites.redirectTarget')} value={form.handler.target} error={formErrors.upstream}
               placeholder="https://example.com/" onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, target: e.target.value } }))}/>
             <Select label={t('pages.sites.redirectStatus')} value={form.handler.status}
               onChange={e => setForm(f => ({ ...f, handler: f.handler && { ...f.handler, status: Number(e.target.value) as RedirectHandler['status'] } }))}>

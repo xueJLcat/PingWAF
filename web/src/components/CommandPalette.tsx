@@ -1,3 +1,4 @@
+import { navigationGroups } from '@/lib/navigation'
 import { formatSiteAddress } from '@/lib/format'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -5,18 +6,9 @@ import { useTranslation } from 'react-i18next'
 import {
   MagnifyingGlass,
   Globe,
-  ChartLine,
   List,
-  FlowArrow,
-  FunnelSimple,
   Prohibit,
-  Lock,
-  Desktop,
-  Bell,
-  ClockCounterClockwise,
-  UserCircle,
   Gear,
-  House,
   MoonStars,
   Translate,
   BookOpen,
@@ -43,45 +35,6 @@ interface Command {
   group: string
   icon: Icon
   run: () => void
-}
-
-/** All top-level navigation destinations, grouped like the sidebar. */
-const NAV_PAGES: { to: string; labelKey: string; icon: Icon }[] = [
-  { to: '/dashboard', labelKey: 'nav.dashboard', icon: House },
-  { to: '/reports', labelKey: 'nav.protectionReports', icon: ChartLine },
-  { to: '/live-protection', labelKey: 'nav.liveProtection', icon: Desktop },
-  { to: '/traffic', labelKey: 'nav.traffic', icon: ChartLine },
-  { to: '/logs', labelKey: 'nav.logs', icon: List },
-  { to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },
-  { to: '/sites', labelKey: 'nav.sites', icon: Globe },
-  { to: '/ip-groups', labelKey: 'nav.ipGroups', icon: FunnelSimple },
-  { to: '/blocked-ips', labelKey: 'nav.blockedIps', icon: Prohibit },
-  { to: '/ssl', labelKey: 'nav.ssl', icon: Lock },
-  { to: '/agents', labelKey: 'nav.agents', icon: Desktop },
-  { to: '/notifications', labelKey: 'nav.notifications', icon: Bell },
-  { to: '/config-versions', labelKey: 'nav.configVersions', icon: ClockCounterClockwise },
-  { to: '/account', labelKey: 'nav.account', icon: UserCircle },
-  { to: '/settings', labelKey: 'nav.settings', icon: Gear },
-]
-
-/** Top-level routes gated by `RequireAdmin` in the router — never listed. */
-const ADMIN_ONLY_PATHS = new Set(['/lifecycle', '/config-versions'])
-
-const NAV_GROUPS: { key: string; tos: string[] }[] = [
-  { key: 'nav.group.overview', tos: ['/dashboard'] },
-  { key: 'nav.group.trafficLogs', tos: ['/traffic', '/logs', '/lifecycle'] },
-  {
-    key: 'nav.group.securityAssets',
-    tos: ['/sites', '/ip-groups', '/blocked-ips', '/ssl'],
-  },
-  {
-    key: 'nav.group.platform',
-    tos: ['/agents', '/notifications', '/config-versions', '/account', '/settings'],
-  },
-]
-
-function groupFor(to: string): string {
-  return NAV_GROUPS.find((g) => g.tos.includes(to))?.key ?? 'nav.group.platform'
 }
 
 /* ── Recently used commands (UX-11) ──────────────────────────────────── */
@@ -162,15 +115,13 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       // A docs page opens in a new tab; the console keeps its state.
       window.open(DOCS_URL, '_blank', 'noopener,noreferrer')
     }
-    const navCmds: Command[] = NAV_PAGES.filter(
-      (p) => isAdmin || !ADMIN_ONLY_PATHS.has(p.to),
-    ).map((p) => ({
+    const navCmds: Command[] = navigationGroups(isAdmin).flatMap(group => group.items.map(p => ({
       id: `nav:${p.to}`,
       label: t(p.labelKey),
-      group: t(groupFor(p.to)),
+      group: t(group.labelKey),
       icon: p.icon,
       run: () => go(p.to),
-    }))
+    })))
     const siteCmds: Command[] = (sites ?? []).map((s) => ({
       id: `site:${s.id}`,
       label: formatSiteAddress(s) || s.name,

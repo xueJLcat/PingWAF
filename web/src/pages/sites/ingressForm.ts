@@ -38,3 +38,9 @@ export function validIngressPort(listener: string, adminPort?: number) {
   return Number.isInteger(port) && port > 0 && port <= 65535 &&
     (port !== 80 || listener === 'http:80') && (port !== 443 || listener === 'https:443') && port !== adminPort
 }
+
+export function ingressPortError(draft: IngressDraft, adminPort?: number) {
+  const rows = [draft.listener, ...(draft.additional ?? [])]
+  if (!rows.every(row => validIngressPort(row, adminPort))) return 'pages.sites.ingressPortInvalid'
+  if (new Set(rows.map(row => Number(row.split(':')[1]))).size !== rows.length) return 'pages.sites.duplicatePort'
+}

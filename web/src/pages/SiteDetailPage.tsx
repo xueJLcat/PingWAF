@@ -308,15 +308,18 @@ export function SiteDetailPage() {
 
       {/* Z5: offline/degraded agents mean config changes may lag. */}
       {Boolean(site?.ingress_port) && <section className="mb-4 space-y-2 rounded-md border border-border px-3 py-2 text-sm">
-        <h2 className="font-medium">{t('pages.siteDetail.deployment.title')}</h2>
-        {deployment.isError || deployment.isPending
-          ? <p>{t(deployment.isError ? 'pages.siteDetail.deployment.unknown' : 'common.loading')}</p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-medium">{t('pages.siteDetail.deployment.title')}</h2>
+          <Button size="sm" loading={deployment.isFetching} onClick={() => void deployment.refetch()}>{t('common.refresh')}</Button>
+        </div>
+        {deployment.isError ? <ErrorState variant="inline" error={deployment.error} />
+          : deployment.isPending ? <p role="status">{t('common.loading')}</p>
           : <>
             {deployment.data.desired_revision && <p>{t('pages.siteDetail.deployment.desired')} <code title={deployment.data.desired_revision}>{deployment.data.desired_revision.slice(0, 12)}</code></p>}
             {deployment.data.nodes.length === 0 && <p>{t('pages.siteDetail.deployment.empty')}</p>}
-            {deployment.data.nodes.map(node => <div key={node.id} className="flex flex-wrap gap-x-3">
-              <strong>{node.name}</strong>
-              <span>{t(`pages.siteDetail.deployment.${node.state}`)}</span>
+            {deployment.data.nodes.map(node => <div key={node.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line py-2">
+              <strong className="break-all">{node.name}</strong>
+              <Badge tone={node.state==='applied' ? 'success' : node.state==='failed' ? 'danger' : 'neutral'}>{t(`pages.siteDetail.deployment.${node.state}`)}</Badge>
               {node.failure_code && <span>{t(`pages.siteDetail.deployment.${node.failure_code}`)}</span>}
               <span>{t(node.bound === null ? 'pages.siteDetail.deployment.bindUnknown' : node.bound ? 'pages.siteDetail.deployment.bound' : 'pages.siteDetail.deployment.unbound')}</span>
               {node.applied_revision && <code title={node.applied_revision}>{node.applied_revision.slice(0, 12)}</code>}
