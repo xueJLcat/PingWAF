@@ -34,7 +34,8 @@ export function MaintenanceTargetsPage({ target }: { target: 'sites' | 'agents' 
       if (target === 'agents') {
         const result = await agentsApi.list(query)
         return { total: result.total, rows: result.items.map(node => ({
-          id: node.id, name: node.display_name || node.hostname, detail: node.hostname,
+          id: node.id, name: node.display_name || node.hostname,
+          detail: [node.display_name && node.display_name !== node.hostname ? node.hostname : '', node.id].filter(Boolean).join(' · '),
           to: '',
         })) }
       }
