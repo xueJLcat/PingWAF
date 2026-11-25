@@ -28,11 +28,20 @@ test.describe('multi-upstream and health handling', () => {
           const response = await request.get(`http://${requiredEnv('E2E_EDGE_IP')}/`, {
             headers: { Host: host },
           })
+          if (response.status() === 503) {
+            seen.clear()
+            return []
+          }
           expect(response.status()).toBe(200)
           seen.add((await response.json()).origin)
         }
         return [...seen].sort()
       }, { timeout: 45_000, intervals: [1_000] }).toEqual(['a', 'b'])
+      for (const host of [domain, alternate, domain, alternate]) {
+        const response = await request.get(`http://${requiredEnv('E2E_EDGE_IP')}/`, { headers: { Host: host } })
+        expect(response.status()).toBe(200)
+        expect(['a', 'b']).toContain((await response.json()).origin)
+      }
     } finally {
       await app.deleteSite(domain)
     }
