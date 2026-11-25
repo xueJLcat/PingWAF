@@ -111,6 +111,11 @@ pub fn seal_string(plain: &str) -> String {
     seal_with(&LessSafeKey::new(key), &SystemRandom::new(), plain)
 }
 
+/// Encrypt freshly supplied credentials whose storage contract requires a key.
+pub(crate) fn seal_required(plain: &str) -> Option<String> {
+    Some(seal_with(&LessSafeKey::new(instance_key()?), &SystemRandom::new(), plain))
+}
+
 /// Opens a single sealed secret back to plain text. Clear-text values
 /// (legacy rows written before a key existed) pass through unchanged;
 /// sealed values that fail to open (corrupt, rotated key) yield `None` so

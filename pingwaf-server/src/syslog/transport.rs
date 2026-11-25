@@ -23,9 +23,15 @@ pub fn tls(c: &Config, m: &Material) -> Result<Tls> {
     let mut roots = RootCertStore::empty();
     if c.trust == "custom" {
         for cert in rustls_pemfile::certs(&mut Cursor::new(&m.ca)) {
-            roots
-                .add(cert.context("ca: invalid PEM")?)
-                .context("ca: invalid certificate")?;
+            use x509_parser::prelude::*;
+            let cert = cert.context("ca: invalid PEM")?;
+            let (_, parsed) = X509Certificate::from_der(cert.as_ref())
+                .map_err(|_| anyhow::anyhow!("ca: invalid certificate"))?;
+            ensure!(
+                parsed.validity().is_valid(),
+                "ca: outside validity period"
+            );
+            roots.add(cert).context("ca: invalid certificate")?;
         }
     } else {
         roots.add_parsable_certificates(

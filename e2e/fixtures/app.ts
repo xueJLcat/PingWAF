@@ -42,8 +42,24 @@ async function login(page: Page) {
   if (!password) throw new Error('E2E_ADMIN_PASSWORD is required')
   await page.goto('/login')
   await page.getByRole('textbox', { name: /Email/ }).fill(email)
-  await page.getByRole('textbox', { name: /Password/ }).fill(password)
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  // Isolated Chromium contexts share a loopback IP and the server's login quota.
+  // Respect its advertised cooling-off period when a long suite consumes it.
+  const deadline = Date.now() + 65_000
+  for (;;) {
+    await page.getByRole('textbox', { name: /Password/ }).fill(password)
+    const [response] = await Promise.all([
+      page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/v1/auth/login'),
+      page.getByRole('button', { name: 'Sign in', exact: true }).click(),
+    ])
+    if (response.status() !== 429) {
+      expect(response.ok(), 'Administrator login returned HTTP ' + response.status()).toBe(true)
+      break
+    }
+    const seconds = Number(await response.headerValue('retry-after'))
+    if (!Number.isInteger(seconds) || seconds < 1 || Date.now() + seconds * 1000 >= deadline)
+      throw new Error('Login quota did not recover within the fixture deadline')
+    await new Promise(resolve => setTimeout(resolve, seconds * 1000 + 100))
+  }
   await expect(page).toHaveURL(/\/dashboard/, { timeout: 30_000 })
 }
 

@@ -72,7 +72,7 @@ fn valid_host(s: &str) -> bool {
     s.parse::<IpAddr>().is_ok()
         || (!s.is_empty()
             && s.len() <= 253
-            && s.trim_end_matches('.').split('.').all(|label| {
+            && s.strip_suffix('.').unwrap_or(s).split('.').all(|label| {
                 !label.is_empty()
                     && label.len() <= 63
                     && !label.starts_with('-')
@@ -176,6 +176,7 @@ impl Config {
             || self.threshold != next.threshold
             || self.severity != next.severity
             || self.format != next.format
+            || self.body != next.body
             || self.framing != next.framing
             || self.max_bytes > next.max_bytes
     }

@@ -1,5 +1,9 @@
 import { createSocket } from 'node:dgram'
 import { once } from 'node:events'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test, expect } from '../fixtures/app'
 
 test('maintain a log destination across desktop and mobile with a real UDP receiver', async ({ app }) => {
@@ -9,6 +13,7 @@ test('maintain a log destination across desktop and mobile with a real UDP recei
   socket.bind(0, '127.0.0.1')
   await once(socket, 'listening')
   const endpoint = app.adminUrl('/log-buffer')
+  const files = mkdtempSync(join(tmpdir(), 'pingwaf-syslog-pem-'))
   try {
     await page.goto(endpoint)
     await expect(page.getByRole('heading', {name:'Log services', exact:true})).toBeVisible()
@@ -44,6 +49,26 @@ test('maintain a log destination across desktop and mobile with a real UDP recei
     await page.getByRole('button',{name:'Save and apply'}).click()
     await expect(page.getByText(/Paused.*UDP/)).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await page.getByRole('button',{name:'Edit',exact:true}).click()
+    await transport.selectOption('tls')
+    await page.getByLabel('Server trust').selectOption('custom')
+    await page.getByRole('switch',{name:'Use mutual TLS'}).click()
+    const cert = join(files,'client.pem')
+    const key = join(files,'client.key')
+    for (const commonName of ['first','replacement']) {
+      execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN='+commonName,'-keyout',key,'-out',cert],{stdio:'ignore'})
+      await page.getByLabel('CA bundle (PEM)').setInputFiles(cert)
+      await page.getByLabel('Client certificate chain (PEM)').setInputFiles(cert)
+      await page.getByLabel('Client private key (unencrypted PEM)').setInputFiles(key)
+      const updated=page.waitForResponse(r=>r.url().endsWith('/settings/syslog') && r.request().method()==='PUT')
+      await page.getByRole('button',{name:'Save and apply'}).click()
+      const result=await (await updated).json()
+      expect(result.has_key).toBe(true)
+      expect(JSON.stringify(result)).not.toContain('PRIVATE KEY')
+      await page.getByRole('button',{name:'Edit',exact:true}).click()
+      await expect(page.getByText(result.cert_info.sha256,{exact:false}).first()).toBeVisible()
+    }
+    await page.getByRole('button',{name:'Cancel',exact:true}).click()
     await page.getByRole('button',{name:'Remove destination'}).click()
     await page.getByRole('dialog').getByRole('button',{name:'Cancel'}).click()
     await page.getByRole('button',{name:'Remove destination'}).click()
@@ -51,5 +76,6 @@ test('maintain a log destination across desktop and mobile with a real UDP recei
     await expect(page.getByRole('button',{name:'Configure forwarding'})).toBeVisible()
   } finally {
     socket.close()
+    rmSync(files,{recursive:true,force:true})
   }
 })

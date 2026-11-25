@@ -97,7 +97,7 @@ export function SyslogSettings(){
   }
   function pem(k:FileKind,info?:Info|null){
     const modified=draft?.files[k]
-    return <div className="min-w-0 space-y-1" key={k}><Input type="file" label={label(k)} accept=".pem,.crt,.cer,.key" onChange={async e=>{
+    return <div className="min-w-0 space-y-1" key={k}><Input key={modified===''?'cleared':k} type="file" label={label(k)} accept=".pem,.crt,.cer,.key" onChange={async e=>{
       const file=e.target.files?.[0];if(!file)return
       if(file.size>262144){setError(label('large'));e.target.value='';return}
       setBusy(true);try{const data=await file.text();setDraft(d=>d && {...d,files:{...d.files,[k]:data}});setError('');setMessage('')}
@@ -110,7 +110,7 @@ export function SyslogSettings(){
   const stats=st?.stats
   const grid='grid gap-3 sm:grid-cols-2 lg:grid-cols-3'
   return <Card><CardBody className="space-y-4">
-    <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base font-semibold">{label('title')}</h2>
+    <div className="flex flex-wrap items-center justify-between gap-3 [&_button]:min-h-11 sm:[&_button]:min-h-9"><h2 className="text-base font-semibold">{label('title')}</h2>
       {v && !draft && <div className="flex flex-wrap gap-2"><Button onClick={()=>begin(v)}>{label(v.configured?'edit':'configure')}</Button>
       {v.configured && <Button onClick={()=>setConfirm('remove')}>{label('remove')}</Button>}</div>}</div>
     {query.isError && <p role="alert">{query.error.message} <Button onClick={()=>void query.refetch()}>{label('reload')}</Button></p>}

@@ -159,13 +159,18 @@ impl Service {
     }
     fn install(&self, next: Active) {
         let next = Arc::new(next);
-        self.active.rcu(|old| {
+        let previous = self.active.rcu(|old| {
             if old.revision < next.revision {
                 next.clone()
             } else {
                 old.clone()
             }
         });
+        if previous.revision < next.revision {
+            let mut stats = self.stats.lock().unwrap();
+            stats.error = None;
+            stats.peer = None;
+        }
     }
     pub(crate) fn project(
         &self,

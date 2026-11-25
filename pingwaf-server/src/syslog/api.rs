@@ -32,6 +32,33 @@ fn transport_error(e: anyhow::Error) -> ApiError {
     };
     ApiError::BadGateway(format!("{e:#}")).with_code(code)
 }
+fn public_bundle(input: &str) -> anyhow::Result<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::fmt::Write;
+    use x509_parser::prelude::*;
+    let mut pem = String::new();
+    for item in rustls_pemfile::read_all(&mut std::io::Cursor::new(input)) {
+        let rustls_pemfile::Item::X509Certificate(cert) = item? else {
+            anyhow::bail!("expected only public certificates")
+        };
+        let (remaining, parsed) = X509Certificate::from_der(cert.as_ref())
+            .map_err(|_| anyhow::anyhow!("invalid X509"))?;
+        anyhow::ensure!(
+            remaining.is_empty() && parsed.validity().is_valid(),
+            "invalid certificate or validity period"
+        );
+        writeln!(pem, "-----BEGIN CERTIFICATE-----")?;
+        for line in STANDARD.encode(cert.as_ref()).as_bytes().chunks(64) {
+            writeln!(pem, "{}", std::str::from_utf8(line)?)?;
+        }
+        writeln!(pem, "-----END CERTIFICATE-----")?;
+    }
+    anyhow::ensure!(
+        input.is_empty() || !pem.is_empty(),
+        "no certificate in file"
+    );
+    Ok(pem)
+}
 fn certificate(pem: &str) -> Option<JsonValue> {
     let cert = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
         .next()?
@@ -118,11 +145,11 @@ impl Edit {
                 *field = input.clone();
             }
         }
-        if !m.ca.is_empty() && certificate(&m.ca).is_none() {
-            return Err(invalid(anyhow::anyhow!("ca: invalid certificate")));
+        if self.ca.is_some() {
+            m.ca = public_bundle(&m.ca).context("ca").map_err(invalid)?;
         }
-        if !m.cert.is_empty() && certificate(&m.cert).is_none() {
-            return Err(invalid(anyhow::anyhow!("cert: invalid certificate")));
+        if self.cert.is_some() {
+            m.cert = public_bundle(&m.cert).context("cert").map_err(invalid)?;
         }
         if !m.key.is_empty()
             && rustls_pemfile::private_key(&mut std::io::Cursor::new(&m.key))
@@ -197,11 +224,7 @@ pub(crate) async fn update(
     let sealed = if edit.key.is_none() {
         old.key.clone()
     } else if !material.key.is_empty() {
-        let sealed = crate::notify::secretbox::seal_string(&material.key);
-        if !sealed.starts_with("enc:v1:") {
-            return Err(invalid(anyhow::anyhow!("key: configure PINGWAF_SECRET_KEY before storing a private key")));
-        }
-        sealed
+        crate::notify::secretbox::seal_required(&material.key).ok_or_else(||invalid(anyhow::anyhow!("key: configure PINGWAF_SECRET_KEY before storing a private key")))?
     } else {
         String::new()
     };
