@@ -36,7 +36,7 @@ test('older snapshot batches use the last displayed ID and retain the list on fa
   const dialog = page.getByRole('dialog')
   await expect(dialog).toContainText('history-1.e2e.test')
   await dialog.getByRole('button', {name:'Cancel'}).click()
-  await page.getByRole('combobox', {name:/scope/i}).selectOption('global')
+  await page.getByRole('combobox', {name:'Scope', exact:true}).selectOption('global')
   await expect(oldest).toHaveCount(0)
 })
 

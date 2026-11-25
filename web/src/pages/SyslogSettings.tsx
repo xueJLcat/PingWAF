@@ -149,7 +149,7 @@ export function SyslogSettings(){
     <small className="block break-all text-fg-subtle">{modified!==undefined ? label(modified?'replacement':'clear') : info ? info.sha256+' · '+info.expires : k==='key' && v?.has_key ? label('configured'):'—'}</small>
     {(modified || info || (k==='key' && v?.has_key)) && <Button type="button" size="sm" onClick={()=>setDraft(d=>d && {...d,files:{...d.files,[k]:''}})}>{label('clear')}</Button>}</div>
   }
-  const st=status.data
+  const st=status.isError ? undefined : status.data
   const stats=st?.stats
   const grid='grid gap-3 sm:grid-cols-2 lg:grid-cols-3'
   return <Card><CardBody className="space-y-4">

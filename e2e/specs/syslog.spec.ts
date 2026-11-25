@@ -75,6 +75,17 @@ test('maintain a log destination across desktop and mobile with a real UDP recei
   try {
     await page.goto(endpoint)
     await expect(page.getByRole('heading', {name:'Log services', exact:true})).toBeVisible()
+    const statusText = page.getByText(/Saved \/ active revision/)
+    await expect(statusText).toBeVisible()
+    await page.route('**/api/v1/settings/syslog/status', route => route.fulfill({
+      status: 403, json: { error: { code: 'forbidden', message: 'Status temporarily unavailable' } },
+    }))
+    const unavailable = page.getByRole('alert').filter({hasText: 'Status unavailable'})
+    await expect(unavailable).toBeVisible()
+    await expect(statusText).toHaveCount(0)
+    await page.unroute('**/api/v1/settings/syslog/status')
+    await unavailable.getByRole('button', { name: 'Reload' }).click()
+    await expect(statusText).toBeVisible()
     const toggleTheme = page.getByRole('button', { name: 'Toggle theme', exact: true })
     for (const theme of ['light', 'dark']) {
       if (await page.locator('html').getAttribute('data-theme') !== theme) await toggleTheme.click()
