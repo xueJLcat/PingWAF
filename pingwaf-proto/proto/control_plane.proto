@@ -1312,6 +1312,8 @@ message ManagedApplyReport {
   // Verified and still leased while a replacement proxy view is being built.
   // An older control plane sees no applied sites for a pending view.
   repeated ManagedSiteApplication received_sites = 5;
+  // Sent only after publishing the snapshot and binding all of its listeners.
+  string applied_config_hash = 6;
 }
 
 message ManagedSiteApplication {

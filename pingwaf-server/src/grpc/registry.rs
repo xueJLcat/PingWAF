@@ -510,14 +510,14 @@ impl AgentRegistry {
         session: Option<Uuid>,
         visible: &[Uuid],
         report: Option<&pingwaf_proto::ManagedApplyReport>,
-    ) {
+    ) -> Option<(Uuid, i64)> {
         let mut inner = self.inner.write().await;
         let Some(conn) = inner
             .connected
             .get_mut(&agent)
             .filter(|c| c.generation == stream)
         else {
-            return;
+            return None;
         };
         conn.application = (|| {
             let report = report?;
@@ -600,6 +600,15 @@ impl AgentRegistry {
                 },
             ))
         })();
+        let report = report?;
+        let (_, observation) = conn.application.as_ref()?;
+        let panel = conn.ingress.as_ref()?.1.panel.as_ref()?;
+        (observation.received_sites.is_empty()
+            && panel.applied_generation == observation.generation
+            && panel.desired_generation == observation.generation
+            && report.applied_config_hash.len() == 64
+            && report.applied_config_hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+            .then_some((observation.authority_epoch, observation.generation))
     }
 
     pub async fn application_observations(
@@ -1469,6 +1478,7 @@ mod tests {
             }],
         };
         let report = ManagedApplyReport {
+            applied_config_hash: String::new(),
             received_sites: Vec::new(),
             session_id: session.to_string(),
             authority_epoch: Uuid::new_v4().to_string(),

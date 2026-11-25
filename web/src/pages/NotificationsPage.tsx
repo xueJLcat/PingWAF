@@ -779,10 +779,12 @@ function LoginSecurityCard({ canWrite }: { canWrite: boolean }) {
           {canWrite && (
             <Button
               disabled={!geoFile || !geo.data || removeGeo.isPending}
+              size="sm"
+              variant="ghost"
+              icon={<UploadSimple weight="duotone" className="h-4 w-4" />}
               loading={uploadMutation.isPending}
               onClick={() => { if (geoFile) { if (geo.data?.external) setConfirmGeo('replace'); else uploadMutation.mutate(geoFile) } }}
             >
-              <UploadSimple className="h-4 w-4" />
               {t('pages.notifications.uploadGeoip')}
             </Button>
           )}

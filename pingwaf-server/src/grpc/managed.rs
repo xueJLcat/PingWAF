@@ -1038,6 +1038,7 @@ pub(super) async fn check_postgres(
     assert_eq!(initial.nodes[0].state, "unknown");
     let wanted = initial.desired_revision.unwrap();
     let mut report = pingwaf_proto::ManagedApplyReport {
+        applied_config_hash: String::new(),
         received_sites: Vec::new(),
         session_id: session.to_string(),
         authority_epoch: first.authority_epoch.clone(),

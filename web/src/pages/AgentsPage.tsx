@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Desktop,
+  FolderOpen,
+  Network,
   MagnifyingGlass,
   Trash,
   ArrowClockwise,
@@ -451,7 +453,7 @@ export function AgentsPage() {
             <span className="text-fg-subtle">{t('pages.agents.syncConfig')}:</span>{' '}
             {a.last_config_sync_at
               ? formatRelative(a.last_config_sync_at, now)
-              : '—'}
+              : t('pages.agents.noSyncReport')}
           </p>
           <p
             className="whitespace-nowrap text-[13px] text-fg"
@@ -464,7 +466,7 @@ export function AgentsPage() {
             <span className="text-fg-subtle">{t('pages.agents.syncPolicy')}:</span>{' '}
             {a.last_policy_sync_at
               ? formatRelative(a.last_policy_sync_at, now)
-              : '—'}
+              : t('pages.agents.noSyncReport')}
           </p>
         </div>
       ),
@@ -476,8 +478,12 @@ export function AgentsPage() {
       width: '1%',
       cell: (a) => (
         <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
-            {isAdmin && <Button size="sm" variant="ghost" onClick={()=>openRoots(a.id)}>静态目录</Button>}
-            {isAdmin && <Button size="sm" variant="ghost" onClick={() => openListeners(a.id)}>{t('pages.agents.listenerPolicy.title')}</Button>}
+          {isAdmin && <>
+            <Button size="icon" variant="ghost" aria-label={t('nav.staticDirectories')} title={t('nav.staticDirectories')}
+              onClick={() => openRoots(a.id)} icon={<FolderOpen weight="duotone" className="h-4 w-4" />} />
+            <Button size="icon" variant="ghost" aria-label={t('pages.agents.listenerPolicy.title')} title={t('pages.agents.listenerPolicy.title')}
+              onClick={() => openListeners(a.id)} icon={<Network weight="duotone" className="h-4 w-4" />} />
+          </>}
           <Button
             size="icon"
             variant="ghost"
@@ -902,7 +908,7 @@ export function AgentsPage() {
                 value={
                   detail.last_config_sync_at
                     ? `${formatRelative(detail.last_config_sync_at, now)} · ${formatDateTime(detail.last_config_sync_at)}`
-                    : t('pages.agents.neverSynced')
+                    : t('pages.agents.noSyncReport')
                 }
               />
               <DetailRow
@@ -910,7 +916,7 @@ export function AgentsPage() {
                 value={
                   detail.last_policy_sync_at
                     ? `${formatRelative(detail.last_policy_sync_at, now)} · ${formatDateTime(detail.last_policy_sync_at)}`
-                    : t('pages.agents.neverSynced')
+                    : t('pages.agents.noSyncReport')
                 }
               />
               {detail.tunnel_listener_error && (

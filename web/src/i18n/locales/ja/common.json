@@ -1777,6 +1777,7 @@
     },
     "agents": {
       "listenerPolicy": {
+        "overrides": "サイト別アドレス設定",
         "title": "リスナーのアドレス",
         "offline": "ノードはオフラインです",
         "incompatible": "ノードのバージョンが対応していません",
@@ -1811,6 +1812,7 @@
       "lastSeen": "最終確認",
       "lastHeartbeat": "最終ハートビート",
       "lastSync": "最終同期",
+      "noSyncReport": "同期報告なし",
       "syncConfig": "設定",
       "syncPolicy": "ルール",
       "lastConfigSync": "最終設定同期",

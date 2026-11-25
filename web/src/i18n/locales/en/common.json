@@ -1777,6 +1777,7 @@
     },
     "agents": {
       "listenerPolicy": {
+        "overrides": "Site address overrides",
         "title": "Listener addresses",
         "offline": "Node offline",
         "incompatible": "Incompatible node version",
@@ -1811,6 +1812,7 @@
       "lastSeen": "Last seen",
       "lastHeartbeat": "Last heartbeat",
       "lastSync": "Last sync",
+      "noSyncReport": "No sync report yet",
       "syncConfig": "Config",
       "syncPolicy": "Rules",
       "lastConfigSync": "Last config sync",

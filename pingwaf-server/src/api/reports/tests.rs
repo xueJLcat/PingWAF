@@ -123,9 +123,13 @@ async fn fixed_report_postgres() {
         )
         .await
     );
-    assert!(download(state.clone(), outsider, Path((id, "pdf".into())))
+    assert!(download(state.clone(), outsider.clone(), Path((id, "pdf".into())))
         .await
         .is_err());
+    assert!(remove(state.clone(), outsider, Path(id)).await.is_err());
+    assert_eq!(remove(state.clone(), user.clone(), Path(id)).await.unwrap(), StatusCode::NO_CONTENT);
+    assert!(download(state.clone(), user.clone(), Path((id, "csv".into()))).await.is_err());
+    assert!(remove(state.clone(), user.clone(), Path(id)).await.is_err());
     let gap = snapshot::collect(&db, &user, selection, true)
         .await
         .unwrap();

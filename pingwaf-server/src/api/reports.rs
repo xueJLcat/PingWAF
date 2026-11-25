@@ -3,9 +3,9 @@ use crate::auth::AuthUser;
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::header,
+    http::{header, StatusCode},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -63,8 +63,19 @@ pub(super) struct Snapshot {
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/reports", get(list).post(create))
+        .route("/reports/{id}", delete(remove))
         .route("/reports/{id}/{format}", get(download))
         .route("/reports/live", post(live))
+}
+
+async fn remove(State(s): State<AppState>, user: AuthUser, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+    let result = s.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM protection_reports WHERE id=$1 AND owner_id=$2 AND status IN ('ready','failed')",
+        [id.into(), user.id.into()])).await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("completed report not available".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create(

@@ -1777,6 +1777,7 @@
     },
     "agents": {
       "listenerPolicy": {
+        "overrides": "站点地址覆盖",
         "title": "业务监听地址",
         "offline": "节点离线",
         "incompatible": "节点版本不兼容",
@@ -1811,6 +1812,7 @@
       "lastSeen": "最后在线",
       "lastHeartbeat": "最后心跳",
       "lastSync": "最后同步",
+      "noSyncReport": "暂无同步回执",
       "syncConfig": "配置",
       "syncPolicy": "规则",
       "lastConfigSync": "最近配置同步",

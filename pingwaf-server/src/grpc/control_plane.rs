@@ -809,7 +809,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 first.ingress_listeners.as_ref(),
             )
             .await;
-        registry
+        let applied = registry
             .record_application(
                 agent_id,
                 generation,
@@ -819,6 +819,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             )
             .await;
         tokio::spawn(async move {
+            persist_snapshot_sync(&db, agent_id, session_id, applied, &first).await;
             if let Some(peer) = peer_ip {
                 persist_peer_ip(&db, agent_id, &peer).await;
             }
@@ -885,7 +886,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                         message.ingress_listeners.as_ref(),
                     )
                     .await;
-                registry
+                let applied = registry
                     .record_application(
                         agent_id,
                         generation,
@@ -894,6 +895,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                         message.managed_apply.as_ref(),
                     )
                     .await;
+                persist_snapshot_sync(&db, agent_id, session_id, applied, &message).await;
                 persist_heartbeat(&db, agent_id, &message, &registry).await;
                 if session_id.is_none() {
                     reconcile_agent_config(&db, &registry, agent_id, &message)
@@ -3837,6 +3839,37 @@ async fn connector_credential_current(db: &DatabaseConnection, id: Uuid, digest:
         .filter(tunnel_connector::Column::CredentialSha256.eq(digest))
         .filter(tunnel_connector::Column::Status.eq(tunnel_status::ACTIVE))
         .one(db).await, Ok(Some(_)))
+}
+
+/// The managed snapshot publishes configuration and policy together.
+async fn persist_snapshot_sync(
+    db: &DatabaseConnection,
+    agent: Uuid,
+    session: Option<Uuid>,
+    applied: Option<(Uuid, i64)>,
+    heartbeat: &AgentHeartbeat,
+) {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let (Some(session), Some((epoch, generation)), Some(report)) = (session, applied, &heartbeat.managed_apply) else { return };
+    // Registration locks the agent first, then rotates its session. Follow the same
+    // lock order and check the current grant after acquiring the lock.
+    let result: Result<(), sea_orm::DbErr> = async {
+        let tx = db.begin().await?;
+        let changed = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT id FROM agents WHERE id=$1 AND config_hash IS DISTINCT FROM $2 FOR UPDATE",
+            [agent.into(), report.applied_config_hash.clone().into()])).await?;
+        if changed.is_some() {
+            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                "UPDATE agents SET config_hash=$2, last_config_sync_at=now(), last_policy_sync_at=now()
+                 WHERE id=$1 AND EXISTS (SELECT FROM managed_config_generations g, managed_config_authority a
+                    WHERE g.agent_id=$1 AND g.session_id=$3 AND g.generation=$4 AND a.id=1 AND a.epoch=$5)",
+                [agent.into(), report.applied_config_hash.clone().into(), session.into(), generation.into(), epoch.into()])).await?;
+        }
+        tx.commit().await
+    }.await;
+    if let Err(error) = result {
+        tracing::warn!(%agent, %error, "could not persist managed snapshot sync time");
+    }
 }
 
 /// Legacy sync metadata cannot acknowledge a managed generation.

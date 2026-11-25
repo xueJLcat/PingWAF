@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { UploadSimple } from '@phosphor-icons/react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
@@ -101,7 +102,7 @@ export function AsnDataCard({ canWrite, standalone }: { canWrite: boolean; stand
         {db.data?.path_from_env && <p>上传会替换运维指定路径的文件。该文件由运维移除。</p>}
         <Input ref={dbFile} label="选择 ASN MMDB" type="file" accept=".mmdb" onChange={e => { setMmdb(e.target.files?.[0] ?? null); setMessage(''); action.reset() }} />
         <div className="flex flex-wrap gap-2">
-          <Button variant="primary" disabled={!mmdb} onClick={() => db.data?.path_from_env ? setConfirm('database') : action.mutate('database')}>安装数据库</Button>
+          <Button variant="primary" icon={<UploadSimple weight="duotone" className="h-4 w-4" />} disabled={!mmdb} onClick={() => db.data?.path_from_env ? setConfirm('database') : action.mutate('database')}>安装数据库</Button>
           <Button disabled={!db.data?.configured || db.data.path_from_env} onClick={() => setConfirm('remove-db')}>移除数据库</Button>
         </div>
       </fieldset>

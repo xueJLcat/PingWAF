@@ -4,13 +4,14 @@ import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, X
 import { apiClient, ApiError } from '@/api/client'
 import { sitesApi } from '@/api/sites'
 import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Input } from '@/components/ui/Input'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
-import { DownloadSimple, FileText, Monitor } from '@phosphor-icons/react'
+import { Download, FileText, Monitor, Trash } from '@phosphor-icons/react'
 import { formatSiteAddress } from '@/lib/format'
 import { useCanWrite, useNow } from '@/hooks'
 import { useAuthStore } from '@/stores/authStore'
@@ -48,6 +49,14 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
   const user = useAuthStore(s => s.user?.id)
   const panel = useRef<HTMLElement>(null)
   const [fullscreen, setFullscreen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<Job | null>(null)
+  const remove = useMutation({
+    mutationFn: (id: string) => apiClient.delete<void>(`/reports/${id}`),
+    onSuccess: async () => {
+      setDeleteTarget(null)
+      await client.invalidateQueries({queryKey: ['report-jobs', user]})
+    },
+  })
   useEffect(() => {
     const update = () => setFullscreen(document.fullscreenElement === panel.current)
     document.addEventListener('fullscreenchange', update)
@@ -152,13 +161,23 @@ export function ProtectionReportsPage({ live = false }: { live?: boolean }) {
     {alerts.map((message,i)=><p key={i} role="alert">{message}</p>)}
     {!live && jobs.isPending && <p role="status">正在加载报告任务…</p>}
     {!live && !emptyScope && jobs.data?.length === 0 && <p role="status">暂无报告任务。选择站点和统计时段后可生成报告。</p>}
-    {!live && !!jobs.data?.length && <div className="overflow-x-auto rounded-lg border border-line bg-elevated"><table className="w-full min-w-[36rem] text-left text-sm [&_td]:px-3 [&_td]:py-2 [&_th]:p-3"><thead className="border-b border-line bg-recessed text-xs text-fg-subtle"><tr><th>提交时间</th><th>统计时段</th><th>状态</th><th>下载</th></tr></thead>
-      <tbody>{jobs.data?.map(job=><tr key={job.id}><td>{new Date(job.created_at).toLocaleString()}</td>
+    {!live && !!jobs.data?.length && <div className="overflow-x-auto rounded-lg border border-line bg-elevated"><table className="w-full min-w-[36rem] text-left text-sm [&_td]:px-3 [&_td]:py-2 [&_th]:p-3"><thead className="border-b border-line bg-recessed text-xs text-fg-subtle"><tr><th>提交时间</th><th>统计时段</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>{jobs.data?.map(job=><tr key={job.id} data-report-id={job.id}><td>{new Date(job.created_at).toLocaleString()}</td>
         <td>{reportInterval(job)}</td>
         <td>{({queued:'排队中',running:'生成中',ready:'已生成',failed:'失败'} as Record<string,string>)[job.status]} {job.error}</td>
-        <td>{job.status==='ready' && <div className="flex gap-2">{['pdf','csv'].map(format=><Button key={format} size="sm" icon={<DownloadSimple />}
+        <td><div className="flex items-center gap-1">{job.status==='ready' && ['pdf','csv'].map(format=><Button key={format} variant="ghost" size="sm" aria-label={`下载 ${format.toUpperCase()} 报告`} icon={<Download weight="duotone" className="h-4 w-4" />}
           disabled={download.isPending} loading={download.isPending && download.variables.id===job.id && download.variables.format===format}
-          onClick={()=>download.mutate({id:job.id,format})}>{format.toUpperCase()}</Button>)}</div>}</td></tr>)}</tbody></table></div>}
+          onClick={()=>download.mutate({id:job.id,format})}>{format.toUpperCase()}</Button>)}
+          {canWrite && (job.status === 'ready' || job.status === 'failed') && <Button size="icon" variant="ghost"
+            aria-label="删除报告" title="删除报告" className="hover:text-fg-danger" icon={<Trash weight="duotone" className="h-4 w-4" />}
+            onClick={() => { remove.reset(); setDeleteTarget(job) }} />}
+        </div></td></tr>)}</tbody></table></div>}
+    <ConfirmDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="删除报告"
+      description={deleteTarget ? reportInterval(deleteTarget) : ''} confirmLabel="删除报告" loading={remove.isPending}
+      onConfirm={() => { if (deleteTarget) remove.mutate(deleteTarget.id) }}>
+      <p>删除后，此次报告的 PDF 和 CSV 将同时移除。</p>
+      {remove.error && <p role="alert" className="text-fg-danger">{remove.error.message}</p>}
+    </ConfirmDialog>
     {live && ids.length > 0 && validZone && screen.isLoading && <p role="status">正在读取实时防护数据…</p>}
     {live && data && <><p>更新于 {new Date(data.generated_at).toLocaleString()} · 每 15 秒刷新
       {(offline || screen.isError || now-Date.parse(data.generated_at)>45000) && ' · 部分节点或数据已过期'}

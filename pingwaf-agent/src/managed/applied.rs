@@ -219,6 +219,7 @@ impl<T> AppliedState<T> {
             state.receipt = Some((
                 p.received.lease.clone(),
                 pingwaf_proto::ManagedApplyReport {
+                    applied_config_hash: String::new(),
                     session_id: version.session.to_string(),
                     authority_epoch: version.authority.to_string(),
                     generation: version.generation,
@@ -373,7 +374,12 @@ impl<T> AppliedState<T> {
             })
             .collect();
         sites.sort_unstable_by(|a, b| a.site_id.cmp(&b.site_id));
+        let complete = active.site_failures.is_empty()
+            && bound.panel.as_ref().is_some_and(|p| p.applied_generation == version.generation)
+            && active.policy.endpoints().iter().flat_map(|e| &e.site_ids)
+                .all(|id| sites.iter().any(|site| &site.site_id == id));
         Some(pingwaf_proto::ManagedApplyReport {
+            applied_config_hash: if complete { hex::encode(version.hash) } else { String::new() },
             session_id: version.session.to_string(),
             authority_epoch: version.authority.to_string(),
             generation: version.generation,

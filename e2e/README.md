@@ -42,6 +42,8 @@ The origin exposes `/`, `/a`, `/b`, `/headers`, `/echo`, `/cache`, `/big`,
 
 ## Run
 
+The native release workflow also runs browser tests against the packaged binary in an isolated network with a disposable database. `E2E_BROWSER_CHANNEL=chromium` selects the Chromium build matching the package lock. The protection report flow generates its own report, downloads PDF and CSV, cancels deletion once, then confirms deletion and reloads the list.
+
 ```bash
 cd e2e
 npm ci
