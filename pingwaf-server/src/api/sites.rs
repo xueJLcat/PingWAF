@@ -1261,8 +1261,11 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
     req: &TlsPostureRequest,
     source: CertSource<'_>,
 ) -> Result<TlsPosture, ApiError> {
+    let site = site::Entity::find_by_id(site.id).lock_shared().one(db).await?
+        .ok_or_else(|| ApiError::NotFound("site not found".into()))?;
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(site.id))
+        .lock_exclusive()
         .one(db)
         .await?;
 
@@ -1327,7 +1330,12 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
         },
         None => StoredCert::default(),
     };
-    let action = site_cert::resolve(
+    if next.self_signed && !site.allows_certificate_issuance() && req.self_signed == Some(true) && !current.self_signed {
+        return Err(super::common::certificate_issuance_port_error());
+    }
+    let action = if next.self_signed && !site.allows_certificate_issuance() {
+        CertAction::Keep
+    } else { site_cert::resolve(
         next.self_signed,
         &site.domain,
         &site.alternate_domains,
@@ -1336,7 +1344,7 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
     )
     .map_err(|err| {
         ApiError::Internal(format!("cannot issue the site certificate: {err}"))
-    })?;
+    })? };
 
     // HTTPS with no source at all is the state that silently broke every
     // handshake: 443 was bound, no certificate was ever pushed, and only a log
@@ -1891,18 +1899,14 @@ async fn create(
             .insert(&txn).await?;
     }
 
-    // Every new site starts with HTTPS on and a generated certificate. The
-    // `ssl.enabled` gate has to be open for a later ACME order to run at all,
-    // and a listener without a certificate fails every handshake with an
-    // OpenSSL signature-algorithm error - so the default has to be a site that
-    // can complete one. An uploaded certificate or an ACME order replaces the
-    // generated leaf (see `save_tls_posture`).
+    // Standard ports may bootstrap with a generated leaf. Other sites can
+    // activate TLS after uploading or selecting an existing certificate.
     save_tls_posture(
         &txn,
         &model,
         &TlsPostureRequest {
-            https_enabled: Some(true),
-            self_signed: Some(payload.certificate_id.is_none()),
+            https_enabled: Some(model.allows_certificate_issuance() || payload.certificate_id.is_some()),
+            self_signed: Some(payload.certificate_id.is_none() && model.allows_certificate_issuance()),
             certificate_id: payload.certificate_id,
             ..Default::default()
         },
@@ -2391,6 +2395,10 @@ async fn clone_site(
         node.site_id = Set(new_id);
         node.domain = Set(domain.clone());
         node.certificate_id = Set(selected);
+        if !model.allows_certificate_issuance() {
+            node.self_signed = Set(false);
+            node.https_enabled = Set(selected.is_some());
+        }
         if !copy_tls_material {
             node.auto_renew = Set(false);
             node.acme_email = Set(None);
@@ -3592,7 +3600,7 @@ async fn upsert_ssl(
         ));
     }
     let uploaded_pair = uploaded_cert;
-    if (!uploaded_cert || (site.ingress_port.is_some() && payload.auto_renew))
+    if (!uploaded_cert || (!site.allows_certificate_issuance() && payload.auto_renew))
         && non_empty(&payload.acme_email).is_some()
     {
         ensure_site_acme_supported(
@@ -4515,6 +4523,23 @@ pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
         .unwrap()
         .unwrap();
     assert_eq!(row.ingress_port, Some(81));
+    for method in [acme_challenge::HTTP_01, acme_challenge::DNS_01] {
+        assert_eq!(ensure_site_acme_supported(&row, &[], Some(method)).unwrap_err().code(), "site.certificate_issuance_ports");
+    }
+    let ssl = site_ssl::Entity::find().filter(site_ssl::Column::SiteId.eq(row.id)).one(&state.db).await.unwrap().unwrap();
+    assert!(!ssl.self_signed && ssl.cert_pem.is_none());
+    let mut standard = row.clone();
+    standard.ingress_port = Some(80);
+    standard.ingress_protocol = Some("http".into());
+    standard.additional_ingresses = vec!["https:443".into()];
+    for method in [acme_challenge::HTTP_01, acme_challenge::DNS_01] {
+        ensure_site_acme_supported(&standard, &[], Some(method)).unwrap();
+    }
+    standard.additional_ingresses.push("http:81".into());
+    assert!(!standard.allows_certificate_issuance());
+    standard.additional_ingresses.clear();
+    standard.ingress_port = Some(443);
+    assert!(!standard.allows_certificate_issuance());
     for field in ["hsts_enabled", "always_use_https"] {
         let req = serde_json::from_value(json!({field:true})).unwrap();
         let error = save_tls_posture(&state.db, &row, &req, CertSource::default()).await.unwrap_err();

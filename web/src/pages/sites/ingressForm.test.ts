@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { defaultIngress, ingressPortError, ingressRequest } from './ingressForm'
+import { allowsCertificateIssuance, defaultIngress, ingressPortError, ingressRequest } from './ingressForm'
 
 describe('ingress form payload', () => {
+  it('uses every actual protocol and port to determine certificate issuance', () => {
+    expect(allowsCertificateIssuance({})).toBe(true)
+    expect(allowsCertificateIssuance({ ingress_protocol: 'https', ingress_port: 443, additional_ingresses: ['http:80'] })).toBe(true)
+    expect(allowsCertificateIssuance({ ingress_protocol: 'http', ingress_port: 80, additional_ingresses: ['https:83'] })).toBe(false)
+    expect(allowsCertificateIssuance({ ingress_protocol: 'http', ingress_port: 443 })).toBe(false)
+    expect(allowsCertificateIssuance({ ingress_protocol: 'https', ingress_port: 83 })).toBe(false)
+  })
   it('checks infrastructure ports for primary, additional and implicit listeners', () => {
     const check = (listener: string, additional: string[] = [], reserved = [5432, 9091]) =>
       ingressPortError({ ...defaultIngress, listener, additional }, 9080, [], reserved)

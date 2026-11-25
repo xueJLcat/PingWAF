@@ -124,6 +124,16 @@ pub mod sites {
         pub updated_at: DateTimeUtc,
     }
 
+    impl Model {
+        /// Issuance is a property of every public listener on this site.
+        pub fn allows_certificate_issuance(&self) -> bool {
+            matches!((self.ingress_port, self.ingress_protocol.as_deref()),
+                (None, None) | (Some(80), Some("http")) | (Some(443), Some("https")))
+                && self.additional_ingresses.iter().all(|entry|
+                    matches!(entry.as_str(), "http:80" | "https:443"))
+        }
+    }
+
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
 

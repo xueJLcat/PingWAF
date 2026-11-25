@@ -591,11 +591,12 @@ pub fn ensure_site_acme_supported(
     extra_domains: &[String],
     challenge: Option<&str>,
 ) -> Result<(), ApiError> {
-    if site.ingress_port.is_some() && challenge != Some(acme_challenge::DNS_01)
-    {
-        return Err(ApiError::BadRequest(
-            "custom ingress cannot receive HTTP-01 validation on port 80; configure DNS-01 or bind an issued certificate".into()
-        ).with_code("site.ingress_invalid"));
+    if !site.allows_certificate_issuance() {
+        return Err(certificate_issuance_port_error());
+    }
+    if challenge.unwrap_or(acme_challenge::HTTP_01) == acme_challenge::HTTP_01
+        && site.ingress_port == Some(443) && !site.additional_ingresses.iter().any(|p| p == "http:80") {
+        return Err(ApiError::BadRequest("HTTP-01 requires HTTP 80 on this site. Add HTTP 80 or use DNS-01 for HTTPS 443.".into()).with_code("site.ingress_invalid"));
     }
     let wildcard = site.domain.starts_with("*.")
         || site.alternate_domains.iter().any(|d| d.starts_with("*."))
@@ -610,6 +611,11 @@ pub fn ensure_site_acme_supported(
         ));
     }
     Ok(())
+}
+
+pub(super) fn certificate_issuance_port_error() -> ApiError {
+    ApiError::BadRequest("Certificate issuance and renewal require every site listener to use HTTP 80 or HTTPS 443. Upload or bind an existing certificate.".into())
+        .with_code("site.certificate_issuance_ports")
 }
 
 /// Checks a site's hostname set against every other site in the database.
@@ -912,9 +918,16 @@ mod tests {
             ensure_site_acme_supported(&site, &[], None)
                 .unwrap_err()
                 .code(),
-            "site.ingress_invalid"
+            "site.certificate_issuance_ports"
         );
+        assert!(ensure_site_acme_supported(&site, &[], Some("dns-01")).is_err());
+        site.ingress_port = Some(443);
         assert!(ensure_site_acme_supported(&site, &[], Some("dns-01")).is_ok());
+        assert!(ensure_site_acme_supported(&site, &[], Some("http-01")).is_err());
+        site.additional_ingresses.push("http:80".into());
+        assert!(ensure_site_acme_supported(&site, &[], Some("http-01")).is_ok());
+        site.additional_ingresses.push("http:81".into());
+        assert!(ensure_site_acme_supported(&site, &[], Some("dns-01")).is_err());
     }
 
     #[test]

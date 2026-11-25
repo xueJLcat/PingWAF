@@ -479,6 +479,7 @@ pub enum ManagedRouteMiss {
 
 #[derive(Clone)]
 pub struct ManagedRequestSite {
+    pub serve_http01: bool,
     pub policy: Option<Arc<pingwaf_content::protection::Policy>>,
     pub context: pingap_core::ManagedSiteContext,
     pub route: Arc<pingap_location::ServerLocationRoute>,
@@ -1061,6 +1062,11 @@ impl Server {
                 let host = authority.hostname.clone();
                 session.req_header_mut().extensions_mut().insert(authority);
                 if let Some(site) = site {
+                    if site.serve_http01
+                        && let Some(result) = self.handle_acme_challenge(session, ctx).await {
+                        result?;
+                        return Ok(());
+                    }
                     let site = Self::select_managed_site(site, session, ctx)?;
                     (host, Some(site.route.clone()), Some(site))
                 } else {
@@ -3510,6 +3516,7 @@ value = 'proxy_set_headers = ["name:value"]'
         }
         let server = new_server();
         let selector = Selector(ManagedRequestSite {
+            serve_http01: false,
             policy: None,
             context: pingap_core::ManagedSiteContext {
                 id: Arc::from("site-on-this-listener"),
@@ -3601,6 +3608,7 @@ value = 'proxy_set_headers = ["name:value"]'
                 up.run_health_check().await.unwrap();
             }
             let selector = Selector(ManagedRequestSite {
+                serve_http01: false,
             policy: None,
                 context: pingap_core::ManagedSiteContext {
                     id: Arc::from(body),

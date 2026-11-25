@@ -12,6 +12,8 @@
 
 ## Quick Start (Docker Compose)
 
+Site certificate issuance and renewal require all of the site's listeners to use HTTP on 80 or HTTPS on 443, including explicitly configured listeners. HTTP-01 requires a configured HTTP 80 listener for the site. HTTPS 443 alone supports DNS-01. Sites with any other listener can upload or bind an existing certificate.
+
 The fastest way to get PingWAF running — one command, no clone, no root:
 
 ```bash

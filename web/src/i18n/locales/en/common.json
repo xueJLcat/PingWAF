@@ -1466,6 +1466,7 @@
       "removeShareTitle": "Remove shared certificate",
       "removeShareDescription": "This certificate is shared in from another site. Removing it stops this site from serving it.",
       "renewSharedHint": "Shared certificates are renewed by the owner site",
+      "issuancePorts": "Issuance and renewal require every site listener to use HTTP 80 or HTTPS 443. Upload or bind an existing certificate for other ports.",
       "clearFirst": "This certificate is still this site's current certificate. Switch or clear it first.",
       "linkRemoved": "Share removed",
       "unlinkFailed": "Failed to remove the share",

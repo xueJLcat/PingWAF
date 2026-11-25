@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::api::ssl::cert_status;
 use crate::api::state::AppState;
-use crate::models::{site_certificates, site_ssl};
+use crate::models::{site, site_certificates, site_ssl};
 use crate::site_cert;
 
 /// How often the file is checked. Issuance is rare; a 30 s delay only means
@@ -179,6 +179,8 @@ pub(crate) async fn sync_certificate(
     key_pem: &str,
 ) -> anyhow::Result<bool> {
     let tx = db.begin().await?;
+    if !site::Entity::find_by_id(site_id).lock_shared().one(&tx).await?
+        .is_some_and(|s| s.allows_certificate_issuance()) { return Ok(false); }
     let posture_row = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(site_id)).lock_exclusive().one(&tx).await?;
     let names = domain_set(domains);

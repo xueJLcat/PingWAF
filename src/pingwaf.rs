@@ -985,6 +985,7 @@ fn tunnel_certificate_names() -> Vec<String> {
     names
 }
 
+#[cfg(test)]
 fn cached_rules_to_pingap_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -1906,8 +1907,13 @@ async fn start_legacy_data_plane(
     let (config, initial_hash, initial_key) = loop {
         let snapshot = rule_cache.all_sites();
         if _host.is_none() { apply_tunnel_policies(&snapshot); }
-        if let Some(config) = cached_rules_to_pingap_config(&snapshot, rule_cache.cache_dir()) {
-            break (config, snapshot.config_hash.clone(), reload_key(&snapshot));
+        let (key, orders) = runtime_certificate_orders(&_host, &snapshot);
+        if !orders.is_empty() || !snapshot.sites.is_empty() {
+            let mut config = convert_cached_rules(&snapshot, rule_cache.cache_dir());
+            config.certificates.extend(orders.iter().map(|(id, cert)| (id.clone(), cert.clone())));
+            if !config.locations.is_empty() || !config.certificates.is_empty() {
+                break (config, snapshot.config_hash.clone(), key);
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     };
@@ -2256,7 +2262,7 @@ async fn start_legacy_data_plane(
         loop {
             tokio::time::sleep(RELOAD_POLL_INTERVAL).await;
             let snapshot = watcher_cache.all_sites();
-            let hash = reload_key(&snapshot);
+            let (hash, orders) = runtime_certificate_orders(&_host, &snapshot);
             if !tracker.is_due(&hash, Instant::now()) {
                 continue;
             }
@@ -2267,7 +2273,8 @@ async fn start_legacy_data_plane(
                 "data plane: rule change detected, reloading"
             );
             if _host.is_none() { apply_tunnel_policies(&snapshot); }
-            let converted = convert_cached_rules(&snapshot, watcher_cache.cache_dir());
+            let mut converted = convert_cached_rules(&snapshot, watcher_cache.cache_dir());
+            converted.certificates.extend(orders.iter().map(|(id, cert)| (id.clone(), cert.clone())));
             #[cfg(target_os = "linux")]
             let handlers = _host.as_ref().map(|_| parse_from_conf(converted.clone()));
             let mut errors = apply_reload(&watcher_config_manager, converted).await;
@@ -2377,6 +2384,18 @@ const RELOAD_RETRY_MAX: Duration = Duration::from_secs(300);
 /// The rule cache's hash alone is not enough once tunnels exist: a connector
 /// connecting or dropping changes which pools have an upstream without
 /// touching the cache, so the registry's generation is folded in.
+fn runtime_certificate_orders(_host: &IngressHost, snapshot: &CachedRules) -> (Arc<str>, Arc<BTreeMap<String, CertificateConf>>) {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let key = reload_key(snapshot);
+    #[cfg(target_os = "linux")]
+    if let Some(orders) = _host.as_ref().and_then(|host| host.certificate_orders()).filter(|orders| !orders.is_empty()) {
+        let mut hasher = DefaultHasher::new();
+        orders.hash(&mut hasher);
+        return (format!("{key}#acme{:016x}", hasher.finish()).into(), orders);
+    }
+    (key, Default::default())
+}
+
 fn reload_key(snapshot: &CachedRules) -> Arc<str> {
     let hash = snapshot.config_hash.clone();
     match pingwaf_tunnel::installed_registry() {

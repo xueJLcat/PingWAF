@@ -120,6 +120,10 @@ impl Host {
         (report, endpoints)
     }
 
+    pub(super) fn certificate_orders(&self) -> Option<Arc<std::collections::BTreeMap<String, pingap_config::CertificateConf>>> {
+        self.state.forwarding().map(|grant| grant.view().certificate_orders.clone())
+    }
+
     pub(super) fn new(
         cache: Arc<pingwaf_agent::cache::RuleCache>,
     ) -> Arc<Self> {
@@ -190,6 +194,12 @@ impl Host {
         };
         let mut stream = super::ingress::downstream_stream(tcp);
         let forwarding = self.state.forwarding_for(listener);
+        if matches!(listener, Listener::Custom { port: 80, .. })
+            && let Some(app) = fallback.as_ref()
+            && let Some(grant) = self.state.scoped_forwarding(Listener::Default).or_else(|| forwarding.clone()) {
+            let _ = app.serve(stream, shutdown, grant, TlsIdentity::Plain).await;
+            return;
+        }
         if let Some(fallback) = fallback
             && self.has_default_routes()
             && let Some(default_authorization) = self.state.scoped_forwarding(Listener::Default)
@@ -326,6 +336,7 @@ impl pingwaf_agent::client::ManagedHost for HostCallbacks {
 }
 
 struct View {
+    certificate_orders: Arc<std::collections::BTreeMap<String, pingap_config::CertificateConf>>,
     unmatched: Option<pingap_plugin::FallbackPagePlugin>,
     tls_failures: HashMap<Uuid, &'static str>,
     rules: Compiled,
@@ -358,7 +369,8 @@ impl View {
         let mut next = HashMap::new();
         for (&id, &oidc) in &self.tunnel_sites {
             let rules = self.rules.site(id).context("missing tunnel site")?;
-            let site = build_site(rules, oidc, &self.cache_dir, None, self.sites[&id].policy.clone())?;
+            let mut site = build_site(rules, oidc, &self.cache_dir, None, self.sites[&id].policy.clone())?;
+            site.serve_http01 = self.sites[&id].serve_http01;
             next.insert(id, site);
         }
         *self.tunnel_routes.write().unwrap_or_else(|e| e.into_inner()) = (generation, next);
@@ -395,6 +407,24 @@ impl View {
 
     fn with_policies(candidate: &Candidate, cache_dir: &Path, mut policies: HashMap<Uuid, Arc<pingwaf_content::protection::Policy>>) -> anyhow::Result<Self> {
         let rules = candidate.compile()?;
+        let mut certificate_orders = std::collections::BTreeMap::new();
+        for (id, envelope) in candidate.sites() {
+            if envelope.ingress.is_none() || !envelope.site.as_ref().is_some_and(|s| s.status() == pingwaf_proto::SiteStatusEnum::SiteStatusActive) { continue; }
+            let endpoints = envelope.ingress.iter().chain(&envelope.additional_ingresses);
+            if !endpoints.clone().all(|e| matches!((e.port, e.protocol()),
+                (80, pingwaf_proto::IngressProtocol::Http) | (443, pingwaf_proto::IngressProtocol::Https))) { continue; }
+            let Some(site) = rules.site(*id) else { continue };
+            let Some(ssl) = site.rules.ssl_config.as_ref().filter(|s| s.acme_enabled && s.enabled && !s.acme_email.is_empty()) else { continue };
+            if ssl.acme_challenge_type == "AcmeHttp01" && !endpoints.clone().any(|e| e.port == 80) { continue; }
+            let domains = std::iter::once(site.rules.domain.as_ref()).chain(site.rules.alternate_domains.iter().map(AsRef::as_ref)).collect::<Vec<&str>>().join(",");
+            if let Some(mut order) = super::acme_certificate_conf(ssl, domains) {
+                if !ssl.cert_pem.is_empty() && !ssl.key_pem.is_empty() {
+                    order.tls_cert = Some(ssl.cert_pem.clone());
+                    order.tls_key = Some(ssl.key_pem.clone());
+                }
+                certificate_orders.insert(format!("{id}_cert"), order);
+            }
+        }
         let unmatched = if candidate.unmatched_pages.is_empty() { None } else {
             let pages = candidate.unmatched_pages.iter().map(|p|
                 (i64::from(p.status_code), p.content_type.as_str(), p.body_template.as_str(), p.name.as_str()));
@@ -413,7 +443,9 @@ impl View {
                 if envelope.handler.is_none() && site.rules.upstreams.iter().any(|pool| !pool.tunnel_id.is_empty()) {
                     tunnel_sites.insert(id, oidc);
                 }
-                Ok((id, build_site(site, oidc, cache_dir, envelope.handler.as_ref(), policies.remove(&id))?))
+                let mut request_site = build_site(site, oidc, cache_dir, envelope.handler.as_ref(), policies.remove(&id))?;
+                request_site.serve_http01 = certificate_orders.get(&format!("{id}_cert")).is_some_and(|c| c.dns_challenge != Some(true));
+                Ok((id, request_site))
             })
             .collect::<anyhow::Result<_>>()?;
         let mut tls_failures = HashMap::new();
@@ -441,6 +473,7 @@ impl View {
             })
             .collect();
         Ok(Self {
+            certificate_orders: Arc::new(certificate_orders),
             tunnel_routes: std::sync::RwLock::new((generation, tunnel_sites.keys()
                 .map(|id| (*id, sites[id].clone())).collect())),
             tunnel_sites,
@@ -628,6 +661,7 @@ fn build_site(
     let plugins = crate::plugin::isolated_plugins(config.plugins)?;
     let trust = &site.rules.proxy_trust;
     Ok(ManagedRequestSite {
+        serve_http01: false,
         policy,
         context: ManagedSiteContext {
             id: site.rules.site_id.clone(),
@@ -945,6 +979,26 @@ mod tests {
         let mut receiver = Receiver::default();
         receiver.set_session(Some(session));
         (session, receive_version(&mut receiver, session, Uuid::new_v4(), 1, sites))
+    }
+
+    #[test]
+    fn explicit_standard_listeners_supply_orders_without_default_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (port, additional, allowed) in [(80, None, true), (80, Some(81), false), (81, None, false)] {
+            let mut item = site(Some(port), "127.0.0.1:18001".parse().unwrap());
+            let site = item.site.as_mut().unwrap();
+            site.rules.as_mut().unwrap().ssl = Some(pingwaf_proto::SslConfig {
+                enabled: true, acme_enabled: true, acme_email: "fixture@example.test".into(), ..Default::default()
+            });
+            if let Some(port) = additional {
+                item.additional_ingresses.push(pingwaf_proto::SiteIngress { port, protocol: IngressProtocol::Http as i32 });
+            }
+            let (_, received) = receive(vec![item]);
+            assert!(received.candidate.default_config().sites.is_empty());
+            let view = View::build(&received.candidate, dir.path()).unwrap();
+            assert_eq!(!view.certificate_orders.is_empty(), allowed);
+            assert_eq!(view.sites.values().next().unwrap().serve_http01, allowed);
+        }
     }
 
     fn receive_version(receiver: &mut Receiver, session: Uuid, authority: Uuid, generation: i64, sites: Vec<ManagedSite>) -> pingwaf_agent::managed::Received {

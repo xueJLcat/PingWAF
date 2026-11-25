@@ -1466,6 +1466,7 @@
       "removeShareTitle": "移除共享证书",
       "removeShareDescription": "该证书由其它站点共享而来，移除后本站将不再使用它。",
       "renewSharedHint": "共享证书由属主站点续期",
+      "issuancePorts": "仅当本站的所有入口均为 HTTP 80 或 HTTPS 443 时可签发和续期。其他端口请上传或绑定已有证书。",
       "clearFirst": "该证书仍是本站当前证书，请先切换或清除。",
       "linkRemoved": "已取消共享",
       "unlinkFailed": "取消共享失败",

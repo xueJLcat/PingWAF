@@ -122,7 +122,7 @@ describe('site SSL page shared-certificate contract', () => {
 
   it('linked rows keep the renew button disabled with an owner-renewal tooltip', () => {
     expect(src).toContain('c.relation === \'linked\' ? t(\'pages.ssl.renewSharedHint\')')
-    expect(src).toMatch(/disabled=\{!canWrite \|\| renew\.isPending \|\| c\.relation === 'linked'\}/)
+    expect(src).toContain("disabled={!canWrite || renew.isPending || c.relation === 'linked' || !allowIssuance}")
   })
 
   it('remove-share 409 highlights the clear-certificate button only while that cert stays selected', () => {

@@ -15,7 +15,7 @@ use std::time::Duration;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
-    QueryFilter, Set,
+    QueryFilter, QuerySelect, TransactionTrait, Set,
 };
 use tokio::task::JoinHandle;
 
@@ -61,15 +61,18 @@ pub async fn reconcile(state: &AppState) -> Result<usize, DbErr> {
     let mut written = 0;
 
     for row in rows {
+        let tx = state.db.begin().await?;
         let Some(site) =
-            site::Entity::find_by_id(row.site_id).one(&state.db).await?
+            site::Entity::find_by_id(row.site_id).lock_shared().one(&tx).await?
         else {
             // The FK cascades, so this is a torn read, not a real state.
             continue;
         };
-        match issue_if_needed(&state.db, &site).await {
-            Ok(true) => written += 1,
-            Ok(false) => {},
+        match issue_if_needed(&tx, &site).await {
+            Ok(changed) => {
+                tx.commit().await?;
+                if changed { written += 1; }
+            },
             Err(err) => tracing::warn!(
                 site_id = %site.id,
                 error = %err,
@@ -98,8 +101,10 @@ pub(crate) async fn issue_if_needed<C: ConnectionTrait>(
     db: &C,
     site: &site::Model,
 ) -> Result<bool, DbErr> {
+    if !site.allows_certificate_issuance() { return Ok(false); }
     let Some(row) = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(site.id))
+        .lock_exclusive()
         .one(db)
         .await?
     else {

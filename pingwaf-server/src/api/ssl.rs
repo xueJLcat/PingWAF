@@ -1340,7 +1340,7 @@ async fn insert_certificate<C: ConnectionTrait>(
         .cert_pem
         .as_deref()
         .is_none_or(|pem| pem.trim().is_empty())
-        || (site.is_some_and(|s| s.ingress_port.is_some())
+        || (site.is_some_and(|s| !s.allows_certificate_issuance())
             && payload.auto_renew))
         && payload.acme_email.is_some()
     {
@@ -1638,7 +1638,7 @@ async fn apply_certificate_update(
         None => non_empty(&row.acme_email),
     };
     if (cert_missing
-        || (site.is_some_and(|s| s.ingress_port.is_some())
+        || (site.is_some_and(|s| !s.allows_certificate_issuance())
             && payload.auto_renew.unwrap_or(row.auto_renew)))
         && acme_email.is_some()
     {

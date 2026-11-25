@@ -10,6 +10,14 @@ export interface IngressDraft {
 
 export const defaultIngress: IngressDraft = { listener: '', agents: null, paused: false }
 
+export function allowsCertificateIssuance(site: Pick<Site, 'ingress_port' | 'ingress_protocol' | 'additional_ingresses'> | null | undefined) {
+  if (!site) return false
+  const primary = (site.ingress_port == null && site.ingress_protocol == null)
+    || (site.ingress_port === 80 && site.ingress_protocol === 'http')
+    || (site.ingress_port === 443 && site.ingress_protocol === 'https')
+  return primary && (site.additional_ingresses ?? []).every((entry) => entry === 'http:80' || entry === 'https:443')
+}
+
 export function siteListener(site: Site | null) {
   return site?.ingress_port && site.ingress_protocol ? `${site.ingress_protocol}:${site.ingress_port}` : ''
 }

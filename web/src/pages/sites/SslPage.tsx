@@ -49,6 +49,7 @@ import {
   type UpdateSslSettingsRequest,
 } from '@/api/types'
 import { sitesApi, siteKeys } from '@/api/sites'
+import { allowsCertificateIssuance } from './ingressForm'
 import {
   verifyCertMode,
   verifyCertPayload,
@@ -234,6 +235,8 @@ export function SslPage() {
   const canWrite = useCanWrite()
   const now = useNow(60_000)
   const { siteId = '' } = useParams<{ siteId: string }>()
+  const { data: siteDetail } = useQuery({ queryKey: siteKeys.detail(siteId), queryFn: () => sitesApi.get(siteId), enabled: !!siteId })
+  const allowIssuance = allowsCertificateIssuance(siteDetail?.site)
 
   const [drafts, setDrafts] = useState<PostureDrafts | null>(null)
   const [hasClientCa, setHasClientCa] = useState(false)
@@ -623,14 +626,14 @@ export function SslPage() {
           />
           <Tooltip
             content={
-              c.relation === 'linked' ? t('pages.ssl.renewSharedHint') : t('pages.ssl.renew')
+              c.relation === 'linked' ? t('pages.ssl.renewSharedHint') : t(allowIssuance ? 'pages.ssl.renew' : 'pages.ssl.issuancePorts')
             }
           >
             <Button
               size="icon"
               variant="ghost"
               aria-label={t('pages.ssl.renew')}
-              disabled={!canWrite || renew.isPending || c.relation === 'linked'}
+              disabled={!canWrite || renew.isPending || c.relation === 'linked' || !allowIssuance}
               onClick={() => renew.mutate(c)}
               icon={<ArrowsClockwise weight="duotone" className="h-4 w-4" />}
             />
@@ -801,11 +804,12 @@ export function SslPage() {
                     })
                   }}
                   items={[
-                    { value: 'self-signed', label: t('pages.ssl.selfSigned') },
+                    { value: 'self-signed', label: t('pages.ssl.selfSigned'), disabled: !allowIssuance },
                     { value: 'certificate', label: t('pages.ssl.useCertificate') },
                   ]}
                 />
 
+                {siteDetail && !allowIssuance && <p className="text-xs text-fg-subtle">{t('pages.ssl.issuancePorts')}</p>}
                 {drafts.https.self_signed ? (
                   <p className="max-w-2xl text-xs leading-relaxed text-fg-subtle">
                     {t('pages.ssl.selfSignedHint')}

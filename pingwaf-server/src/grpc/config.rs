@@ -668,6 +668,7 @@ fn cache_type_policy_to_proto(
 #[derive(Clone, Copy)]
 struct SiteHosts<'a> {
     custom_ingress: bool,
+    http_challenge_listener: bool,
     domain: &'a str,
     alternate: &'a [String],
 }
@@ -802,9 +803,8 @@ fn ssl_to_proto(
         || selected.is_some_and(|cert| cert.site_id == Some(row.site_id));
     let can_order = owns_order
         && acme_challenge_type.is_some()
-        && (!site.custom_ingress
-            || acme_challenge_type
-                == acme_challenge_proto(Some(acme_challenge::DNS_01)));
+        && !site.custom_ingress
+        && (site.http_challenge_listener || acme_challenge_type == Some(1));
     let (acme_email, acme_dns_provider, acme_dns_config) = if can_order {
         (acme_email, acme_dns_provider, acme_dns_config)
     } else {
@@ -1897,7 +1897,8 @@ async fn build_rule_bundle_with_settings(
                 row,
                 &certificates,
                 SiteHosts {
-                    custom_ingress: site_row.ingress_port.is_some(),
+                    custom_ingress: !site_row.allows_certificate_issuance(),
+                    http_challenge_listener: site_row.ingress_port != Some(443) || site_row.additional_ingresses.iter().any(|p| p == "http:80"),
                     domain: &site_row.domain,
                     alternate: &site_row.alternate_domains,
                 },
@@ -3481,6 +3482,7 @@ mod tests {
     fn hosts<'a>(domain: &'a str, alternate: &'a [String]) -> SiteHosts<'a> {
         SiteHosts {
             custom_ingress: false,
+            http_challenge_listener: true,
             domain,
             alternate,
         }
@@ -3650,7 +3652,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_ingress_orders_require_dns_and_shared_pem_never_grants_renewal() {
+    fn nonstandard_ports_disable_all_orders_and_shared_pem_never_grants_renewal() {
         let mut row = bare_ssl_row(Uuid::new_v4());
         row.acme_email = Some("operator@example.test".into());
         row.acme_dns_config =
@@ -3667,11 +3669,8 @@ mod tests {
         row.acme_challenge_type = Some(acme_challenge::DNS_01.into());
         let dns_order =
             ssl_to_proto(&row, &empty, custom, &MtlsPush::default());
-        assert!(dns_order.acme_enabled);
-        assert_eq!(
-            dns_order.acme_dns_config.get("token").map(String::as_str),
-            Some("test-sentinel")
-        );
+        assert!(!dns_order.acme_enabled);
+        assert!(dns_order.acme_dns_config.is_empty());
         let mut shared = linked_cert("a.example.com", Some("shared"));
         shared.acme_email = Some("owner@example.test".into());
         shared.acme_dns_config =

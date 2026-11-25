@@ -65,6 +65,8 @@ const STATUS_TONE: Record<string, BadgeTone> = {
   failed: 'danger',
 }
 
+import { allowsCertificateIssuance } from './sites/ingressForm'
+
 type Mode = 'acme' | 'manual'
 
 interface FormState {
@@ -337,6 +339,10 @@ export function GlobalSslPage() {
       setFormError(t('pages.sslGlobal.acmeNeedsSite'))
       return
     }
+    if (form.mode === 'acme' && !allowsCertificateIssuance(sites.find((s) => s.id === siteId))) {
+      setFormError(t('pages.ssl.issuancePorts'))
+      return
+    }
     if (!domain) {
       setFormError(t('pages.ssl.domainRequired'))
       return
@@ -414,7 +420,8 @@ export function GlobalSslPage() {
         <Button
           size="sm"
           variant="ghost"
-          disabled={!canWrite || renewCert.isPending}
+          disabled={!canWrite || renewCert.isPending || !allowsCertificateIssuance(sites.find((s) => s.id === cert.site_id))}
+          title={!allowsCertificateIssuance(sites.find((s) => s.id === cert.site_id)) ? t('pages.ssl.issuancePorts') : undefined}
           loading={renewCert.isPending && renewCert.variables === cert.id}
           onClick={() => renewCert.mutate(cert.id)}
         >
@@ -898,6 +905,7 @@ export function GlobalSslPage() {
               {
                 value: 'acme',
                 label: t('pages.ssl.acme'),
+                disabled: !!form.siteId && !allowsCertificateIssuance(sites.find((s) => s.id === form.siteId)),
                 icon: <Lightning weight="duotone" className="h-4 w-4" />,
               },
               {
@@ -911,7 +919,7 @@ export function GlobalSslPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <Select
               label={t('pages.sslGlobal.site')}
-              hint={t('pages.sslGlobal.siteHint')}
+              hint={form.siteId && !allowsCertificateIssuance(sites.find((s) => s.id === form.siteId)) ? t('pages.ssl.issuancePorts') : t('pages.sslGlobal.siteHint')}
               options={[
                 // Unbound upload: the certificate is stored without a site and
                 // can be bound to one or more sites afterwards.
@@ -928,7 +936,8 @@ export function GlobalSslPage() {
                   .filter((s) => s.id === siteId)
                   .flatMap((s) => [s.domain, ...s.alternate_domains])
                   .join(',')
-                setForm((f) => ({ ...f, siteId, domain: domain || f.domain }))
+                const allowed = allowsCertificateIssuance(sites.find((s) => s.id === siteId))
+                setForm((f) => ({ ...f, siteId, domain: domain || f.domain, mode: siteId && !allowed ? 'manual' : f.mode }))
               }}
             />
             <Input
