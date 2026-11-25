@@ -27,6 +27,8 @@
 #   EDGE_HTTP_PORT      edge HTTP port                    (default: 18080)
 #   ORIGIN_PORT         "internal" origin port            (default: 18081)
 #   SMOKE_HOST          hostname served by the site       (default: tunnel.smoke.test)
+#   SMOKE_SCHEMA_CHECK  run the model-vs-schema gate first (default: 1 when
+#                       cargo is available; 0 skips it)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,6 +61,17 @@ info() { echo "==> $*"; }
 [[ -x "$PINGWAF_BIN" ]] || fail "$PINGWAF_BIN is not executable (run: cargo build --bin pingwaf)"
 [[ -x "$PINGWAF_TUNNEL_BIN" ]] || fail "$PINGWAF_TUNNEL_BIN is not executable (run: cargo build -p pingwaf-tunnel --bin pingwaf-tunnel)"
 command -v curl >/dev/null || fail "curl is required"
+
+# Every model has to match what the migrations create, or the control plane
+# answers 500 on the tables it reads (0.33.0 shipped exactly that: a model
+# column no migration created). Runs the migrator against the same scratch
+# database, then reads every entity.
+if [[ "${SMOKE_SCHEMA_CHECK:-1}" == "1" ]] && command -v cargo >/dev/null 2>&1; then
+    info "checking that every model matches the migrated schema"
+    ( cd "$ROOT" && PINGWAF_TEST_DB_URL="$PINGWAF_DB_URL" \
+        cargo test -q -p pingwaf-server --test schema_matches_models -- --ignored ) \
+        || fail "a model does not match the migrated schema (see the test output above)"
+fi
 
 # ── Origin: the "private" service, bound to loopback only ─────────────────────
 info "starting the internal origin on 127.0.0.1:$ORIGIN_PORT"

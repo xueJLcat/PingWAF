@@ -8,6 +8,27 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.33.1] — 2026-11-25
+
+### Fixed
+
+- **0.33.0 answered 500 on every query that touched an agent.** Migration
+  `000106` added the three tunnel identity columns an edge reports
+  (`tunnel_ingress_addr`, `tunnel_listener_addr`, `tunnel_cert_sha256`) but not
+  `agents.tunnel_listener_error`, which the model selects on every read. The
+  console's agent page and the tunnel page returned `500`, the gRPC
+  register/heartbeat path answered `Internal error`, and the health monitor
+  failed every 15 s — no agent could connect, so no rule update reached an edge.
+  The column is added by the new idempotent migration `000107`, which also
+  repairs a database already upgraded to 0.33.0. A deployment that was fixed by
+  hand (`ALTER TABLE agents ADD COLUMN IF NOT EXISTS tunnel_listener_error
+  text;`) is unaffected, and no restart is needed once the column exists.
+- **The release process now runs a schema gate.** `cargo test -p pingwaf-server
+  --test schema_matches_models -- --ignored` (also the first step of
+  `scripts/tunnel-smoke.sh`) applies every migration and then reads every model,
+  so a model column no migration creates fails before a tag is cut instead of
+  in production.
+
 ## [PingWAF 0.33.0] — 2026-11-25
 
 ### Added

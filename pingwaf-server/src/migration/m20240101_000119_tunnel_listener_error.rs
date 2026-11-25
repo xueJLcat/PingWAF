@@ -12,10 +12,8 @@ impl MigrationTrait for Migration {
         Ok(())
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager.get_connection().execute_unprepared(
-            "ALTER TABLE agents DROP COLUMN IF EXISTS tunnel_listener_error"
-        ).await?;
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Official migration 107 already requires the column at this point.
         Ok(())
     }
 }

@@ -4,6 +4,13 @@
 //! [`Migrator::up`]; `sea-orm-migration` records the applied versions in the
 //! `seaql_migrations` table, so restarting the control plane is a no-op once the
 //! schema is current.
+//!
+//! **Migrations are append-only.** Once a version has shipped — even to a single
+//! test host — never edit it: SeaORM keys on the version string, so a change is
+//! invisible to every database that already recorded it, and the model that
+//! expected the new column starts failing on every query. Fix a shipped
+//! migration with a new, idempotent one (see
+//! `m20240101_000107_tunnel_listener_error` for the shape of such a repair).
 
 pub mod m20240101_000001_create_users;
 pub mod m20240101_000002_create_sites;
@@ -115,6 +122,7 @@ mod m20240101_000105_tunnel_connectors;
 mod m20240101_000106_ingress_tls_policy;
 mod m20240101_000106_tunnel_sessions;
 mod m20240101_000107_enable_site_ingress;
+mod m20240101_000107_tunnel_listener_error;
 mod m20240101_000108_site_listeners;
 mod m20240101_000109_static_drafts;
 mod m20240101_000110_site_handlers;
@@ -259,6 +267,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000106_ingress_tls_policy::Migration),
             Box::new(m20240101_000106_tunnel_sessions::Migration),
             Box::new(m20240101_000107_enable_site_ingress::Migration),
+            Box::new(m20240101_000107_tunnel_listener_error::Migration),
             Box::new(m20240101_000108_site_listeners::Migration),
             Box::new(m20240101_000109_static_drafts::Migration),
             Box::new(m20240101_000110_site_handlers::Migration),
@@ -282,7 +291,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 122);
+        assert_eq!(migrations.len(), 123);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
