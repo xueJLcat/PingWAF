@@ -32,6 +32,10 @@ const levels='emerg alert crit err warning notice info debug'.split(' ')
 const when=(s:string|null)=>s ? new Date(s).toLocaleString() : '—'
 type Draft={revision:number;config:Config;files:Partial<Record<FileKind,string>>}
 type Operation='save'|'remove'|'test'
+type Confirmation={action:'remove'|'save';revision:number;target:string;discard:boolean}
+function describeTarget(config:Config){
+  return [config.name,config.transport.toUpperCase(),config.host,String(config.port)].filter(Boolean).join(' · ')
+}
 export function SyslogSettings(){
   const {t}=useTranslation()
   const label=(k:string)=>t('syslog.'+k)
@@ -42,7 +46,7 @@ export function SyslogSettings(){
   const [message,setMessage]=useState('')
   const [error,setError]=useState('')
   const [conflict,setConflict]=useState(false)
-  const [confirm,setConfirm]=useState<'remove'|'discardRemove'|'save'|null>(null)
+  const [confirm,setConfirm]=useState<Confirmation|null>(null)
   const [busy,setBusy]=useState(false)
   const [siteSearch,setSiteSearch]=useState('')
   const [page,setPage]=useState(1)
@@ -61,23 +65,27 @@ export function SyslogSettings(){
     setDraft(d=>d && {...d,config:{...d.config,...patch}})
     setError('');setMessage('')
   }
-  async function run(op:Operation,discard=false){
+  async function run(op:Operation,confirmation?:Confirmation){
     if(!v || busy)return
     if(op!=='remove' && !form.current?.reportValidity())return
+    const revision=confirmation?.revision??draft?.revision??v.revision
+    const target=confirmation?.target??describeTarget(v.config)
+    const discard=confirmation?.discard??false
     setBusy(true);setError('');setMessage('');setConfirm(null);setConflict(false)
     try{
-      const body={revision:draft?.revision??v.revision,config:c??v.config,...draft?.files,discard}
+      const body={revision,config:c??v.config,...draft?.files,discard}
       if(op==='test'){
         const r=await api.post<{id:string;peer:string;time:string}>(endpoint+'/test',body)
         setMessage([label('sent'),r.peer,r.id,when(r.time)].join(' · '))
       }else{
         const saved=op==='remove'? await api.delete<View>(endpoint,{body:{revision:body.revision,discard}}):await api.put<View>(endpoint,body)
+        await cache.cancelQueries({queryKey:cfgKey,exact:true})
         cache.setQueryData(cfgKey,saved);setDraft(null);setMessage(label('saved'))
         await cache.invalidateQueries({queryKey:statusKey})
       }
     }catch(e){
       if(e instanceof ApiError && e.code==='syslog.queue_not_empty' && op!=='test'){
-        await status.refetch();setConfirm(op==='remove'?'discardRemove':'save')
+        await status.refetch();setConfirm({action:op,revision,target,discard:true})
       }else{
         setError(e instanceof Error?e.message:String(e));setConflict(e instanceof ApiError && e.status===409)
       }
@@ -112,7 +120,7 @@ export function SyslogSettings(){
   return <Card><CardBody className="space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3 [&_button]:min-h-11 sm:[&_button]:min-h-9"><h2 className="text-base font-semibold">{label('title')}</h2>
       {v && !draft && <div className="flex flex-wrap gap-2"><Button onClick={()=>begin(v)}>{label(v.configured?'edit':'configure')}</Button>
-      {v.configured && <Button onClick={()=>setConfirm('remove')}>{label('remove')}</Button>}</div>}</div>
+      {v.configured && <Button disabled={busy} onClick={()=>setConfirm({action:'remove',revision:v.revision,target:describeTarget(v.config),discard:false})}>{label('remove')}</Button>}</div>}</div>
     {query.isError && <p role="alert">{query.error.message} <Button onClick={()=>void query.refetch()}>{label('reload')}</Button></p>}
     {query.isPending && <p role="status">{label('loading')}</p>}
     {status.isError && <p role="alert">{label('unknown')} · {status.error.message} <Button onClick={()=>void status.refetch()}>{label('reload')}</Button></p>}
@@ -153,12 +161,16 @@ export function SyslogSettings(){
       </div></details>
       <div className="flex flex-wrap gap-2 [&_button]:min-h-11 sm:[&_button]:min-h-9"><Button type="submit" variant="primary" disabled={busy}>{label('save')}</Button><Button type="button" onClick={()=>void run('test')}>{label('test')}</Button><Button type="button" onClick={()=>{setDraft(null);setError('');setMessage('');setConflict(false)}}>{t('common.cancel')}</Button></div>
     </fieldset></form>}
-    {error && <p role="alert">{error}</p>}{conflict && <Button onClick={async()=>{const r=await query.refetch();if(r.data)begin(r.data)}}>{label('reload')}</Button>}
+    {error && <p role="alert">{error}</p>}{conflict && <Button onClick={async()=>{
+      const r=await query.refetch()
+      if(!r.isSuccess)return
+      if(draft)begin(r.data)
+      else{setConflict(false);setError('')}
+    }}>{label('reload')}</Button>}
     {message && <p role="status" className="break-all text-sm">{message}</p>}
-    <ConfirmDialog open={confirm!==null} title={label(confirm==='remove'?'remove':'discard')} description={label('discardHelp')+' '+(st?.queue_count??'—')} onClose={()=>setConfirm(null)} onConfirm={()=>{
-      if(confirm==='remove')void run('remove')
-      if(confirm==='discardRemove')void run('remove',true)
-      if(confirm==='save')void run('save',true)
+    <ConfirmDialog open={confirm!==null} title={label(confirm?.discard?'discard':'remove')} description={confirm && <span className="break-all">{confirm.target}
+      {confirm.discard && ' · '+label('discardHelp')+' '+(st?.queue_count??'—')}</span>} onClose={()=>setConfirm(null)} onConfirm={()=>{
+      if(confirm)void run(confirm.action,confirm)
     }}/>
   </CardBody></Card>
 }

@@ -118,6 +118,7 @@ export function Table<T>({
 
   const pageCount = pageSize > 0 ? Math.max(1, Math.ceil(sorted.length / pageSize)) : 1
   const safePage = Math.min(page, pageCount - 1)
+  if (!loading && page !== safePage) setPage(safePage)
   const pageData =
     pageSize > 0 ? sorted.slice(safePage * pageSize, safePage * pageSize + pageSize) : sorted
 

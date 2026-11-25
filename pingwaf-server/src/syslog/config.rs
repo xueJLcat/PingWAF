@@ -168,16 +168,83 @@ impl Config {
             || !self.server_name.eq_ignore_ascii_case(&other.server_name)
     }
     pub fn invalidates_queue(&self, next: &Self) -> bool {
+        // Stored payloads have already been filtered and masked. Expanding
+        // the scope does not make an existing payload unsafe to deliver.
+        let narrows_sites = match (&self.sites, &next.sites) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(old), Some(new)) if old != new => {
+                let allowed: std::collections::HashSet<_> =
+                    new.iter().collect();
+                old.iter().any(|site| !allowed.contains(site))
+            },
+            _ => false,
+        };
         self.target_changed(next)
             || (!next.access && self.access)
             || (!next.security && self.security)
-            || self.sites != next.sites
-            || self.ip_mode != next.ip_mode
-            || self.threshold != next.threshold
+            || narrows_sites
+            || matches!(
+                (self.ip_mode.as_str(), next.ip_mode.as_str()),
+                ("full", "mask" | "omit") | ("mask", "omit")
+            )
+            || next.threshold < self.threshold
             || self.severity != next.severity
             || self.format != next.format
             || self.body != next.body
             || self.framing != next.framing
             || self.max_bytes > next.max_bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_payloads_survive_wider_and_reordered_filters() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let old = Config {
+            sites: Some(vec![a, b]),
+            threshold: 4,
+            ..Default::default()
+        };
+        for sites in
+            [None, Some(vec![b, a, a]), Some(vec![a, b, Uuid::new_v4()])]
+        {
+            let wider = Config {
+                sites,
+                threshold: 7,
+                ip_mode: "full".into(),
+                ..old.clone()
+            };
+            assert!(!old.invalidates_queue(&wider));
+        }
+        for narrow in [
+            Config {
+                sites: Some(vec![a]),
+                ..old.clone()
+            },
+            Config {
+                sites: Some(vec![]),
+                ..old.clone()
+            },
+            Config {
+                ip_mode: "omit".into(),
+                ..old.clone()
+            },
+            Config {
+                threshold: 3,
+                ..old.clone()
+            },
+            Config {
+                transport: "udp".into(),
+                ..old.clone()
+            },
+        ] {
+            assert!(old.invalidates_queue(&narrow));
+        }
+        assert!(Config::default().invalidates_queue(&old));
     }
 }

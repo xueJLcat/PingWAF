@@ -1,5 +1,31 @@
 import { test, expect } from '../fixtures/app'
 
+test('refresh reconciles the visible snapshot page when the list shrinks', async ({ app }) => {
+  const { page } = app
+  let count = 50
+  await page.route('**/api/v1/config-versions?*', route => route.fulfill({
+    json: Array.from({ length: count }, (_, index) => ({
+      id: index + 1, scope: 'global', site_id: null, site_domain: null,
+      config_hash: String(index), source: 'api', actor: null, summary: {},
+      created_at: '2026-11-25T12:00:00Z',
+    })),
+  }))
+  await page.goto(app.adminUrl('/config-versions'))
+  const next = page.getByRole('button', { name: 'Next', exact: true })
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true })
+  await next.click()
+  await next.click()
+  await expect(page.getByText('3 / 3', { exact: true })).toBeVisible()
+  count = 21
+  await refresh.click()
+  await expect(page.getByText('2 / 2', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Previous', exact: true }).click()
+  await expect(page.getByText('1 / 2', { exact: true })).toBeVisible()
+  count = 50
+  await refresh.click()
+  await expect(page.getByText('1 / 3', { exact: true })).toBeVisible()
+})
+
 test('snapshot icons explain keyboard actions and delete only the selected history', async ({ app }) => {
   const { page } = app
   const domain = `snapshot-${Date.now()}.e2e.test`
