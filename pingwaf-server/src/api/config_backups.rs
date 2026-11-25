@@ -191,16 +191,7 @@ async fn create_backup(
     )
     .await
     .map_err(backup_error)?;
-    if let Some(target_id) = payload.target_id {
-        config_backup::enqueue_upload(&state.db, backup.id, target_id)
-            .await
-            .map_err(backup_error)?;
-    }
-    Ok(Json(
-        config_backup::load_backup_view(&state.db, backup.id)
-            .await
-            .map_err(backup_error)?,
-    ))
+    Ok(Json(backup))
 }
 
 async fn show_backup(

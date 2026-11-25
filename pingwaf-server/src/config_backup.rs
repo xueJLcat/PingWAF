@@ -6,11 +6,11 @@ use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, QueryOrder, QuerySelect, Set,
+    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::config_backup_crypto::{
@@ -334,21 +334,13 @@ pub async fn create_backup_record(
     actor: Option<&str>,
     target_id: Option<Uuid>,
 ) -> Result<BackupView, BackupError> {
-    if let Some(target_id) = target_id {
-        let target = config_backup_target::Entity::find_by_id(target_id)
-            .one(db)
-            .await?
-            .ok_or_else(|| {
-                BackupError::Format("backup target not found".into())
-            })?;
-        if !target.enabled {
-            return Err(BackupError::Operation(
-                "the selected backup target is disabled".into(),
-            ));
-        }
-    }
+    let upload = match target_id {
+        Some(id) => Some((id, reserve_upload(db, id).await?)),
+        None => None,
+    };
     let created = create_encrypted_backup(db, scope, password).await?;
-    let uploading = target_id.is_some();
+    let now = Utc::now();
+    let started_at = target_id.map(|_| now);
     let row =
         config_backup::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -356,7 +348,7 @@ pub async fn create_backup_record(
             site_id: Set(scope.column_value()),
             target_id: Set(target_id),
             status: Set(
-                if uploading { "created" } else { "completed" }.to_string()
+                if upload.is_some() { "uploading" } else { "completed" }.to_string()
             ),
             file_name: Set(created.file_name),
             manifest: Set(created.manifest),
@@ -364,12 +356,15 @@ pub async fn create_backup_record(
             checksum: Set(created.checksum),
             error: Set(String::new()),
             actor: Set(actor.map(str::to_string)),
-            created_at: Set(Utc::now()),
-            upload_started_at: Set(None),
-            completed_at: Set(if uploading { None } else { Some(Utc::now()) }),
+            created_at: Set(now),
+            upload_started_at: Set(started_at),
+            completed_at: Set(if upload.is_none() { Some(now) } else { None }),
         }
         .insert(db)
         .await?;
+    if let Some((target_id, permit)) = upload {
+        start_upload(db, row.id, target_id, now, permit);
+    }
     Ok(backup_view(row))
 }
 
@@ -479,12 +474,46 @@ pub async fn enqueue_upload(
     backup_id: Uuid,
     target_id: Uuid,
 ) -> Result<(), BackupError> {
-    let backup = load_backup(db, backup_id).await?;
-    if backup.status == "uploading" {
+    let status = config_backup::Entity::find_by_id(backup_id)
+        .select_only()
+        .column(config_backup::Column::Status)
+        .into_tuple::<String>()
+        .one(db)
+        .await?
+        .ok_or_else(|| BackupError::Format("backup not found".into()))?;
+    if status == "uploading" {
         return Err(BackupError::Operation(
             "this backup is already being uploaded".into(),
         ));
     }
+    let permit = reserve_upload(db, target_id).await?;
+    let started_at = Utc::now();
+    // Atomic state transition: concurrent requests, including requests from
+    // another control-plane instance, cannot all claim the same upload.
+    let claimed = db
+        .execute(sea_orm::Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE config_backups \
+             SET target_id = $2, status = 'uploading', upload_started_at = $3, \
+                 error = '', completed_at = NULL \
+             WHERE id = $1 AND status <> 'uploading'",
+            [backup_id.into(), target_id.into(), started_at.into()],
+        ))
+        .await?;
+    if claimed.rows_affected() == 0 {
+        return Err(BackupError::Operation(
+            "this backup is already being uploaded".into(),
+        ));
+    }
+
+    start_upload(db, backup_id, target_id, started_at, permit);
+    Ok(())
+}
+
+async fn reserve_upload(
+    db: &DatabaseConnection,
+    target_id: Uuid,
+) -> Result<OwnedSemaphorePermit, BackupError> {
     let permit = UPLOAD_PERMITS.clone().try_acquire_owned().map_err(|_| {
         BackupError::Operation("backup upload queue is full".into())
     })?;
@@ -497,44 +526,40 @@ pub async fn enqueue_upload(
             "the selected backup target is disabled".into(),
         ));
     }
-    // Atomic state transition: concurrent requests, including requests from
-    // another control-plane instance, cannot all claim the same upload.
-    let claimed = db
-        .execute(sea_orm::Statement::from_sql_and_values(
-            db.get_database_backend(),
-            "UPDATE config_backups \
-             SET target_id = $2, status = 'uploading', upload_started_at = $3, \
-                 error = '', completed_at = NULL \
-             WHERE id = $1 AND status <> 'uploading'",
-            [backup_id.into(), target_id.into(), Utc::now().into()],
-        ))
-        .await?;
-    if claimed.rows_affected() == 0 {
-        return Err(BackupError::Operation(
-            "this backup is already being uploaded".into(),
-        ));
-    }
+    Ok(permit)
+}
 
+fn start_upload(
+    db: &DatabaseConnection,
+    backup_id: Uuid,
+    target_id: Uuid,
+    started_at: chrono::DateTime<Utc>,
+    permit: OwnedSemaphorePermit,
+) {
     let upload_db = db.clone();
     tokio::spawn(async move {
-        let result = upload_backup(&upload_db, backup_id, target_id).await;
+        let result = upload_backup(&upload_db, backup_id, target_id, started_at).await;
         if let Err(error) = result {
             tracing::warn!(backup_id = %backup_id, error = %error, "backup upload failed");
         }
         drop(permit);
     });
-    Ok(())
 }
 
 async fn upload_backup(
     db: &DatabaseConnection,
     backup_id: Uuid,
     target_id: Uuid,
+    attempt_started_at: chrono::DateTime<Utc>,
 ) -> Result<(), BackupError> {
-    let attempt = load_backup(db, backup_id).await?;
-    let attempt_started_at = attempt.upload_started_at;
+    let Some(backup) = config_backup::Entity::find_by_id(backup_id)
+        .filter(config_backup::Column::Status.eq("uploading"))
+        .filter(config_backup::Column::TargetId.eq(target_id))
+        .filter(config_backup::Column::UploadStartedAt.eq(attempt_started_at))
+        .one(db).await? else {
+        return Ok(());
+    };
     let result = async {
-        let backup = load_backup(db, backup_id).await?;
         let target = config_backup_target::Entity::find_by_id(target_id)
             .one(db)
             .await?
@@ -631,6 +656,44 @@ pub async fn prune_backups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires an isolated PostgreSQL database"]
+    async fn backup_upload_lease_postgres() {
+        use sea_orm::PaginatorTrait;
+        use sea_orm_migration::MigratorTrait;
+
+        let url = std::env::var("PINGWAF_TEST_DATABASE_URL").unwrap();
+        let db = sea_orm::Database::connect(url).await.unwrap();
+        crate::migration::Migrator::up(&db, None).await.unwrap();
+        let target = create_target(&db, "s3", "lease test", json!({}), true)
+            .await.unwrap();
+        let held = UPLOAD_PERMITS.clone().try_acquire_many_owned(2).unwrap();
+        let key = Uuid::new_v4().to_string();
+        let err = create_backup_record(&db, VersionScope::Global, &key, None, Some(target.id))
+            .await.err().expect("full queue must reject creation");
+        assert!(err.to_string().contains("queue is full"));
+        assert_eq!(config_backup::Entity::find().count(&db).await.unwrap(), 0);
+        let local = create_backup_record(&db, VersionScope::Global, &key, None, None).await.unwrap();
+        assert_eq!(local.status, "completed");
+        assert!(enqueue_upload(&db, local.id, target.id).await.is_err());
+        assert_eq!(load_backup(&db, local.id).await.unwrap().status, "completed");
+        drop(held);
+
+        let latest = Utc::now();
+        let stale = latest - chrono::Duration::minutes(20);
+        let mut row: config_backup::ActiveModel = load_backup(&db, local.id).await.unwrap().into();
+        row.status = Set("uploading".into());
+        row.target_id = Set(Some(target.id));
+        row.upload_started_at = Set(Some(latest));
+        row.update(&db).await.unwrap();
+        // Missing credentials make an attempted delivery fail locally. A stale
+        // worker must not start that delivery or mark the current lease failed.
+        upload_backup(&db, local.id, target.id, stale).await.unwrap();
+        assert_eq!(load_backup(&db, local.id).await.unwrap().status, "uploading");
+        upload_backup(&db, local.id, target.id, latest).await.unwrap();
+        assert_eq!(load_backup(&db, local.id).await.unwrap().status, "failed");
+    }
 
     #[test]
     fn public_target_config_never_contains_credentials() {
