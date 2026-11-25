@@ -35,7 +35,8 @@ import { useToast } from '@/components/ui/Toast'
 import { errorMessage } from '@/api/errors'
 import { ApiError } from '@/api/client'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
-import { useCanWrite, useNow, useSitesList } from '@/hooks'
+import { siteKeys, sitesApi } from '@/api/sites'
+import { useCanWrite, useNow } from '@/hooks'
 import { formatSiteAddress, formatDateTime } from '@/lib/format'
 import { bindingKind, deleteBlockers, mergeBindResults } from '@/lib/certFlow'
 import {
@@ -128,7 +129,18 @@ export function GlobalSslPage() {
   /** Bindings queued for the two-step unbind confirmation. */
   const [pendingUnbind, setPendingUnbind] = useState<{ certId: string; siteId: string } | null>(null)
 
-  const sitesQuery = useSitesList()
+  const sitesQuery = useQuery({
+    queryKey: [...siteKeys.all, 'certificate-site-options'],
+    queryFn: async () => {
+      let page = await sitesApi.list()
+      const items = [...page.items]
+      while (page.items.length > 0 && page.page * page.page_size < page.total) {
+        page = await sitesApi.list({ page: page.page + 1 })
+        items.push(...page.items)
+      }
+      return items
+    },
+  })
   const sites = sitesQuery.data ?? []
 
   const filter: CertificateListQuery = {

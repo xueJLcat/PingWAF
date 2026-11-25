@@ -986,8 +986,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (port, additional, allowed) in [(80, None, true), (80, Some(81), false), (81, None, false)] {
             let mut item = site(Some(port), "127.0.0.1:18001".parse().unwrap());
-            let site = item.site.as_mut().unwrap();
-            site.rules.as_mut().unwrap().ssl = Some(pingwaf_proto::SslConfig {
+            item.handler = Some(pingwaf_proto::managed_site::Handler::Redirect(pingwaf_proto::SiteRedirect {
+                target: "https://destination.example/".into(), status: 302, ..Default::default()
+            }));
+            let rules = item.site.as_mut().unwrap().rules.as_mut().unwrap();
+            rules.upstreams.clear();
+            rules.routes.clear();
+            rules.ssl = Some(pingwaf_proto::SslConfig {
                 enabled: true, acme_enabled: true, acme_email: "fixture@example.test".into(), ..Default::default()
             });
             if let Some(port) = additional {
