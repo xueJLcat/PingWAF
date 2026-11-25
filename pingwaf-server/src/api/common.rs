@@ -2,6 +2,7 @@
 //! the multi-tenancy checks that every handler performs before touching data.
 
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{extension::postgres::PgExpr, Expr};
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbErr,
     EntityTrait, QueryFilter, Statement,
@@ -435,6 +436,14 @@ pub(crate) async fn purge_target_agents(
         ),
     };
     Ok(agent::Entity::find().filter(condition).all(db).await?)
+}
+
+/// Match literal user input against case-preserving names or addresses.
+pub(crate) fn literal_text_search<C: ColumnTrait>(columns: &[C], search: &str) -> Condition {
+    let pattern = format!("%{}%", super::logs::escape_like(search));
+    columns.iter().fold(Condition::any(), |condition, column| {
+        condition.add(Expr::col(column.as_column_ref()).ilike(pattern.as_str()))
+    })
 }
 
 /// Trims an optional filter string, turning blanks into `None`.

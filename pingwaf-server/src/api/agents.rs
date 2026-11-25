@@ -681,13 +681,10 @@ async fn list(
         condition = condition.add(agent::Column::Status.eq(status));
     }
     if let Some(search) = non_empty(&query.search) {
-        let pattern = format!("%{}%", search.to_lowercase());
-        condition = condition.add(
-            Condition::any()
-                .add(agent::Column::Hostname.like(&pattern))
-                .add(agent::Column::DisplayName.like(&pattern))
-                .add(agent::Column::IpAddress.like(&pattern)),
-        );
+        condition = condition.add(super::common::literal_text_search(
+            &[agent::Column::Hostname, agent::Column::DisplayName, agent::Column::IpAddress],
+            &search,
+        ));
     }
 
     let paginator = agent::Entity::find()

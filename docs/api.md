@@ -520,7 +520,7 @@ List sites (paginated).
 |-------|------|-------------|
 | `page` | int | Page number (default: 1) |
 | `page_size` | int | Items per page (default: 50, max: 200) |
-| `search` | string | Filter by name/domain |
+| `search` | string | Case-insensitive literal substring of name or domain. Use `:port` or `primary-domain:port` to match a default, primary or additional listener. |
 | `status` | string | Filter by status: `active`, `paused`, `pending` |
 | `ids` | string | Up to 20 comma-separated site UUIDs. Returns matching sites visible to the current account; missing IDs have no row. |
 
@@ -1941,7 +1941,7 @@ List registered agents.
 | `page_size` | int | Items per page |
 | `site_id` | string | Filter by site |
 | `status` | string | Filter: `online`, `offline`, `degraded` |
-| `search` | string | Case-insensitive substring match against `display_name`, `hostname` and `ip_address` |
+| `search` | string | Case-insensitive literal substring of `display_name`, `hostname` or `ip_address`. Percent and underscore match their literal characters. |
 
 **Response (200):**
 ```json

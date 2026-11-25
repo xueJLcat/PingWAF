@@ -1652,19 +1652,15 @@ async fn list(
         condition = condition.add(site::Column::Status.eq(status));
     }
     if let Some(search) = non_empty(&query.search) {
-        // `%` and `_` are wildcards in LIKE; escaping them keeps an operator's
-        // literal search from turning into a full-table scan.
-        let pattern = format!(
-            "%{}%",
-            crate::api::logs::escape_like(&search.to_lowercase())
+        let mut matching = super::common::literal_text_search(
+            &[site::Column::Domain, site::Column::Name], &search,
         );
-        let mut matching = Condition::any()
-            .add(site::Column::Domain.like(&pattern))
-            .add(site::Column::Name.like(&pattern));
         if let Some((host, port)) = search.rsplit_once(':') {
             if let Ok(port) = port.parse::<u16>() {
-                let mut ingress = Condition::all()
-                    .add(site::Column::IngressPort.eq(i32::from(port)));
+                let mut ingress = Condition::all().add(Expr::cust_with_values(
+                    "EXISTS (SELECT FROM site_listener_claims(sites.ingress_port, sites.ingress_protocol, sites.additional_ingresses) c WHERE c.port = $1)",
+                    [i32::from(port)],
+                ));
                 if !host.is_empty() {
                     ingress = ingress
                         .add(site::Column::Domain.eq(host.to_lowercase()));
@@ -4680,6 +4676,43 @@ pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires an empty disposable PostgreSQL database"]
+    async fn site_search_postgres() {
+        use sea_orm::Database;
+        use sea_orm_migration::MigratorTrait;
+
+        let db = Database::connect(std::env::var("PINGWAF_TEST_DATABASE_URL").unwrap()).await.unwrap();
+        crate::migration::Migrator::up(&db, None).await.unwrap();
+        let owner = Uuid::new_v4();
+        db.execute_unprepared(&format!(
+            "INSERT INTO users(id,email,password_hash,created_at,updated_at)
+             VALUES ('{owner}','owner@example.test','unused',now(),now());
+             INSERT INTO sites(id,user_id,name,domain,status,ingress_port,ingress_protocol,additional_ingresses,created_at,updated_at)
+             VALUES (gen_random_uuid(),'{owner}','Office_QA%','office.test','paused',NULL,NULL,'{{}}',now(),now()),
+                    (gen_random_uuid(),'{owner}','OfficeXQA1','custom.test','paused',18091,'http',ARRAY['https:18092'],now(),now()),
+                    (gen_random_uuid(),'{owner}','Other route','custom.test','paused',18093,'http','{{}}',now(),now())"
+        )).await.unwrap();
+        let state = State(AppState::new(db, Default::default(), crate::grpc::AgentRegistry::new()));
+        let member = AuthUser::new(owner, "owner@example.test", "user");
+        let unrelated = AuthUser::new(Uuid::new_v4(), "other@example.test", "user");
+        for (user, term, names) in [
+            (&member, "OFFICE_Qa%", vec!["Office_QA%"]),
+            (&member, ":80", vec!["Office_QA%"]),
+            (&member, "Office.Test:443", vec!["Office_QA%"]),
+            (&member, "CUSTOM.TEST:18091", vec!["OfficeXQA1"]),
+            (&member, "custom.test:18092", vec!["OfficeXQA1"]),
+            (&member, "custom.test:18093", vec!["Other route"]),
+            (&member, ":18099", vec![]),
+            (&unrelated, "custom.test:18092", vec![]),
+        ] {
+            let query = serde_json::from_value(serde_json::json!({"search":term})).unwrap();
+            let result = list(state.clone(), user.clone(), Query(query)).await.unwrap();
+            let matched: Vec<_> = result.items.iter().map(|row| row.name.as_str()).collect();
+            assert_eq!(matched, names, "search {term}");
+        }
+    }
     // Tests convert `ActiveModel`s back into `Model`s to assert field parity.
     use sea_orm::TryIntoModel;
 
