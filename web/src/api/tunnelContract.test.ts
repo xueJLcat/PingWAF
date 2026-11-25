@@ -39,6 +39,8 @@ describe('tunnel API contract', () => {
     targets: ['10.0.0.5:8080'],
     // The blast radius of disabling the tunnel: the sites bound to it.
     sites: ['shop.example.com'],
+    // Empty until an edge both binds its listener and gets an ingress address.
+    ingress: [],
     sessions: [
       {
         agent_id: '00000000-0000-0000-0000-000000000002',
@@ -64,6 +66,7 @@ describe('tunnel API contract', () => {
     expect(TUNNEL.connector_version).toBeNull()
     // A tunnel that no site uses yet is a real state the detail panel shows.
     expect(TUNNEL.sites).toEqual(['shop.example.com'])
+    expect(TUNNEL.ingress).toEqual([])
   })
 
   it('carries the one-time pairing material alongside the tunnel', () => {

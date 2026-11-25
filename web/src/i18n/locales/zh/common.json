@@ -3449,7 +3449,10 @@
       "checklistTitle": "还需要完成",
       "checklistStep1": "在内网主机上执行上面的命令——安装连接器并完成配对。",
       "checklistStep2": "在要终止该隧道的边缘：设置 agent.tunnel_addr，并在「边缘节点 → [节点]」填写隧道入口地址。",
-      "checklistStep3": "在站点的源站池设置中把源站池绑定到该隧道。"
+      "checklistStep3": "在站点的源站池设置中把源站池绑定到该隧道。",
+      "noIngressBanner": "还没有边缘节点提供隧道入口，连接器无法连接。请先在某个边缘开启监听（agent.tunnel_addr，例如 0.0.0.0:9443；Docker 部署要在服务 environment 里加 PINGWAF_TUNNEL_ADDR 并发布 9443 端口），再到「边缘节点 → [节点]」把「隧道入口地址」填成连接器拨号的公网 host:port——单节点就是本机公网 IP + 9443。",
+      "noIngressShort": "还没有入口——请在边缘开启 agent.tunnel_addr，并填写「隧道入口地址」。",
+      "ingress": "隧道入口"
     }
   },
   "challengeLevels": {

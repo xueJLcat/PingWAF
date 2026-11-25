@@ -560,6 +560,15 @@ Bind an origin pool to the tunnel in the site's origin pool settings; its node
 addresses are then resolved by the connector inside the private network. See
 [user-guide.md](user-guide.md#tunnels-internal-services-without-an-inbound-port).
 
+In the compose deployment the listener is off unless the variable reaches the
+container — compose only passes the environment a service declares, so add
+`PINGWAF_TUNNEL_ADDR=0.0.0.0:9443` to the `pingwaf` service's `environment:`
+block (the shipped file already forwards `${PINGWAF_TUNNEL_ADDR}` and publishes
+`${PINGWAF_TUNNEL_BIND:-127.0.0.1}:9443:9443`), set
+`PINGWAF_TUNNEL_BIND=0.0.0.0` when the connectors are on other hosts, and open
+`9443` in the firewall and the cloud security group. A value in `.env` alone is
+never passed through.
+
 A connector host with **no direct egress** can reach both the control plane and
 the edges through a SOCKS5 proxy: add `socks5_proxy = "10.0.0.1:1080"` (plus
 `socks5_username` / `socks5_password` when the proxy requires them) to

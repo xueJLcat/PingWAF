@@ -309,6 +309,12 @@ export function TunnelsTab() {
 
   return (
     <div className="flex flex-col gap-4">
+      {!listQuery.isLoading && tunnels.length > 0 && !tunnels[0]?.ingress?.length && (
+        <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
+          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+          <span>{t('pages.tunnels.noIngressBanner')}</span>
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-2xl text-[13px] leading-relaxed text-fg-subtle">
           {t('pages.tunnels.description')}
@@ -423,7 +429,7 @@ export function TunnelsTab() {
       >
         {liveDetail && (
           <div className="flex flex-col gap-4">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
               <Badge tone={STATUS_TONE[stateOf(liveDetail)] ?? 'neutral'}>
                 {t(`pages.tunnels.status_${stateOf(liveDetail)}`, stateOf(liveDetail))}
               </Badge>
@@ -437,6 +443,25 @@ export function TunnelsTab() {
               )}
               {liveDetail.connector_hostname && (
                 <span className="pw-mono text-xs text-fg-subtle">{liveDetail.connector_hostname}</span>
+              )}
+            </div>
+
+            <div>
+              <p className="mb-1.5 text-[13px] font-medium text-fg">
+                {t('pages.tunnels.ingress')}
+              </p>
+              {(liveDetail.ingress ?? []).length === 0 ? (
+                <p className="text-xs text-fg-subtle">
+                  {t('pages.tunnels.noIngressShort')}
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {(liveDetail.ingress ?? []).map((endpoint) => (
+                    <Badge key={endpoint} tone="neutral">
+                      {endpoint}
+                    </Badge>
+                  ))}
+                </div>
               )}
             </div>
 

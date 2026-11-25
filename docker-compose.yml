@@ -73,6 +73,11 @@ services:
       # 9090.
       - "${PINGWAF_ADMIN_BIND:-0.0.0.0}:${PINGWAF_ADMIN_PORT:-9080}:9080"  # Admin dashboard + REST API
       - "${PINGWAF_GRPC_BIND:-127.0.0.1}:${PINGWAF_GRPC_PORT:-9090}:9090"    # gRPC control plane (agents connect here)
+      # Tunnel ingress (9443). The listener stays off until PINGWAF_TUNNEL_ADDR
+      # is set below; publishing the port is harmless while it is off. Bound to
+      # loopback by default — set PINGWAF_TUNNEL_BIND=0.0.0.0 when the
+      # connectors run on other hosts, and firewall 9443 for their networks.
+      - "${PINGWAF_TUNNEL_BIND:-127.0.0.1}:${PINGWAF_TUNNEL_PORT:-9443}:9443"
     environment:
       - PINGWAF_DB_URL=postgres://pingwaf:${POSTGRES_PASSWORD:-pingwaf}@postgres:5432/pingwaf
       - PINGWAF_MODE=all-in-one
@@ -99,6 +104,14 @@ services:
       - PINGWAF_TLS_ENABLED=${TLS_ENABLED:-true}
       - PINGWAF_TLS_SANS=${PINGWAF_TLS_SANS:-}
       - PINGWAF_HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-15}
+      # Tunnel listener. Empty = off. Set PINGWAF_TUNNEL_ADDR=0.0.0.0:9443 in
+      # .env to serve tunnels from this node, then set the node's "Tunnel
+      # ingress" address (Agents → [node]) to the public host:port connectors
+      # dial — on a single node that is this host's public IP and 9443. The
+      # variable must be listed here: podman/docker compose only pass the
+      # environment a service declares, so a value in .env alone never reaches
+      # the process.
+      - PINGWAF_TUNNEL_ADDR=${PINGWAF_TUNNEL_ADDR:-}
       # Opt into the Let's Encrypt staging CA for tests only. Empty/unset keeps
       # production; never set this on a real deployment.
       - PINGAP_ACME_STAGING=${PINGAP_ACME_STAGING:-}

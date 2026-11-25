@@ -3440,7 +3440,10 @@
       "checklistTitle": "残りの手順",
       "checklistStep1": "プライベートネットワーク上のホストで上のコマンドを実行します（コネクタの導入とペアリング）。",
       "checklistStep2": "このトンネルを終端するエッジで agent.tunnel_addr を設定し、「エージェント → [ノード]」でトンネルイングレスを入力します。",
-      "checklistStep3": "サイトのオリジンプール設定で、このトンネルにプールを紐付けます。"
+      "checklistStep3": "サイトのオリジンプール設定で、このトンネルにプールを紐付けます。",
+      "noIngressBanner": "トンネルイングレスを提供するエッジがまだありません。エッジで agent.tunnel_addr（例 0.0.0.0:9443）を有効にし（Docker ではサービス環境に PINGWAF_TUNNEL_ADDR を追加して 9443 を公開）、「エージェント → [ノード]」のトンネルイングレスに接続先の公開 host:port（単一ノードならこのサーバの公開 IP と 9443）を設定してください。",
+      "noIngressShort": "エンドポイントがありません。エッジで agent.tunnel_addr を有効にし、トンネルイングレスを設定してください。",
+      "ingress": "イングレス"
     }
   },
   "challengeLevels": {

@@ -111,6 +111,14 @@ edge's firewall. The edge generates its own self-signed certificate on first
 boot (persisted, so restarts keep the same fingerprint), reports its SHA-256,
 and the connector pins it.
 
+In the compose deployment the variable must be listed in the service's
+`environment:` block — compose only passes what a service declares, so a value
+in `.env` alone never reaches the process. The shipped `docker-compose.yml`
+forwards `${PINGWAF_TUNNEL_ADDR}` and publishes
+`${PINGWAF_TUNNEL_BIND:-127.0.0.1}:9443:9443`; set `PINGWAF_TUNNEL_BIND=0.0.0.0`
+for connectors on other hosts, and open `9443` in the cloud security group as
+well as the host firewall.
+
 Now give that edge a **Tunnel ingress** address — the public `host:port`
 connectors dial — in **Agents → [node] → Tunnel ingress**. The panel also shows
 the listener state and explains a listener that is configured but failed to bind

@@ -86,6 +86,11 @@ pub struct TunnelView {
     /// Domains of the sites whose origin pools are bound to this tunnel. The
     /// blast radius of disabling or deleting it.
     pub sites: Vec<String>,
+    /// Public `host:port` endpoints a connector can dial right now (an edge
+    /// with a bound listener *and* an operator-set ingress address). Empty
+    /// means no connector can connect yet — the console shows what is missing
+    /// instead of leaving the operator with a pairing command that cannot work.
+    pub ingress: Vec<String>,
     pub sessions: Vec<SessionView>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -698,6 +703,11 @@ async fn build_views(
     let derived = tunnel_policy::derive_for(&state.db, owner).await?;
     let targets = derived.targets;
     let sites = derived.sites;
+    let ingress: Vec<String> = tunnel_policy::ingress_endpoints(&state.db)
+        .await?
+        .into_iter()
+        .map(|endpoint| endpoint.endpoint)
+        .collect();
     let online = TUNNEL_CONNECTORS.online().await;
     let names = agent_names(state).await?;
     let sessions = tunnel_session::Entity::find().all(&state.db).await?;
@@ -733,6 +743,7 @@ async fn build_views(
                 connector_hostname: row.hostname,
                 last_seen_at: row.last_seen_at,
                 sites: sites.get(&row.id).cloned().unwrap_or_default(),
+                ingress: ingress.clone(),
                 targets,
                 sessions: by_tunnel.remove(&row.id).unwrap_or_default(),
                 created_at: row.created_at,

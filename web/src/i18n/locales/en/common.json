@@ -3449,7 +3449,10 @@
       "checklistTitle": "What still has to happen",
       "checklistStep1": "Run the command above on the private-network host — it installs the connector and pairs it.",
       "checklistStep2": "On the edge that should terminate this tunnel: set agent.tunnel_addr, then fill in its Tunnel ingress address (Agents → [node]).",
-      "checklistStep3": "Bind an origin pool to this tunnel in the site's origin pool settings."
+      "checklistStep3": "Bind an origin pool to this tunnel in the site's origin pool settings.",
+      "noIngressBanner": "No edge offers a tunnel ingress yet, so a connector cannot connect. Enable the listener on an edge (agent.tunnel_addr, e.g. 0.0.0.0:9443; in Docker, add PINGWAF_TUNNEL_ADDR to the service environment and publish 9443), then set that node's Tunnel ingress address (Agents → [node]) to the public host:port connectors dial — on a single node that is this server's public IP and 9443.",
+      "noIngressShort": "No endpoint yet — enable agent.tunnel_addr on an edge and set its Tunnel ingress address.",
+      "ingress": "Ingress"
     }
   },
   "challengeLevels": {

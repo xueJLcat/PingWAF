@@ -1299,6 +1299,11 @@ export interface Tunnel {
   targets: string[]
   /** Domains of the sites bound to this tunnel (the blast radius of disabling it). */
   sites: string[]
+  /**
+   * Public endpoints a connector can dial right now. Empty = no edge offers an
+   * ingress (no listener bound, or its ingress address is unset).
+   */
+  ingress: string[]
   sessions: TunnelSession[]
   created_at: string
   updated_at: string
