@@ -1482,7 +1482,7 @@ mod tests {
             get_cookie_value(
                 session.req_header(),
                 "__pingwaf_managed_oidc_test"
-            ),
+            ).as_deref(),
             Some("secret")
         );
         assert_eq!(
