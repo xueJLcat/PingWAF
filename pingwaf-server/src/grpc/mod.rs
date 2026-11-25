@@ -23,8 +23,9 @@ pub mod visitor_auth;
 pub use cache_status::{CacheStatusRegistry, SiteCacheStatus};
 pub use control_plane::ControlPlaneService;
 pub use registry::{
-    AgentRegistry, ConfigDrift, ConnectedAgent, COMMAND_CHANNEL_CAPACITY,
+    AgentRegistry, ConfigDrift, ConnectedAgent, ManualSyncReceipt, COMMAND_CHANNEL_CAPACITY,
 };
+pub(crate) use registry::ManualDelivery;
 pub use tunnel_registry::TUNNEL_CONNECTORS;
 
 use pingwaf_proto::control_plane::{
@@ -111,11 +112,25 @@ pub(crate) async fn repush_agent_config(
     let Some(row) = agent::Entity::find_by_id(agent_id).one(db).await? else {
         return Ok(false);
     };
-    let visible = agent_visible_site_ids(db, &row).await?;
-    let config = build_site_config(db, Some(&visible)).await?;
+    let command = legacy_agent_command(db, &row).await?;
     Ok(registry
-        .send_command(&agent_id, update_site_command(config))
+        .send_command(&agent_id, command)
         .await)
+}
+
+async fn legacy_agent_command(db: &DatabaseConnection, row: &agent::Model) -> Result<ServerCommand, DbErr> {
+    let visible = agent_visible_site_ids(db, row).await?;
+    Ok(update_site_command(build_site_config(db, Some(&visible)).await?))
+}
+
+pub(crate) async fn manual_agent_sync(state: &AppState, row: &agent::Model) -> Result<ManualDelivery, DbErr> {
+    match state.agents.manual_delivery(row.id, None).await {
+        ManualDelivery::BuildLegacy(stream) => {
+            let command = legacy_agent_command(&state.db, row).await?;
+            Ok(state.agents.manual_delivery(row.id, Some((stream, command))).await)
+        },
+        result => Ok(result),
+    }
 }
 
 /// Notifies every connected agent that the configuration for `site_id` changed.

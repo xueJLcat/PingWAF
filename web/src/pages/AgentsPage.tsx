@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -32,7 +32,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { AgentProbePanel } from '@/components/agents/AgentProbePanel'
 import { StaticRootsDialog } from '@/components/agents/StaticRootsDialog'
 import { ListenerPolicyDialog } from '@/components/agents/ListenerPolicyDialog'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/stores/authStore'
 import { TunnelsTab } from '@/pages/tunnels/TunnelsTab'
 import { SkeletonRows } from '@/components/ui/Skeleton'
@@ -63,7 +63,7 @@ const STATUS_DOT: Record<AgentStatus, string> = {
 /** 30s — matches the heartbeat cadence the agents report on. */
 const REFRESH_MS = 30_000
 
-const COMMANDS: AgentCommand[] = ['flush_logs', 'reload', 'restart', 'purge_cache']
+const COMMANDS: AgentCommand[] = ['flush_logs', 'restart', 'purge_cache']
 
 /** List-title label: the operator-assigned name, else the real hostname. */
 const displayName = (agent: Agent): string => agent.display_name ?? agent.hostname
@@ -95,7 +95,9 @@ export function AgentsPage() {
   const debouncedSearch = useDebouncedValue(search.trim(), 350)
   const [statusFilter, setStatusFilter] = useState('')
   const [siteFilter, setSiteFilter] = useState('')
-  const [detail, setDetail] = useState<Agent | null>(null)
+  const [selectedAgent, setDetail] = useState<Agent | null>(null)
+  const syncRequests = useRef(new Set<string>())
+  const [syncing, setSyncing] = useState(new Set<string>())
   const [pendingDelete, setPendingDelete] = useState<Agent | null>(null)
   const [renameAgent, setRenameAgent] = useState<Agent | null>(null)
   const [ingressAgent, setIngressAgent] = useState<Agent | null>(null)
@@ -126,10 +128,11 @@ export function AgentsPage() {
         status: statusFilter || undefined,
         site_id: siteFilter || undefined,
       }),
-    refetchInterval: REFRESH_MS,
+    refetchInterval: (q) => q.state.data?.items.some(a => a.manual_sync?.status === 'pending') ? 5000 : REFRESH_MS,
   })
 
   const agents = useMemo(() => agentsQuery.data?.items ?? [], [agentsQuery.data])
+  const detail = agents.find(a => a.id === selectedAgent?.id) ?? selectedAgent
   const total = agentsQuery.data?.total ?? 0
   const counts = useMemo(() => countByStatus(agents), [agents])
 
@@ -261,6 +264,43 @@ export function AgentsPage() {
       invalidate()
     },
   })
+
+  const syncNow = async (agent: Agent) => {
+    if (syncRequests.current.has(agent.id)) return
+    syncRequests.current.add(agent.id)
+    setSyncing(new Set(syncRequests.current))
+    try {
+      await agentsApi.sendCommand(agent.id, { command: 'reload' })
+      toast.success(t('pages.agents.command_reload'), t('pages.agents.manual_pending'))
+    } catch (error) {
+      toast.error(t('pages.agents.command_reload'), errorMessage(error))
+    } finally {
+      await queryClient.invalidateQueries({ queryKey: agentKeys.all })
+      syncRequests.current.delete(agent.id)
+      setSyncing(new Set(syncRequests.current))
+    }
+  }
+
+  const syncButton = (agent: Agent, compact = false) => (
+    <Button size={compact ? 'icon' : 'sm'} variant={compact ? 'ghost' : 'secondary'}
+      aria-label={t('pages.agents.command_reload')} title={t(agent.connected ? 'pages.agents.command_reload' : 'pages.agents.manual_offline')}
+      loading={syncing.has(agent.id)} disabled={!agent.connected || syncing.has(agent.id)}
+      onClick={() => void syncNow(agent)} icon={<ArrowClockwise className="h-4 w-4" />}>
+      {!compact && t('pages.agents.command_reload')}
+    </Button>
+  )
+  const syncReceipt = (agent: Agent) => {
+    const receipt = agent.manual_sync
+    if (!receipt) return null
+    return <div className="space-y-1 text-xs text-fg-subtle" title={formatDateTime(receipt.requested_at)}>
+      <span>{t(`pages.agents.manual_${receipt.status}`)}</span>
+      {receipt.failures.map(([id, code]) =>
+        <Link key={id} className="block text-link" onClick={event => event.stopPropagation()}
+          to={`/sites/${id}/${code === 'tls_config' ? 'ssl' : 'basic'}`}>
+          {sites?.find(s => s.id === id)?.domain ?? id} · {t(`pages.siteDetail.deployment.${code}`)}
+        </Link>)}
+    </div>
+  }
 
   const sendCommand = useMutation({
     mutationFn: ({ agent, command }: { agent: Agent; command: AgentCommand }) =>
@@ -468,6 +508,7 @@ export function AgentsPage() {
               ? formatRelative(a.last_policy_sync_at, now)
               : t('pages.agents.noSyncReport')}
           </p>
+          {syncReceipt(a)}
         </div>
       ),
     },
@@ -478,6 +519,7 @@ export function AgentsPage() {
       width: '1%',
       cell: (a) => (
         <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+          {canWrite && syncButton(a, true)}
           {isAdmin && <>
             <Button size="icon" variant="ghost" aria-label={t('nav.staticDirectories')} title={t('nav.staticDirectories')}
               onClick={() => openRoots(a.id)} icon={<FolderOpen weight="duotone" className="h-4 w-4" />} />
@@ -778,6 +820,7 @@ export function AgentsPage() {
                 >
                   {t('pages.agents.rename')}
                 </Button>
+                {syncButton(detail)}
                 {COMMANDS.map((command) => (
                   <Button
                     key={command}
@@ -798,6 +841,7 @@ export function AgentsPage() {
       >
         {detail && (
           <div className="flex flex-col gap-4">
+            {syncReceipt(detail)}
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex items-center gap-2">
                 <span

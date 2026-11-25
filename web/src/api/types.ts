@@ -1232,6 +1232,11 @@ export interface Agent {
   registered_at: string
   /** When the agent last applied a full site config; null = never. */
   last_config_sync_at: string | null
+  manual_sync?: {
+    status: 'pending' | 'confirmed' | 'failed'
+    requested_at: string
+    failures: [string, string][]
+  } | null
   /** When the agent last applied a per-site rule bundle; null = never. */
   last_policy_sync_at: string | null
   connected: boolean

@@ -136,6 +136,7 @@ pub struct AgentResponse {
     pub last_seen: Option<DateTime<Utc>>,
     /// When the agent last applied a full site config; null = never synced.
     pub last_config_sync_at: Option<DateTime<Utc>>,
+    pub manual_sync: Option<crate::grpc::ManualSyncReceipt>,
     /// When the agent last applied a per-site rule bundle; null = never.
     pub last_policy_sync_at: Option<DateTime<Utc>>,
     pub registered_at: DateTime<Utc>,
@@ -696,7 +697,7 @@ async fn list(
 
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
-    let items = enrich(&state, rows).await?;
+    let items = enrich(&state, &current, rows).await?;
 
     Ok(Json(Page::new(items, total, pagination)))
 }
@@ -709,7 +710,7 @@ async fn show(
 ) -> Result<Json<AgentResponse>, ApiError> {
     let id = parse_uuid(&agent_id, "agent id")?;
     let row = load_agent(&state, id, &current).await?;
-    let mut items = enrich(&state, vec![row]).await?;
+    let mut items = enrich(&state, &current, vec![row]).await?;
     Ok(Json(items.remove(0)))
 }
 
@@ -761,7 +762,7 @@ async fn update(
     }
 
     let row = load_agent(&state, id, &current).await?;
-    let mut items = enrich(&state, vec![row]).await?;
+    let mut items = enrich(&state, &current, vec![row]).await?;
     Ok(Json(items.remove(0)))
 }
 
@@ -860,7 +861,7 @@ async fn update_sites(
     );
 
     let row = load_agent(&state, id, &current).await?;
-    let mut items = enrich(&state, vec![row]).await?;
+    let mut items = enrich(&state, &current, vec![row]).await?;
     Ok(Json(items.remove(0)))
 }
 
@@ -931,7 +932,7 @@ async fn send_command(
 ) -> Result<Response, ApiError> {
     require_write(&current)?;
     let id = parse_uuid(&agent_id, "agent id")?;
-    load_agent(&state, id, &current).await?;
+    let row = load_agent(&state, id, &current).await?;
 
     let site_id = match non_empty(&payload.site_id) {
         Some(raw) => {
@@ -942,8 +943,16 @@ async fn send_command(
         None => None,
     };
 
-    let command = build_command(&payload, site_id)?;
-    let delivered = state.agents.send_command(&id, command).await;
+    let delivered = if payload.command == "reload" {
+        use crate::grpc::ManualDelivery;
+        match crate::grpc::manual_agent_sync(&state, &row).await? {
+            ManualDelivery::Accepted => true,
+            ManualDelivery::Offline => return Err(ApiError::Conflict("agent is offline; reconnect before syncing".into())),
+            ManualDelivery::Busy | ManualDelivery::BuildLegacy(_) => return Err(ApiError::ServiceUnavailable("agent stream busy or changed; retry sync".into())),
+        }
+    } else {
+        state.agents.send_command(&id, build_command(&payload, site_id)?).await
+    };
 
     tracing::info!(
         agent_id = %id,
@@ -1050,6 +1059,7 @@ pub async fn load_agent(
 /// Attaches live connection state and site domain to agent rows.
 async fn enrich(
     state: &AppState,
+    current: &AuthUser,
     rows: Vec<agent::Model>,
 ) -> Result<Vec<AgentResponse>, ApiError> {
     let agent_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
@@ -1102,6 +1112,16 @@ async fn enrich(
             .iter()
             .filter_map(|id| domains.get(id).cloned())
             .collect();
+        let mut manual_sync = state.agents.manual_receipt(row.id).await;
+        if let Some(receipt) = manual_sync.as_mut().filter(|_| !current.is_admin()) {
+            let mut visible = Vec::new();
+            for (id, code) in receipt.failures.drain(..) {
+                if load_site_read(&state.db, id, current).await.is_ok() {
+                    visible.push((id, code));
+                }
+            }
+            receipt.failures = visible;
+        }
         out.push(AgentResponse {
             id: row.id,
             site_domain: row.site_id.and_then(|id| domains.get(&id).cloned()),
@@ -1135,6 +1155,7 @@ async fn enrich(
             last_heartbeat: row.last_heartbeat,
             last_seen: row.last_heartbeat,
             last_config_sync_at: row.last_config_sync_at,
+            manual_sync,
             last_policy_sync_at: row.last_policy_sync_at,
             registered_at: row.registered_at,
             connected,

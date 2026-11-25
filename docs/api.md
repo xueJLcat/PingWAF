@@ -2218,6 +2218,8 @@ directory before persisting. A referenced identifier must first be detached.
 Send a command to an agent. The request is a flat object — the command name
 plus its parameters as top-level fields; there is no nested `payload` field.
 
+For a successful reload, `202` with `delivered: true` reports dispatch. Poll the node's `manual_sync` for the current connection's receipt (`pending`, `confirmed`, or `failed`). An unchanged configuration keeps its last-change timestamp. Duplicate pending reloads within 30 seconds share one delivery.
+
 **Request:**
 ```json
 {
@@ -2239,7 +2241,7 @@ restart, reload, purge_cache, block_ip, unblock_ip or flush_logs`):
 | Command | Parameters | Notes |
 |---------|------------|-------|
 | `restart` | `graceful` (default `true`), `reason` (default `requested from dashboard`) | Restarts the agent process. |
-| `reload` | — | Asks the agent to re-apply its current configuration; carries no payload. |
+| `reload` | — | Syncs this online node. Managed nodes pull a fresh authorized snapshot; a legacy node receives its visible site configuration. An offline node returns 409 and a busy stream returns 503. |
 | `flush_logs` | `reason` (default `requested from dashboard`) | Agent-by-agent form of the broadcast below. |
 | `purge_cache` | `urls` (array), `tags` (array) | Entries are trimmed and blanks dropped; at most 1000 urls and 100 tags, each at most 2048 characters. |
 | `block_ip` | `ip_addresses` (array, required non-empty), `duration_seconds` (optional), `reason` (optional) | Each entry accepts a single address or CIDR and is normalised; a CIDR wider than the manual-block guard is a `400`. `duration_seconds` must be `0`–`31536000`; absent and `0` both mean "until unblocked". |

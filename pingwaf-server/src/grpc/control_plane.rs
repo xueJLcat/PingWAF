@@ -702,6 +702,7 @@ impl ControlPlaneTrait for ControlPlaneService {
         let session_id = managed_session_id(&claims)?.ok_or_else(|| {
             Status::permission_denied("managed protocol was not negotiated")
         })?;
+        let manual_request = self.agents.manual_request(agent_id, session_id).await;
         let mut snapshot =
             managed::build_snapshot(&self.db, agent_id, session_id, request.supports_site_handlers, request.supports_site_archives, request.supports_page_integrity, request.supports_dynamic_pages, request.supports_panel_listeners).await?;
         // Never grant a lease beyond the issuing credential's expiry. Client
@@ -715,6 +716,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         }
         snapshot.lease_seconds = pingwaf_proto::MAX_MANAGED_LEASE_SECONDS
             .min(u32::try_from(remaining).unwrap_or(u32::MAX));
+        if let Some(request) = manual_request {
+            self.agents.manual_snapshot(agent_id, request, &snapshot.authority_epoch, snapshot.generation).await;
+        }
         Ok(Response::new(snapshot))
     }
 
@@ -869,6 +873,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 filter_heartbeat_sites(&mut message, &visible);
                 if session_id.is_some() {
                     clear_legacy_config_report(&mut message);
+                } else {
+                    registry.legacy_manual_receipt(agent_id, generation, message.config_hash.trim(), &message.config_apply_error).await;
                 }
                 cache_status
                     .record_heartbeat(agent_id, &message.site_statuses)

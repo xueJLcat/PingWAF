@@ -61,6 +61,30 @@ struct Connection {
     /// or an acknowledgement of applied site configuration.
     ingress: Option<(Instant, IngressListeners)>,
     application: Option<(Instant, ApplicationObservation)>,
+    manual_sync: Option<ManualSync>,
+}
+
+/// Lives only as long as the authenticated stream to which the request was sent.
+struct ManualSync {
+    id: Uuid,
+    started: Instant,
+    target: Option<(String, i64)>,
+    legacy_hash: Option<String>,
+    receipt: ManualSyncReceipt,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ManualSyncReceipt {
+    pub status: &'static str,
+    pub requested_at: DateTime<Utc>,
+    pub failures: Vec<(Uuid, String)>,
+}
+
+pub(crate) enum ManualDelivery {
+    Accepted,
+    Offline,
+    Busy,
+    BuildLegacy(u64),
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -324,6 +348,7 @@ impl AgentRegistry {
                 generation,
                 ingress: None,
                 application: None,
+                manual_sync: None,
             },
         );
         // Counters belong to the stream that reported them: a reconnect starts
@@ -603,12 +628,76 @@ impl AgentRegistry {
         let report = report?;
         let (_, observation) = conn.application.as_ref()?;
         let panel = conn.ingress.as_ref()?.1.panel.as_ref()?;
-        (observation.received_sites.is_empty()
+        let applied = observation.received_sites.is_empty()
             && panel.applied_generation == observation.generation
             && panel.desired_generation == observation.generation
             && report.applied_config_hash.len() == 64
-            && report.applied_config_hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
-            .then_some((observation.authority_epoch, observation.generation))
+            && report.applied_config_hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+        if let Some(sync) = conn.manual_sync.as_mut().filter(|sync|
+            sync.target.as_ref().is_some_and(|(epoch, generation)|
+                *generation == observation.generation && *epoch == observation.authority_epoch.to_string()))
+        {
+            sync.receipt.failures = observation.received_sites.iter().filter_map(|s|
+                s.failure_code.as_ref().map(|code| (s.site_id, code.clone()))).collect();
+            sync.receipt.status = if !sync.receipt.failures.is_empty() { "failed" }
+                else if applied { "confirmed" } else { "pending" };
+        }
+        applied.then_some((observation.authority_epoch, observation.generation))
+    }
+
+    pub(crate) async fn manual_delivery(&self, id: Uuid, legacy: Option<(u64, ServerCommand)>) -> ManualDelivery {
+        let mut inner = self.inner.write().await;
+        let Some(c) = inner.connected.get_mut(&id) else { return ManualDelivery::Offline };
+        if c.manual_sync.as_ref().is_some_and(|s| s.receipt.status == "pending" && s.started.elapsed() < Duration::from_secs(30)) {
+            return ManualDelivery::Accepted;
+        }
+        let request_id = Uuid::new_v4();
+        let command = if c.session.is_some() {
+            config_changed(ServerCommand { command_id: request_id.to_string(), issued_at: super::config::now_timestamp(), ..Default::default() })
+        } else {
+            let Some((generation, command)) = legacy else { return ManualDelivery::BuildLegacy(c.generation) };
+            if generation != c.generation { return ManualDelivery::Busy; }
+            command
+        };
+        let legacy_hash = update_site_hash(&command).map(str::to_owned);
+        if c.sender.try_send(command).is_err() { return ManualDelivery::Busy; }
+        c.manual_sync = Some(ManualSync {
+            id: request_id, started: Instant::now(), target: None, legacy_hash: legacy_hash.clone(),
+            receipt: ManualSyncReceipt { status: "pending", requested_at: Utc::now(), failures: vec![] },
+        });
+        if let Some(hash) = legacy_hash {
+            if let Some(queue) = inner.pending.get_mut(&id) { queue.retain(|cmd| update_site_hash(cmd).is_none()); }
+            inner.config.entry(id).or_default().target = Some(hash);
+        }
+        ManualDelivery::Accepted
+    }
+
+    pub(crate) async fn manual_request(&self, id: Uuid, session: Uuid) -> Option<Uuid> {
+        let inner = self.inner.read().await;
+        let c = inner.connected.get(&id)?;
+        c.manual_sync.as_ref().filter(|s| c.session == Some(session) && s.receipt.status == "pending").map(|s| s.id)
+    }
+
+    pub(crate) async fn manual_snapshot(&self, id: Uuid, request: Uuid, epoch: &str, generation: i64) {
+        let mut inner = self.inner.write().await;
+        if let Some(s) = inner.connected.get_mut(&id).and_then(|c| c.manual_sync.as_mut()).filter(|s| s.id == request) {
+            s.target = Some((epoch.to_owned(), generation));
+        }
+    }
+
+    pub(crate) async fn manual_receipt(&self, id: Uuid) -> Option<ManualSyncReceipt> {
+        self.inner.read().await.connected.get(&id)?.manual_sync.as_ref().map(|s| s.receipt.clone())
+    }
+
+    pub(crate) async fn legacy_manual_receipt(&self, id: Uuid, stream: u64, hash: &str, error: &str) {
+        let mut inner = self.inner.write().await;
+        if let Some(sync) = inner.connected.get_mut(&id)
+            .filter(|c| c.generation == stream && c.session.is_none())
+            .and_then(|c| c.manual_sync.as_mut())
+            .filter(|s| s.receipt.status == "pending" && !hash.is_empty() && s.legacy_hash.as_deref() == Some(hash))
+        {
+            sync.receipt.status = if error.is_empty() { "confirmed" } else { "failed" };
+        }
     }
 
     pub async fn application_observations(
@@ -1147,6 +1236,38 @@ mod tests {
                 }),
             })),
         }
+    }
+
+    #[tokio::test]
+    async fn manual_sync_is_live_scoped_and_deduplicated() {
+        use ManualDelivery::*;
+        let registry = AgentRegistry::new();
+        let (agent, other, session) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        assert!(matches!(registry.manual_delivery(agent, None).await, Offline));
+        let (sender, mut channel) = mpsc::channel(1);
+        registry.connect_session(agent, sender, Some(session)).await;
+        let (sender, mut legacy) = mpsc::channel(1);
+        let (stream, _) = registry.connect_session(other, sender, None).await;
+        assert!(registry.send_command_now(&agent, restart("occupy queue")).await);
+        assert!(matches!(registry.manual_delivery(agent, None).await, Busy));
+        channel.recv().await.unwrap();
+        assert!(matches!(registry.manual_delivery(agent, None).await, Accepted));
+        assert!(matches!(registry.manual_delivery(agent, None).await, Accepted));
+        assert!(matches!(channel.try_recv().unwrap().payload, Some(Payload::ManagedConfigChanged(_))));
+        assert!(channel.try_recv().is_err() && legacy.try_recv().is_err());
+        assert_eq!(registry.pending_count(&agent).await, 0);
+        assert!(matches!(registry.manual_delivery(other, None).await, BuildLegacy(s) if s == stream));
+        assert!(matches!(registry.manual_delivery(other, Some((stream, update_site("fresh")))).await, Accepted));
+        assert_eq!(update_site_hash(&legacy.try_recv().unwrap()), Some("fresh"));
+        registry.legacy_manual_receipt(other, stream, "stale", "").await;
+        registry.legacy_manual_receipt(other, stream + 1, "fresh", "").await;
+        assert_eq!(registry.manual_receipt(other).await.unwrap().status, "pending");
+        registry.legacy_manual_receipt(other, stream, "fresh", "").await;
+        assert_eq!(registry.manual_receipt(other).await.unwrap().status, "confirmed");
+        let (sender, _channel) = mpsc::channel(1);
+        registry.connect_session(agent, sender, Some(Uuid::new_v4())).await;
+        assert!(registry.manual_request(agent, session).await.is_none());
+        assert!(registry.manual_receipt(agent).await.is_none());
     }
 
     fn hashes(commands: &VecDeque<ServerCommand>) -> Vec<Option<&str>> {
