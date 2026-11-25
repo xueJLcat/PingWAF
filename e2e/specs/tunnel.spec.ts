@@ -69,6 +69,7 @@ test.describe('tunnels', () => {
 
     // ── Re-pair mints a new token and rotates the credential ─────────────────
     await page.getByRole('row').filter({ hasText: renamed }).getByRole('button', { name: 'Re-pair' }).click()
+    await page.getByRole('dialog', { name: 'Re-pair this tunnel?' }).getByRole('button', { name: 'Re-pair', exact: true }).click()
     await expect(page.getByRole('dialog').locator('pre')).toContainText('--mode tunnel')
     await page.getByRole('dialog').getByRole('button', { name: 'Done' }).click()
 

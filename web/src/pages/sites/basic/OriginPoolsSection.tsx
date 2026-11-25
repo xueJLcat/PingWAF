@@ -272,7 +272,8 @@ export function OriginPoolsSection({
                         <Button
                           size="icon"
                           variant="ghost"
-                          aria-label={t('common.edit')}
+                          aria-label={t('pages.basic.editPool')}
+                          title={t('pages.basic.editPool')}
                           onClick={() => onEditPool(pool)}
                           icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
                         />

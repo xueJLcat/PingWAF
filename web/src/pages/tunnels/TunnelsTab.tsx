@@ -47,8 +47,9 @@ const STATUS_TONE: Record<string, 'success' | 'warning' | 'neutral' | 'danger'> 
  * `paired` is the field that answers "is there a credential at all".
  */
 function stateOf(tunnel: Tunnel): 'active' | 'pending' | 'disabled' {
+  if (tunnel.status === 'disabled') return 'disabled'
   if (!tunnel.paired) return 'pending'
-  if (tunnel.status === 'disabled' || !tunnel.enabled) return 'disabled'
+  if (!tunnel.enabled) return 'disabled'
   return 'active'
 }
 
@@ -140,6 +141,7 @@ export function TunnelsTab() {
   const rotate = useMutation({
     mutationFn: (id: string) => tunnelsApi.pairing(id),
     onSuccess: (data) => {
+      setPendingRepair(null)
       setPairing(data)
       setDetail(null)
       invalidate()
