@@ -43,7 +43,7 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
     const usual = !terminal && next.length === 2 && next.includes('http:80') && next.includes('https:443')
     const agents = candidates(next)
     onChange({ ...value, listener: usual ? '' : next[0], additional: usual ? [] : next.slice(1),
-      agents: !usual && value.agents === null && !selected.length && agents.length === 1
+      agents: !usual && value.agents === null && !selected.length && agents.length === 1 && !agents[0].automatic
         ? [agents[0].id] : selected })
   }
   const unavailable = selected.filter(id => !eligible.some(agent => agent.id === id))
@@ -82,12 +82,12 @@ export function SiteIngressFields({ value, onChange, inventory, loadError, clone
       {terminal && inventory?.agents.filter(agent => !supports(agent)).map(agent =>
         <p key={agent.id} className="text-xs text-fg-subtle">{agent.name} · {t('pages.sites.handlerUpgrade')}</p>)}
       {eligible.map(agent => <label key={agent.id} className="pw-touch-check flex items-center gap-2">
-        <input type="checkbox" checked={selected.includes(agent.id)} onChange={() => toggle(agent.id)} />{agent.name}
+        <input type="checkbox" disabled={agent.automatic} checked={agent.automatic || selected.includes(agent.id)} onChange={() => toggle(agent.id)} />{agent.name}{agent.automatic && " · " + t("pages.agents.siteScopeAll")}
       </label>)}
       {unavailable.map(id => <label key={id} className="pw-touch-check flex items-center gap-2 break-all">
         <input type="checkbox" checked onChange={() => toggle(id)} />{inventory?.agents.find(node => node.id === id)?.name ?? id} · {t('pages.sites.ingressUnavailable')}
       </label>)}
-      {admin && selected.map(id => <Link key={id} to={'/agents?listeners=' + encodeURIComponent(id)} target="_blank" rel="noopener noreferrer"
+      {admin && [...new Set([...selected, ...eligible.filter(agent => agent.automatic).map(agent => agent.id)])].map(id => <Link key={id} to={'/agents?listeners=' + encodeURIComponent(id)} target="_blank" rel="noopener noreferrer"
         className="block text-sm underline">{inventory?.agents.find(a => a.id === id)?.name ?? id} · 维护监听地址</Link>)}
       {canPause && <label className="pw-touch-check flex items-center gap-2">
         <input type="checkbox" checked={value.paused} onChange={event => onChange({ ...value, paused: event.target.checked })} />

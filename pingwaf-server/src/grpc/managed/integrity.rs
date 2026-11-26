@@ -13,9 +13,9 @@ async fn scoped_transaction(
         .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
         .await?;
     require_session(&tx, agent, session).await?;
-    let (node, owner) = authorize(&tx, agent).await?;
-    if node.site_scope != "selected" || tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT 1 FROM sites s JOIN agent_sites a ON a.site_id=s.id WHERE s.id=$1 AND a.agent_id=$2 AND s.user_id=$3 AND s.status='active'",
+    let (_, owner) = authorize(&tx, agent).await?;
+    if tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT 1 FROM sites s JOIN panel_site_listeners a ON a.site_id=s.id WHERE s.id=$1 AND a.agent_id=$2 AND s.user_id=$3 AND s.status='active'",
         [site.into(),agent.into(),owner.into()])).await?.is_none() { return Err(BuildError::Forbidden); }
     Ok(tx)
 }

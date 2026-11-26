@@ -475,7 +475,7 @@ Site list and detail responses include nullable `ingress_port` and `ingress_prot
 
 The create, edit and clone handlers accept the fields as a pair. Omit both to use the default on creation or preserve the source/current ingress on clone/edit. Supply two nulls to select the default explicitly. A custom port is an integer from 1 to 65535 excluding 80 and 443, and its protocol is `http` or `https`. Only administrators can configure it. Migration 107 enables custom writes on upgraded databases.
 
-An active create requires `ingress_agent_ids` listing selected-scope agents owned by the caller. Each must have a current authenticated managed session and a recent bound listener matching the requested port and protocol. A paused site can be staged without assignments. Activation checks the assigned agents again. Cloning to or from a custom listener leaves private TLS material and certificate grants behind; provision the clone before activation.
+An active create requires a serving node. All-sites nodes automatically serve custom listeners owned by their API key (within any legacy single-site binding). In ingress options they have `automatic: true`. Only selected-scope nodes are listed in `ingress_agent_ids`. Each must have a current authenticated managed session and a recent bound listener matching the requested port and protocol. A paused site can be staged without assignments. Activation checks the assigned agents again. Cloning to or from a custom listener leaves private TLS material and certificate grants behind; provision the clone before activation.
 
 Backup upload, restore preview, restore execution and history rollback validate the final site addresses together. A site-scoped restore includes claims made by other live sites. A full restore releases claims belonging to sites selected for pruning. Older site snapshots without ingress fields restore the default listener. Conflicting names, aliases, wildcard coverage or protocols reject the restore before any changes commit. Active custom sites require a current assigned listener; paused custom sites can be staged unassigned. An offline CLI rollback has no live agent inventory and rejects a restore that requires it.
 
@@ -575,7 +575,7 @@ Read one draft entry using its preview ticket. Relative stylesheets and images c
 
 ### GET /sites/{id}/static-versions
 
-Return the site's ZIP and registered-directory versions with digest, directory identifier (null for ZIP), and publication time. Use the existing site update operation with a previously published digest to roll back. A registered directory rollback sets `rollback: true` and can select a snapshot still held by every assigned node. Nodes download ZIP content in chunks of up to 256 KiB for explicitly assigned active sites.
+Return the site's ZIP and registered-directory versions with digest, directory identifier (null for ZIP), and publication time. Use the existing site update operation with a previously published digest to roll back. A registered directory rollback sets `rollback: true` and can select a snapshot still held by every assigned node. Nodes download ZIP content in chunks of up to 256 KiB for active sites in their effective scope.
 
 ### GET /sites/{id}/integrity
 

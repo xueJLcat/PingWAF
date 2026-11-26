@@ -1555,7 +1555,7 @@ async fn ingress_options(
     )).all(&tx).await?;
     let writes_enabled = custom_ingress_writes_enabled(&tx).await?;
     let agents =
-        crate::grpc::ingress_agent_options(&tx, &state.agents, owner).await?;
+        crate::grpc::ingress_agent_options(&tx, &state.agents, owner, query.site_id).await?;
     tx.commit().await?;
     Ok(Json(IngressOptions {
         port_protocols,
@@ -1597,18 +1597,14 @@ async fn write_ingress_assignments(
         )
         .with_code("site.ingress_invalid"));
     }
-    if site.status == site_status::ACTIVE && ids.is_empty() {
-        return Err(ApiError::BadRequest(
-            "active custom ingress requires an explicitly assigned agent"
-                .into(),
-        )
-        .with_code("site.ingress_unavailable"));
-    }
     crate::models::agent_sites::Entity::delete_many()
         .filter(crate::models::agent_sites::Column::SiteId.eq(site.id))
         .exec(txn)
         .await?;
     for id in ids {
+        let selected = crate::models::agent::Entity::find_by_id(id)
+            .filter(crate::models::agent::Column::SiteScope.eq("selected")).one(txn).await?;
+        if selected.is_none() { return Err(ApiError::BadRequest("explicit assignments require selected scope".into()).with_code("site.ingress_unavailable")); }
         crate::grpc::check_agent_site(txn, &state.agents, id, site).await?;
         crate::models::agent_sites::ActiveModel {
             agent_id: Set(id),
@@ -1617,6 +1613,9 @@ async fn write_ingress_assignments(
         }
         .insert(txn)
         .await?;
+    }
+    if site.status == site_status::ACTIVE {
+        crate::grpc::check_site_ingress(txn, &state.agents, site).await?;
     }
     Ok(())
 }

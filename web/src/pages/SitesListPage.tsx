@@ -582,7 +582,7 @@ export function SitesListPage() {
       }
     })
   }
-  const selectedAgents = form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []
+  const selectedAgents = [...new Set([...(form.ingress.agents ?? ingressInventory.data?.assigned_agent_ids ?? []), ...(ingressInventory.data?.agents ?? []).filter(node => node.automatic).map(node => node.id)])]
   const directoryNodes = (ingressInventory.data?.agents ?? []).filter(node => selectedAgents.includes(node.id))
   const directories = Object.entries(directoryNodes[0]?.static_directories ?? {}).filter(([id, digest]) =>
     digest && directoryNodes.length === selectedAgents.length && directoryNodes.every(node => node.static_directories?.[id] === digest))
@@ -622,7 +622,7 @@ export function SitesListPage() {
     if (form.zip && !form.zip.digest) errors.top = t('pages.sites.uploadZip')
     if (form.handler && !redirectPreview(form.handler)) errors.upstream = t('pages.sites.redirectInvalid')
     if (form.ingress.listener && !form.ingress.paused && (!editing || editing.status === 'active') &&
-        (form.ingress.agents !== null || !editing) && !form.ingress.agents?.length) {
+        (form.ingress.agents !== null || !editing) && !selectedAgents.length) {
       errors.top = t('pages.sites.ingressRequireAgent')
     }
 

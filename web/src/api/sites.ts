@@ -43,7 +43,7 @@ export interface IngressOptions {
   admin_port: number
   reserved_ports?: number[]
   writes_enabled: boolean
-  agents: { id: string; name: string; dynamic_bind: boolean; available_slots: number; unavailable_ports: number[]; supports_site_handlers?: boolean; supports_site_archives?: boolean; static_directories?: Record<string, string>; listeners: [number, 'http' | 'https'][] }[]
+  agents: { id: string; name: string; automatic?: boolean; dynamic_bind: boolean; available_slots: number; unavailable_ports: number[]; supports_site_handlers?: boolean; supports_site_archives?: boolean; static_directories?: Record<string, string>; listeners: [number, 'http' | 'https'][] }[]
   assigned_agent_ids: string[]
 }
 

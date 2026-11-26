@@ -72,7 +72,6 @@ pub(crate) fn agent_site_query(row: &agent::Model) -> sea_orm::Select<site::Enti
             query.filter(site::Column::Id.in_subquery(assigned))
         }
         "all" => {
-            let query = query.filter(site::Column::IngressPort.is_null());
             match row.site_id {
                 Some(id) => query.filter(site::Column::Id.eq(id)),
                 None => query,

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::api::keys::key_allows_agent;
 use crate::models::{
-    agent, agent_sites, api_key, role, site, site_oidc, site_status, user,
+    agent, api_key, role, site, site_oidc, site_status, user,
 };
 
 use super::config::assemble_managed_config;
@@ -129,17 +129,8 @@ pub(super) async fn visitor_site(
             .await?;
         require_session(&tx, agent_id, session_id).await?;
         let (agent, owner) = authorize(&tx, agent_id).await?;
-        if agent.site_scope != "selected"
-            || agent_sites::Entity::find()
-                .filter(agent_sites::Column::AgentId.eq(agent.id))
-                .filter(agent_sites::Column::SiteId.eq(site_id))
-                .one(&tx)
-                .await?
-                .is_none()
-        {
-            return Err(BuildError::Forbidden);
-        }
-        let site = site::Entity::find_by_id(site_id)
+        let site = super::agent_site_query(&agent)
+            .filter(site::Column::Id.eq(site_id))
             .filter(site::Column::UserId.eq(owner))
             .filter(site::Column::Status.eq(site_status::ACTIVE))
             .filter(site::Column::IngressPort.is_not_null())
@@ -176,11 +167,10 @@ pub(super) async fn content_chunk(
     let read = async {
         let tx = db.begin_with_config(Some(IsolationLevel::RepeatableRead), Some(AccessMode::ReadOnly)).await?;
         require_session(&tx, agent_id, session).await?;
-        let (agent, owner) = authorize(&tx, agent_id).await?;
-        if agent.site_scope != "selected" { return Err(BuildError::Forbidden); }
+        let (_, owner) = authorize(&tx, agent_id).await?;
         let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT substring(r.archive FROM $5 FOR 262144) AS data, octet_length(r.archive) AS size
-             FROM static_releases r JOIN sites s ON s.id=r.site_id JOIN agent_sites a ON a.site_id=s.id
+             FROM static_releases r JOIN sites s ON s.id=r.site_id JOIN panel_site_listeners a ON a.site_id=s.id
              WHERE a.agent_id=$1 AND s.user_id=$2 AND s.id=$3 AND r.digest=$4 AND s.status='active'
                AND s.site_handler->>'kind'='zip' AND s.site_handler->>'digest'=r.digest AND $5<=octet_length(r.archive)",
             [agent_id.into(), owner.into(), site.into(), digest.into(), ((offset + 1) as i32).into()]
@@ -268,6 +258,7 @@ async fn build_in_view(
     require_session(tx, agent_id, session_id).await?;
     let (agent, owner_id) = authorize(tx, agent_id).await?;
     let mut sites = visible_sites(tx, &agent, owner_id).await?;
+    if agent.site_scope == "all" && !supports_panel_listeners { sites.retain(|site| site.ingress_port.is_none()); }
     if !supports_site_archives { sites.retain(|site| site.site_handler.as_ref().and_then(|v| v["kind"].as_str()) != Some("zip")); }
     if !supports_site_handlers { sites.retain(|site| site.site_handler.is_none()); }
     let mut config = assemble_managed_config(tx, &sites).await?;
@@ -359,9 +350,9 @@ pub(crate) async fn check_agent_ingress(
             BuildError::Storage(db) => crate::api::error::ApiError::from(db),
             _ => unavailable("agent authorization is unavailable"),
         })?;
-    if key_owner != owner || agent.site_scope != "selected" {
+    if key_owner != owner || !matches!(agent.site_scope.as_str(), "selected" | "all") {
         return Err(unavailable(
-            "agent must have explicit site scope and the same owner",
+            "node must have a valid site scope and the same owner",
         ));
     }
     let session = current_session(tx, agent_id)
@@ -393,6 +384,7 @@ pub(crate) async fn check_agent_ingress(
 
 #[derive(serde::Serialize)]
 pub(crate) struct IngressAgentOption {
+    automatic: bool,
     supports_site_handlers: bool,
     supports_site_archives: bool,
     static_directories: std::collections::HashMap<String, String>,
@@ -452,6 +444,7 @@ pub(crate) async fn ingress_agent_options(
     db: &impl ConnectionTrait,
     registry: &super::AgentRegistry,
     owner: Uuid,
+    site_id: Option<Uuid>,
 ) -> Result<Vec<IngressAgentOption>, DbErr> {
     let mut options = Vec::new();
     for id in registry.managed_stream_ids().await {
@@ -483,9 +476,10 @@ pub(crate) async fn ingress_agent_options(
         }
         match authorize(db, id).await {
             Ok((agent, key_owner))
-                if key_owner == owner && agent.site_scope == "selected" =>
+                if key_owner == owner && (agent.site_scope == "selected" || (agent.site_scope == "all" && (agent.site_id.is_none() || agent.site_id == site_id))) =>
             {
                 options.push(IngressAgentOption {
+                    automatic: agent.site_scope == "all",
                     supports_site_handlers: inventory.supports_site_handlers,
                     supports_site_archives: inventory.supports_site_archives,
                     static_directories: inventory.static_directories,
@@ -598,6 +592,12 @@ pub(crate) async fn site_deployment(
     Ok(result)
 }
 
+async fn effective_agents(tx: &impl ConnectionTrait, site: Uuid) -> Result<Vec<Uuid>, DbErr> {
+    tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1 ORDER BY agent_id",
+        [site.into()])).await?.into_iter().map(|row| row.try_get("", "agent_id")).collect()
+}
+
 pub(crate) async fn check_site_ingress(
     tx: &DatabaseTransaction,
     agents: &super::AgentRegistry,
@@ -606,13 +606,12 @@ pub(crate) async fn check_site_ingress(
     if site.ingress_port.is_none() {
         return Ok(());
     }
-    let assignments = agent_sites::Entity::find()
-        .filter(agent_sites::Column::SiteId.eq(site.id)).all(tx).await?;
+    let assignments = effective_agents(tx, site.id).await?;
     if assignments.is_empty() {
-        return Err(unavailable("active custom ingress requires an explicitly assigned agent"));
+        return Err(unavailable("active custom ingress requires a node serving this site"));
     }
     for assignment in assignments {
-        check_agent_site(tx, agents, assignment.agent_id, site).await?;
+        check_agent_site(tx, agents, assignment, site).await?;
     }
     Ok(())
 }
@@ -626,17 +625,14 @@ pub(crate) async fn check_assigned_ingress(
     protocol: &str,
     active: bool,
 ) -> Result<(), crate::api::error::ApiError> {
-    let assignments = agent_sites::Entity::find()
-        .filter(agent_sites::Column::SiteId.eq(site_id))
-        .all(tx)
-        .await?;
+    let assignments = effective_agents(tx, site_id).await?;
     if active && assignments.is_empty() {
         return Err(unavailable(
-            "active custom ingress requires an explicitly assigned agent",
+            "active custom ingress requires a node serving this site",
         ));
     }
     for row in assignments {
-        check_agent_ingress(tx, agents, row.agent_id, owner, port, protocol)
+        check_agent_ingress(tx, agents, row, owner, port, protocol)
             .await?;
     }
     Ok(())
@@ -647,43 +643,14 @@ async fn visible_sites(
     row: &agent::Model,
     owner_id: Uuid,
 ) -> Result<Vec<site::Model>, BuildError> {
-    let query = site::Entity::find().filter(site::Column::UserId.eq(owner_id));
-    let selected = row.site_scope == "selected";
-    let query = match row.site_scope.as_str() {
-        "selected" => {
-            let ids: Vec<_> = agent_sites::Entity::find()
-                .filter(agent_sites::Column::AgentId.eq(row.id))
-                .all(tx)
-                .await?
-                .into_iter()
-                .map(|assignment| assignment.site_id)
-                .collect();
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            query.filter(site::Column::Id.is_in(ids))
-        },
-        "all" => {
-            let query = query.filter(site::Column::IngressPort.is_null());
-            if let Some(id) = row.site_id {
-                query.filter(site::Column::Id.eq(id))
-            } else {
-                query
-            }
-        },
-        _ => return Err(BuildError::Forbidden),
-    };
-    let mut sites = query
+    let mut sites = super::agent_site_query(row)
+        .filter(site::Column::UserId.eq(owner_id))
         .order_by_asc(site::Column::Domain)
         .order_by_asc(site::Column::IngressPort)
         .order_by_asc(site::Column::Id)
         .all(tx)
         .await?;
-    if selected {
-        sites.retain(|row| {
-            row.ingress_port.is_none() || row.status == site_status::ACTIVE
-        });
-    }
+    sites.retain(|row| row.ingress_port.is_none() || row.status == site_status::ACTIVE);
     Ok(sites)
 }
 
@@ -989,13 +956,13 @@ pub(super) async fn check_postgres(
         }],
     };
     assert!(
-        ingress_agent_options(&tx, &registry, custom.user_id)
+        ingress_agent_options(&tx, &registry, custom.user_id, Some(custom.id))
             .await
             .unwrap()
             .is_empty()
     );
     registry.record_ingress(id, stream, Some(&bound)).await;
-    assert!(ingress_agent_options(&tx, &registry, custom.user_id).await.unwrap().is_empty());
+    assert!(ingress_agent_options(&tx, &registry, custom.user_id, Some(custom.id)).await.unwrap().is_empty());
     assert!(check_site_ingress(&tx, &registry, custom).await.is_err());
     bound.dynamic_bind = true;
     bound.panel = Some(pingwaf_proto::PanelListenerReport {
@@ -1008,7 +975,7 @@ pub(super) async fn check_postgres(
         }],
     });
     registry.record_ingress(id, stream, Some(&bound)).await;
-    let options = ingress_agent_options(&tx, &registry, custom.user_id)
+    let options = ingress_agent_options(&tx, &registry, custom.user_id, Some(custom.id))
         .await
         .unwrap();
     assert_eq!(options.len(), 1);
@@ -1017,7 +984,7 @@ pub(super) async fn check_postgres(
     assert!(options[0].unavailable_ports.contains(&9443));
     assert!(check_agent_ingress(&tx, &registry, id, custom.user_id, 9443, "https").await.is_err());
     assert!(
-        ingress_agent_options(&tx, &registry, Uuid::new_v4())
+        ingress_agent_options(&tx, &registry, Uuid::new_v4(), None)
             .await
             .unwrap()
             .is_empty()
@@ -1094,7 +1061,7 @@ pub(super) async fn check_postgres(
         .await;
     registry.record_ingress(id, replacement, Some(&bound)).await;
     assert!(
-        ingress_agent_options(&tx, &registry, custom.user_id)
+        ingress_agent_options(&tx, &registry, custom.user_id, Some(custom.id))
             .await
             .unwrap()
             .is_empty()

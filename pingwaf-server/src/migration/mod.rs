@@ -137,6 +137,7 @@ mod m20240101_000117_listener_tls;
 mod m20240101_000118_panel_listeners;
 mod m20240101_000119_tunnel_listener_error;
 mod m20240101_000120_syslog;
+mod m20240101_000121_all_site_listeners;
 #[cfg(test)]
 mod site_ingress_tests;
 
@@ -284,6 +285,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000118_panel_listeners::Migration),
             Box::new(m20240101_000119_tunnel_listener_error::Migration),
             Box::new(m20240101_000120_syslog::Migration),
+            Box::new(m20240101_000121_all_site_listeners::Migration),
         ]
     }
 }

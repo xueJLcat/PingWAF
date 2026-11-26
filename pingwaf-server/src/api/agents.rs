@@ -346,8 +346,8 @@ async fn root_report(state: &AppState, id: Uuid, current: &AuthUser) -> Result<p
 async fn directory_users(state: &AppState, id: Uuid) -> Result<std::collections::BTreeMap<String, Vec<String>>, ApiError> {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
     let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT s.site_handler->>'directory_id' AS directory_id, s.domain
-         FROM sites s JOIN agent_sites a ON a.site_id=s.id
+        "SELECT DISTINCT s.site_handler->>'directory_id' AS directory_id, s.domain
+         FROM sites s JOIN panel_site_listeners a ON a.site_id=s.id
          WHERE a.agent_id=$1 AND s.site_handler->>'kind'='static' ORDER BY s.domain", [id.into()])).await?;
     let mut users = std::collections::BTreeMap::<String, Vec<String>>::new();
     for row in rows { users.entry(row.try_get("", "directory_id")?).or_default().push(row.try_get("", "domain")?); }
@@ -657,20 +657,12 @@ async fn list(
         );
     }
     if let Some(id) = site_filter {
-        let assigned: Vec<Uuid> = agent_sites::Entity::find()
-            .filter(agent_sites::Column::SiteId.eq(id))
-            .all(&state.db)
-            .await?
-            .into_iter()
-            .map(|row| row.agent_id)
-            .collect();
-        let mut site_condition =
-            Condition::any().add(agent::Column::SiteId.eq(id));
-        if !assigned.is_empty() {
-            site_condition =
-                site_condition.add(agent::Column::Id.is_in(assigned));
-        }
-        condition = condition.add(site_condition);
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1", [id.into()])).await?;
+        let assigned = rows.into_iter().map(|row| row.try_get::<Uuid>("", "agent_id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        condition = condition.add(agent::Column::Id.is_in(assigned));
     }
     if let Some(status) = non_empty(&query.status) {
         if !agent_status::is_valid(&status) {
@@ -840,6 +832,14 @@ async fn update_sites(
             }
             .insert(&txn)
             .await?;
+        }
+    }
+    if scope == "all" {
+        for site in crate::grpc::agent_site_query(&updated)
+            .filter(site::Column::IngressPort.is_not_null())
+            .filter(site::Column::Status.eq(crate::models::site_status::ACTIVE))
+            .all(&txn).await? {
+            crate::grpc::check_agent_site(&txn, &state.agents, id, &site).await?;
         }
     }
     txn.commit().await?;
