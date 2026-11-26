@@ -615,7 +615,11 @@ Read the candidate and approved representation as Base64 bytes inside JSON, thei
 
 ### POST /sites/{id}/integrity/{rule}/approve
 
-Submit the previewed `digest`, `content_type` and `mode` (`alert` or `trusted_copy`). Approval checks both values and the stored bytes under a row lock. A stale preview returns 409.
+Submit the previewed `digest`, `content_type` and `mode` (`alert` or `trusted_copy`). Mode is optional; omission preserves the saved mode. Repeating approval for the same bytes and media type preserves the baseline version and approval metadata. Approval checks both values and the stored bytes under a row lock. A stale preview returns 409.
+
+### PUT /sites/{id}/integrity/{rule}/mode
+
+A site writer submits `mode`, `expected_mode` and the approved `expected_version`. Returns 204. Requires an approved baseline; a conflicting change returns 409. The candidate and baseline contents remain independent of this setting.
 
 ### DELETE /sites/{id}/integrity/{rule}
 

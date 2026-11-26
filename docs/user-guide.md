@@ -1,5 +1,9 @@
 # PingWAF User Guide
 
+## Protecting a public page against tampering
+
+Under the site's protection settings, register the exact public path, request it without a session, then refresh the candidate. Review its content, media type and SHA-256 before approving a baseline. Once approved, **Save handling mode only** (仅保存处置模式) switches between alerting and serving the trusted copy, even when the latest candidate differs. Check the node's deployment receipt and the public response after changing the mode. Approve a changed candidate only after verifying that the origin change was intended.
+
 ## Getting Started
 
 ### First Login

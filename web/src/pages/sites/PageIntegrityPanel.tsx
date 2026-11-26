@@ -9,7 +9,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 type Rule = { id: string; path: string; mode: string; active_version: number | null; candidate_digest: string | null; dynamic_stage: 'off' | 'test' | 'live' }
 type Preview = {
   path: string; mode: string; candidate_digest: string | null; candidate_type: string | null
-  dynamic_stage: string; dynamic_region: string; tested_digest: string;
+  active_version: number | null; dynamic_stage: string; dynamic_region: string; tested_digest: string;
   candidate_base64: string | null; approved_base64: string | null; approved_digest: string | null
   approved_type: string | null; approved_at: string | null; approved_by: string | null
   events: { category: string; detail: string; observations: number; last_seen: string }[]
@@ -28,25 +28,33 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
   const base = `/sites/${siteId}/integrity`
   const [path, setPath] = useState('')
   const [selected, select] = useState('')
-  const [mode, setMode] = useState('alert')
+  const [modeDraft, setMode] = useState<string | null>(null)
   const [confirmRemoval, setConfirmRemoval] = useState(false)
   const list = useQuery({ queryKey: [base], queryFn: () => apiClient.get<Rule[]>(base) })
   const detail = useQuery({ queryKey: [base, selected], enabled: Boolean(selected),
     queryFn: () => apiClient.get<Preview>(`${base}/${selected}`), staleTime: Infinity, refetchOnWindowFocus: false })
   const preview = detail.data
+  const mode = modeDraft ?? preview?.mode ?? 'alert'
+  const alreadyApproved = !!preview?.active_version && preview.approved_digest === preview.candidate_digest &&
+    preview.approved_type === preview.candidate_type && preview.approved_base64 === preview.candidate_base64
   const mutation = useMutation({
-    mutationFn: async (action: 'add' | 'approve' | 'remove') => {
+    mutationFn: async (action: 'add' | 'approve' | 'remove' | 'mode') => {
       if (action === 'add') {
         const id = await apiClient.post<string>(base, { path })
-        select(id); setMode('alert'); setPath(''); setConfirmRemoval(false)
+        select(id); setMode(null); setPath(''); setConfirmRemoval(false)
       } else if (action === 'approve' && preview?.candidate_digest) {
-        await apiClient.post(`${base}/${selected}/approve`, { digest: preview.candidate_digest, content_type: preview.candidate_type, mode })
+        await apiClient.post(`${base}/${selected}/approve`, { digest: preview.candidate_digest, content_type: preview.candidate_type, ...(preview.active_version ? {} : { mode }) })
+      } else if (action === 'mode' && preview?.active_version) {
+        await apiClient.put(`${base}/${selected}/mode`, { mode, expected_mode: preview.mode, expected_version: preview.active_version })
       } else if (action === 'remove') {
         await apiClient.delete(`${base}/${selected}`)
         select(''); setConfirmRemoval(false)
       }
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: [base] }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: [base] })
+      setMode(null)
+    },
   })
   const error = mutation.error || detail.error || list.error
   return <section role="tabpanel" aria-label="网页防篡改" className="space-y-4">
@@ -59,25 +67,29 @@ export function PageIntegrityPanel({ siteId, canWrite }: { siteId: string; canWr
     {selected && detail.isLoading && <p role="status">正在读取候选正文与审批记录…</p>}
     {list.data?.length===0 && <p className="text-sm text-fg-subtle">尚未登记公开页面。登记路径后，访问该页以获取可预览的正文。</p>}
     <ul className="divide-y divide-border">{list.data?.map(rule => <li className="flex flex-wrap items-center justify-between gap-2" key={rule.id}>
-      <button type="button" disabled={mutation.isPending} aria-pressed={selected === rule.id} className="min-w-0 break-all rounded-md px-2 py-2 text-left text-fg-brand-strong underline aria-pressed:bg-brand-soft" onClick={() => { select(rule.id); setMode(rule.mode); setConfirmRemoval(false) }}>
+      <button type="button" disabled={mutation.isPending} aria-pressed={selected === rule.id} className="min-w-0 break-all rounded-md px-2 py-2 text-left text-fg-brand-strong underline aria-pressed:bg-brand-soft" onClick={() => { select(rule.id); setMode(null); setConfirmRemoval(false) }}>
         {rule.path} · {rule.active_version ? `版本 ${rule.active_version}` : '等待审批'}
       </button>
       <span className="text-xs text-fg-subtle">{rule.active_version ? (rule.mode==='trusted_copy'?'可信副本':'仅告警') : rule.candidate_digest?'候选可预览':'等待公开访问'} · 动态防护{{off:'关闭',test:'测试中',live:'已发布'}[rule.dynamic_stage]}</span>
     </li>)}</ul>
+    {selected && <Button loading={detail.isFetching} disabled={mutation.isPending} onClick={() => void client.invalidateQueries({queryKey:[base]})}>刷新候选与事件</Button>}
     {preview && <div className="space-y-3">
       <h3 className="break-all font-medium">{preview.path}</h3>
-      <Button loading={detail.isFetching} onClick={() => void detail.refetch()}>刷新候选与事件</Button>
+
       <div className="grid gap-3 md:grid-cols-2">
         {([['已批准正文', preview.approved_base64, preview.approved_type], ['当前候选正文', preview.candidate_base64, preview.candidate_type]] as const).map(([title, body, media]) =>
           <div key={title} className="min-w-0 rounded-lg border border-border"><h4 className="border-b border-border px-3 py-2 font-medium">{title}</h4><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words p-3 text-xs">{source(body, media)}</pre></div>)}
       </div>
+      {preview.approved_digest && <p className="break-all">可信基线 SHA-256 {preview.approved_digest}</p>}
       {preview.approved_at && <p>审批人 {preview.approved_by} · {new Date(preview.approved_at).toLocaleString()}</p>}
-      {preview.candidate_digest && <p className="break-all">{preview.candidate_type} · SHA-256 {preview.candidate_digest}</p>}
+      {preview.candidate_digest && <p className="break-all">候选 {preview.candidate_type} · SHA-256 {preview.candidate_digest}</p>}
+      {preview.active_version && <p>已批准版本 {preview.active_version} · 已保存处置：{preview.mode === 'trusted_copy' ? '返回可信副本' : '仅告警'}。保存模式会保留该基线；批准不同的候选会替换基线。</p>}
       {canWrite && <div className="flex flex-wrap items-end gap-2">
         <Select label="发现变化时" disabled={mutation.isPending} value={mode} onChange={e => setMode(e.target.value)}>
           <option value="alert">仅告警</option><option value="trusted_copy">告警并返回可信副本</option>
         </Select>
-        <Button variant="primary" disabled={!preview.candidate_digest || mutation.isPending || detail.isFetching} onClick={() => mutation.mutate('approve')}>批准当前候选</Button>
+        {preview.active_version && <Button disabled={mutation.isPending || detail.isFetching || mode === preview.mode} onClick={() => mutation.mutate('mode')}>仅保存处置模式</Button>}
+        <Button variant="primary" disabled={alreadyApproved || !preview.candidate_digest || mutation.isPending || detail.isFetching} onClick={() => mutation.mutate('approve')}>批准当前候选</Button>
         <Button disabled={mutation.isPending} onClick={() => setConfirmRemoval(true)}>撤销保护</Button>
         <ConfirmDialog open={confirmRemoval} title="撤销保护" description={preview.path} confirmLabel="确认撤销并删除已存版本"
           loading={mutation.isPending} onClose={() => setConfirmRemoval(false)} onConfirm={() => mutation.mutate('remove', {onError: () => setConfirmRemoval(false)})} />

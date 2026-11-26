@@ -3,7 +3,7 @@ use crate::auth::AuthUser;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::Deserialize;
@@ -14,6 +14,7 @@ pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites/{id}/integrity", get(list).post(create))
         .route("/sites/{id}/integrity/{rule}", get(preview).delete(revoke))
+        .route("/sites/{id}/integrity/{rule}/mode", put(update_mode))
         .route("/sites/{id}/integrity/{rule}/approve", post(approve))
         .route("/sites/{id}/integrity/{rule}/dynamic", post(dynamic))
         .route("/sites/{id}/dynamic/disable", post(disable_dynamic))
@@ -28,7 +29,52 @@ struct NewRule {
 struct Approval {
     digest: String,
     content_type: String,
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModeChange {
     mode: String,
+    expected_mode: String,
+    expected_version: i64,
+}
+
+fn validate_mode(mode: &str) -> Result<(), ApiError> {
+    if matches!(mode, "alert" | "trusted_copy") {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest("invalid mode".into()))
+    }
+}
+
+async fn update_mode(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((id, rule)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ModeChange>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    common::require_write(&user)?;
+    validate_mode(&body.mode)?;
+    let tx = s.db.begin().await?;
+    common::load_site_write(&tx, id, &user).await?;
+    let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT active_version,mode FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",
+        [id.into(), rule.into()])).await?.ok_or_else(|| ApiError::NotFound("rule not found".into()))?;
+    let current: String = row.try_get("", "mode")?;
+    if row.try_get::<Option<i64>>("", "active_version")? != Some(body.expected_version)
+        || (current != body.expected_mode && current != body.mode)
+    {
+        return Err(ApiError::Conflict("baseline or mode changed; refresh before saving".into()));
+    }
+    if current != body.mode {
+        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "UPDATE page_integrity_rules SET mode=$2 WHERE id=$1", [rule.into(), body.mode.into()])).await?;
+        tx.commit().await?;
+        crate::grpc::notify_config_changed(&s, id, Some(&user.email)).await;
+    } else {
+        tx.commit().await?;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn list(
@@ -138,14 +184,14 @@ async fn approve(
     Json(body): Json<Approval>,
 ) -> Result<Json<i64>, ApiError> {
     common::require_write(&user)?;
-    if !matches!(body.mode.as_str(), "alert" | "trusted_copy") {
-        return Err(ApiError::BadRequest("invalid mode".into()));
+    if let Some(mode) = &body.mode {
+        validate_mode(mode)?;
     }
     let tx = s.db.begin().await?;
     common::load_site_write(&tx, id, &user).await?;
     let row=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT candidate_body,candidate_digest,candidate_type,coalesce(active_version,0)+1 AS version FROM page_integrity_rules
-         WHERE site_id=$1 AND id=$2 FOR UPDATE",[id.into(),rule.into()])).await?.ok_or_else(||ApiError::NotFound("rule not found".into()))?;
+        "SELECT candidate_body,candidate_digest,candidate_type,active_version,mode
+         FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",[id.into(),rule.into()])).await?.ok_or_else(||ApiError::NotFound("rule not found".into()))?;
     let bytes: Option<Vec<u8>> = row.try_get("", "candidate_body")?;
     let bytes = bytes
         .ok_or_else(|| ApiError::Conflict("awaiting public resource".into()))?;
@@ -159,14 +205,32 @@ async fn approve(
             "candidate changed; preview again".into(),
         ));
     }
-    let version: i64 = row.try_get("", "version")?;
-    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    let current_version: Option<i64> = row.try_get("", "active_version")?;
+    let current_mode: String = row.try_get("", "mode")?;
+    let mode = body.mode.unwrap_or_else(|| current_mode.clone());
+    // Read the version after acquiring the rule lock so a concurrent approval is visible.
+    let same = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT 1 FROM page_integrity_rules r JOIN page_integrity_versions v ON (v.rule_id,v.version)=(r.id,r.active_version)
+         WHERE r.id=$1 AND v.digest=r.candidate_digest AND v.content_type=r.candidate_type AND v.body=r.candidate_body",
+        [rule.into()])).await?.is_some();
+    let version = if same {
+        let version = current_version.ok_or_else(|| ApiError::Conflict("baseline unavailable".into()))?;
+        if mode == current_mode {
+            tx.commit().await?;
+            return Ok(Json(version));
+        }
+        version
+    } else {
+        let version = current_version.unwrap_or(0) + 1;
+        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO page_integrity_versions(rule_id,version,digest,content_type,body,approved_by) VALUES($1,$2,$3,$4,$5,$6)",
         [rule.into(),version.into(),digest.into(),content_type.into(),bytes.into(),user.id.into()])).await?;
+        version
+    };
     tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE page_integrity_rules SET active_version=$2,mode=$3 WHERE id=$1",
-        [rule.into(), version.into(), body.mode.into()],
+        [rule.into(), version.into(), mode.into()],
     ))
     .await?;
     tx.commit().await?;
@@ -237,6 +301,10 @@ mod tests {
         .await
         .unwrap()
         .0;
+        let mode_input = || Json(ModeChange { mode: "trusted_copy".into(), expected_mode: "alert".into(), expected_version: 1 });
+        assert!(matches!(update_mode(state.clone(), admin.clone(), Path((site,rule)), mode_input()).await, Err(ApiError::Conflict(_))));
+        let viewer = AuthUser::new(Uuid::new_v4(), "viewer@example.test", "viewer");
+        assert!(update_mode(state.clone(), viewer, Path((site,rule)), mode_input()).await.is_err());
         let body = br#"<p id="summary">approved</p><p id="footer">about</p>"#.to_vec();
         let digest = pingwaf_content::protection::body_digest(&body);
         db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
@@ -246,7 +314,7 @@ mod tests {
             Json(Approval {
                 digest,
                 content_type: "text/html".into(),
-                mode: "trusted_copy".into(),
+                mode: Some("trusted_copy".into()),
             })
         };
         let stage = |user, stage: &str, region: &str| dynamic(
@@ -272,18 +340,28 @@ mod tests {
             .await,
             Err(ApiError::Conflict(_))
         ));
-        assert_eq!(
-            approve(
-                state.clone(),
-                admin.clone(),
-                Path((site, rule)),
-                choose(digest.clone())
-            )
-            .await
-            .unwrap()
-            .0,
-            1
+        let submit = || approve(state.clone(), admin.clone(), Path((site, rule)), choose(digest.clone()));
+        let (first, second) = tokio::join!(submit(), submit());
+        assert_eq!(first.unwrap().0, 1);
+        assert_eq!(second.unwrap().0, 1);
+        let change = |version, before: &str, mode: &str| update_mode(
+            state.clone(), admin.clone(), Path((site,rule)), Json(ModeChange {
+                expected_version: version, expected_mode: before.into(), mode: mode.into(),
+            }),
         );
+        assert_eq!(approve(state.clone(),admin.clone(),Path((site,rule)),choose(digest.clone())).await.unwrap().0, 1);
+        let altered = b"<p>unexpected</p>".to_vec();
+        let altered_digest = pingwaf_content::protection::body_digest(&altered);
+        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "UPDATE page_integrity_rules SET candidate_digest=$2,candidate_body=$3 WHERE id=$1",
+            [rule.into(),altered_digest.clone().into(),altered.into()])).await.unwrap();
+        assert!(matches!(change(2,"trusted_copy","alert").await, Err(ApiError::Conflict(_))));
+        change(1,"trusted_copy","alert").await.unwrap();
+        change(1,"alert","trusted_copy").await.unwrap();
+        let view = preview(state.clone(), admin.clone(), Path((site,rule))).await.unwrap().0;
+        assert_eq!(view["active_version"], 1);
+        assert_eq!(view["mode"], "trusted_copy");
+        assert_eq!(view["candidate_digest"], altered_digest);
         let outsider =
             AuthUser::new(Uuid::new_v4(), "other@example.test", "viewer");
         assert!(matches!(
