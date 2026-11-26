@@ -1505,7 +1505,7 @@ struct IngressOptions {
 async fn deployment_summaries(State(state): State<AppState>, current: AuthUser, Json(ids): Json<Vec<Uuid>>)
     -> Result<Json<HashMap<Uuid, crate::grpc::EntrySummary>>, ApiError> {
     if ids.len() > 50 { return Err(ApiError::BadRequest("request at most 50 site summaries".into())); }
-    let tx = state.db.begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), Some(sea_orm::AccessMode::ReadOnly)).await?;
+    let tx = state.db.begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None).await?;
     let mut query = site::Entity::find().filter(site::Column::Id.is_in(ids));
     if !current.is_admin() { query = query.filter(site::Column::UserId.eq(current.id)); }
     let rows = query.all(&tx).await?;
