@@ -25,12 +25,14 @@ interface EntryObservation {
   port: number; protocol: string; state: string; failure_code: string | null
   observed_at: string | null; applied_revision: string | null; bound: boolean | null
 }
-interface SiteDeployment {
+export interface SiteDeployment {
   summary: EntrySummary
   desired_revision: string | null
   nodes: {
     id: string
     name: string
+    connected: boolean
+    manual_sync: { status: 'pending' | 'confirmed' | 'failed'; requested_at: string } | null
     scope: string
     entries: EntryObservation[]
     bound: boolean | null

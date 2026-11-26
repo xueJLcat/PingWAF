@@ -527,6 +527,8 @@ struct EntryObservation {
 
 #[derive(serde::Serialize)]
 struct DeploymentNode {
+    connected: bool,
+    manual_sync: Option<DeploymentSync>,
     scope: String,
     entries: Vec<EntryObservation>,
     failure_code: Option<String>,
@@ -536,6 +538,12 @@ struct DeploymentNode {
     observed_at: Option<chrono::DateTime<Utc>>,
     applied_revision: Option<String>,
     state: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct DeploymentSync {
+    status: &'static str,
+    requested_at: chrono::DateTime<Utc>,
 }
 
 pub(crate) async fn site_deployment(
@@ -616,7 +624,9 @@ async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::Ag
         let primary = &entries[0];
         let state = if entries.iter().all(|e| e.state == primary.state) { primary.state }
             else if entries.iter().any(|e| e.state == "failed") { "failed" } else { "pending" };
-        result.nodes.push(DeploymentNode { id, name: agent.display_name.unwrap_or(agent.hostname), scope: agent.site_scope,
+        let (connected, receipt) = registry.deployment_connection(id).await;
+        let manual_sync = receipt.map(|(status, requested_at)| DeploymentSync { status, requested_at });
+        result.nodes.push(DeploymentNode { connected, manual_sync, id, name: agent.display_name.unwrap_or(agent.hostname), scope: agent.site_scope,
             failure_code: entries.iter().find_map(|e| e.failure_code.clone()), observed_at: primary.observed_at,
             applied_revision: primary.applied_revision.clone().filter(|_| state == "applied"), bound: primary.bound, state, entries });
     }

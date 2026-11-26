@@ -702,6 +702,16 @@ impl AgentRegistry {
         }
     }
 
+    pub(crate) async fn deployment_connection(&self, id: Uuid) -> (bool, Option<(&'static str, DateTime<Utc>)>) {
+        let inner = self.inner.read().await;
+        match inner.connected.get(&id) {
+            Some(connection) => (true, connection.manual_sync.as_ref().map(|sync| {
+                (sync.receipt.status, sync.receipt.requested_at)
+            })),
+            None => (false, None),
+        }
+    }
+
     pub(crate) async fn manual_receipt(&self, id: Uuid) -> Option<ManualSyncReceipt> {
         self.inner.read().await.connected.get(&id)?.manual_sync.as_ref().map(|s| s.receipt.clone())
     }

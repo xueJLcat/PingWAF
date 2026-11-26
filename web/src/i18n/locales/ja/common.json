@@ -710,6 +710,15 @@
     },
     "siteDetail": {
       "deployment": {
+        "push": "サイト設定を配信",
+        "pushHint": "このノードに割り当てられた全サイトの設定を再配信します。",
+        "lastPush": "直近のノード配信",
+        "entry": "入口",
+        "listener": "リスナー",
+        "appliedRevision": "適用バージョン",
+        "observed": "最終観測",
+        "revisionDetails": "バージョン詳細",
+        "noReceipt": "応答なし",
         "enabled": "有効",
         "unassigned": "未割り当て",
         "count": "入口の反映 {{applied}}/{{total}}",

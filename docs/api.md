@@ -686,6 +686,8 @@ Accepts up to 50 site UUIDs as a JSON array. Returns summaries keyed by visible 
 
 ### GET /sites/{site_id}/deployment
 
+Each node includes its live stream connection and latest manual synchronization status and request time. The site detail action replays the node’s full assigned snapshot through the existing reload command. Per-entry results remain independent of that command receipt.
+
 Returns the desired site revision and the current deployment state of each eligible assigned node for each configured ingress. Uses the same site visibility as site detail. The revision is null for a paused site. A missing or stale observation gives no assurance of application. The control plane compares the authenticated session, authority epoch, site ID, revision and listener. `bound` reports the local socket status. Each node includes its name, observation time and applied revision when available. A current, verified receipt for the desired revision yields `received` while the node prepares its proxy view. A live, published view on a bound listener yields `applied`. When another listener changes, the edge can continue serving a listener whose complete routing table and site policies are identical in both snapshots. Other states are `pending`, `unknown`, `revoking` and `withdrawn`. Default sites include HTTP 80 and HTTPS 443. The response includes a summary and each node’s assignment scope and entries with protocol, port, observed time, revision, state and failure code. A partial bind failure is reported as bind_failed.
 
 ### GET /sites/{site_id}

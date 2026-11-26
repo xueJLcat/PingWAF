@@ -27,6 +27,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
+import { SiteDeploymentPanel } from '@/components/SiteDeploymentPanel'
 import { AgentStatusBanner } from '@/components/AgentStatusBanner'
 import { sitesApi, siteKeys } from '@/api/sites'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
@@ -63,12 +64,6 @@ export function SiteDetailPage() {
   // drop edits (the Basic page's timeout/trust cards included).
   const unsavedDialog = useUnsavedGuard(useAnyUnsaved())
   const site = detail.data?.site
-  const deployment = useQuery({
-    queryKey: [...siteKeys.all, siteId, 'deployment'],
-    queryFn: () => sitesApi.deployment(siteId as string),
-    enabled: Boolean(siteId && site),
-    refetchInterval: 20_000,
-  })
   const scheme = site?.ingress_protocol ?? (detail.data?.ssl?.has_certificate ? 'https' : 'http')
   const visitTitle = scheme === 'https'
     ? t('pages.siteDetail.visitSite')
@@ -306,31 +301,7 @@ export function SiteDetailPage() {
         </div>
       )}
 
-      {/* Z5: offline/degraded agents mean config changes may lag. */}
-      {site && <section className="mb-4 space-y-2 rounded-md border border-border px-3 py-2 text-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-medium">{t('pages.siteDetail.deployment.title')}</h2>
-          <Button size="sm" loading={deployment.isFetching} onClick={() => void deployment.refetch()}>{t('common.refresh')}</Button>
-        </div>
-        {deployment.isError ? <ErrorState variant="inline" error={deployment.error} />
-          : deployment.isPending ? <p role="status">{t('common.loading')}</p>
-          : <>
-            {deployment.data.desired_revision && <p>{t('pages.siteDetail.deployment.desired')} <code title={deployment.data.desired_revision}>{deployment.data.desired_revision.slice(0, 12)}</code></p>}
-            {deployment.data.nodes.length === 0 && <p>{t('pages.siteDetail.deployment.empty')}</p>}
-            {deployment.data.summary && deployment.data.nodes.length > 0 && <p>{t('pages.siteDetail.deployment.count', { ...deployment.data.summary })}</p>}
-            {deployment.data.nodes.map(node => <div key={node.id} className="space-y-2 border-t border-line py-2">
-              <strong className="break-all">{node.name}</strong> · {t(node.scope === 'all' ? 'pages.agents.siteScopeAll' : 'pages.agents.siteScopeSelected')}
-              {node.entries?.map(entry => <div key={entry.protocol + entry.port} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <code>{entry.protocol.toUpperCase()} {entry.port}</code>
-                <Badge tone={entry.state === 'applied' ? 'success' : entry.state === 'failed' ? 'danger' : 'neutral'}>{t(`pages.siteDetail.deployment.${entry.state}`)}</Badge>
-                {entry.failure_code && <span>{t(`pages.siteDetail.deployment.${entry.failure_code}`)}</span>}
-                <span>{t(entry.bound === null ? 'pages.siteDetail.deployment.bindUnknown' : entry.bound ? 'pages.siteDetail.deployment.bound' : 'pages.siteDetail.deployment.unbound')}</span>
-                {entry.applied_revision && <code title={entry.applied_revision}>{entry.applied_revision.slice(0, 12)}</code>}
-                {entry.observed_at && <time dateTime={entry.observed_at}>{new Date(entry.observed_at).toLocaleString()}</time>}
-              </div>)}
-            </div>)}
-          </>}
-      </section>}
+      {site && <SiteDeploymentPanel key={site.id} siteId={site.id} />}
       <AgentStatusBanner siteId={siteId} />
 
       {/* Tab nav — sticky on phones so the nine tabs stay reachable (UX-19). */}

@@ -710,6 +710,15 @@
     },
     "siteDetail": {
       "deployment": {
+        "push": "下发站点配置",
+        "pushHint": "将此节点负责的全部站点配置重新下发。",
+        "lastPush": "最近一次节点下发",
+        "entry": "入口",
+        "listener": "监听",
+        "appliedRevision": "生效版本",
+        "observed": "最后观测",
+        "revisionDetails": "版本详情",
+        "noReceipt": "暂无回执",
         "enabled": "已启用",
         "unassigned": "未分派",
         "count": "入口生效 {{applied}}/{{total}}",

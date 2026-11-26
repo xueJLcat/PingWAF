@@ -710,6 +710,15 @@
     },
     "siteDetail": {
       "deployment": {
+        "push": "Push site configuration",
+        "pushHint": "Resends the assigned configuration for all sites on this node.",
+        "lastPush": "Last node push",
+        "entry": "Entry",
+        "listener": "Listener",
+        "appliedRevision": "Applied revision",
+        "observed": "Last observed",
+        "revisionDetails": "Revision details",
+        "noReceipt": "No receipt yet",
         "enabled": "Enabled",
         "unassigned": "Unassigned",
         "count": "Entries applied {{applied}}/{{total}}",
