@@ -888,7 +888,7 @@ export function AgentsPage() {
               </div>
             )}
 
-            <NodeSiteEntries key={detail.id} id={detail.id} />
+            <NodeSiteEntries key={detail.id} id={detail.id} scope={detail.site_scope} />
 
             {(detail.logs_dropped ?? 0) > 0 && (
               <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg">

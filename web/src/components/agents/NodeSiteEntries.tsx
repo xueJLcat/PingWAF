@@ -10,7 +10,7 @@ import { ErrorState } from '@/components/ErrorState'
 
 const prefix = 'pages.siteDetail.deployment.'
 
-export function NodeSiteEntries({ id }: { id: string }) {
+export function NodeSiteEntries({ id, scope }: { id: string; scope: 'all' | 'selected' }) {
   const { t } = useTranslation()
   const [page, setPage] = useState(1)
   const query = useQuery({
@@ -22,7 +22,10 @@ export function NodeSiteEntries({ id }: { id: string }) {
   const title = t(prefix + 'nodeEntries')
   return <section aria-label={title} className="min-w-0 rounded-lg border border-line">
     <header className="flex items-center justify-between gap-2 px-3 py-2">
-      <h3 className="font-semibold">{title}</h3>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <h3 className="font-semibold">{title}</h3>
+        <Badge size="sm">{t(scope === 'all' ? 'pages.agents.siteScopeAll' : 'pages.agents.siteScopeSelected')}</Badge>
+      </div>
       <Button size="sm" variant="ghost" loading={query.isFetching} aria-label={t('common.refresh') + ' · ' + title}
         onClick={() => void query.refetch()} icon={<ArrowClockwise className="h-4 w-4" />}>{t('common.refresh')}</Button>
     </header>
