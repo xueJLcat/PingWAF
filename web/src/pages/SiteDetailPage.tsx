@@ -66,7 +66,7 @@ export function SiteDetailPage() {
   const deployment = useQuery({
     queryKey: [...siteKeys.all, siteId, 'deployment'],
     queryFn: () => sitesApi.deployment(siteId as string),
-    enabled: Boolean(siteId && site?.ingress_port),
+    enabled: Boolean(siteId && site),
     refetchInterval: 20_000,
   })
   const scheme = site?.ingress_protocol ?? (detail.data?.ssl?.has_certificate ? 'https' : 'http')
@@ -307,7 +307,7 @@ export function SiteDetailPage() {
       )}
 
       {/* Z5: offline/degraded agents mean config changes may lag. */}
-      {Boolean(site?.ingress_port) && <section className="mb-4 space-y-2 rounded-md border border-border px-3 py-2 text-sm">
+      {site && <section className="mb-4 space-y-2 rounded-md border border-border px-3 py-2 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-medium">{t('pages.siteDetail.deployment.title')}</h2>
           <Button size="sm" loading={deployment.isFetching} onClick={() => void deployment.refetch()}>{t('common.refresh')}</Button>
@@ -317,13 +317,17 @@ export function SiteDetailPage() {
           : <>
             {deployment.data.desired_revision && <p>{t('pages.siteDetail.deployment.desired')} <code title={deployment.data.desired_revision}>{deployment.data.desired_revision.slice(0, 12)}</code></p>}
             {deployment.data.nodes.length === 0 && <p>{t('pages.siteDetail.deployment.empty')}</p>}
-            {deployment.data.nodes.map(node => <div key={node.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line py-2">
-              <strong className="break-all">{node.name}</strong>
-              <Badge tone={node.state==='applied' ? 'success' : node.state==='failed' ? 'danger' : 'neutral'}>{t(`pages.siteDetail.deployment.${node.state}`)}</Badge>
-              {node.failure_code && <span>{t(`pages.siteDetail.deployment.${node.failure_code}`)}</span>}
-              <span>{t(node.bound === null ? 'pages.siteDetail.deployment.bindUnknown' : node.bound ? 'pages.siteDetail.deployment.bound' : 'pages.siteDetail.deployment.unbound')}</span>
-              {node.applied_revision && <code title={node.applied_revision}>{node.applied_revision.slice(0, 12)}</code>}
-              {node.observed_at && <time dateTime={node.observed_at}>{new Date(node.observed_at).toLocaleString()}</time>}
+            {deployment.data.summary && deployment.data.nodes.length > 0 && <p>{t('pages.siteDetail.deployment.count', { ...deployment.data.summary })}</p>}
+            {deployment.data.nodes.map(node => <div key={node.id} className="space-y-2 border-t border-line py-2">
+              <strong className="break-all">{node.name}</strong> · {t(node.scope === 'all' ? 'pages.agents.siteScopeAll' : 'pages.agents.siteScopeSelected')}
+              {node.entries?.map(entry => <div key={entry.protocol + entry.port} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <code>{entry.protocol.toUpperCase()} {entry.port}</code>
+                <Badge tone={entry.state === 'applied' ? 'success' : entry.state === 'failed' ? 'danger' : 'neutral'}>{t(`pages.siteDetail.deployment.${entry.state}`)}</Badge>
+                {entry.failure_code && <span>{t(`pages.siteDetail.deployment.${entry.failure_code}`)}</span>}
+                <span>{t(entry.bound === null ? 'pages.siteDetail.deployment.bindUnknown' : entry.bound ? 'pages.siteDetail.deployment.bound' : 'pages.siteDetail.deployment.unbound')}</span>
+                {entry.applied_revision && <code title={entry.applied_revision}>{entry.applied_revision.slice(0, 12)}</code>}
+                {entry.observed_at && <time dateTime={entry.observed_at}>{new Date(entry.observed_at).toLocaleString()}</time>}
+              </div>)}
             </div>)}
           </>}
       </section>}

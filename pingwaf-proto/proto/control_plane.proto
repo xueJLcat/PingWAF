@@ -1314,6 +1314,8 @@ message ManagedApplyReport {
   repeated ManagedSiteApplication received_sites = 5;
   // Sent only after publishing the snapshot and binding all of its listeners.
   string applied_config_hash = 6;
+  // Published per-endpoint results. Older servers retain the aggregate receipt.
+  repeated ManagedSiteApplication endpoint_results = 7;
 }
 
 message ManagedSiteApplication {

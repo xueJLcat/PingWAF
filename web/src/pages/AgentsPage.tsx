@@ -195,6 +195,21 @@ export function AgentsPage() {
     setRenameValue(agent.display_name ?? '')
   }
 
+  const scopeOptions = useQuery({
+    queryKey: ['agent-scope-options', sitesAgent?.id],
+    queryFn: () => agentsApi.scopeOptions(sitesAgent!.id),
+    enabled: Boolean(sitesAgent),
+    staleTime: 0,
+  })
+  const scopePreview = (scopeOptions.data ?? []).flatMap(site => {
+    const before = sitesAgent?.site_scope === 'selected' ? sitesAgent.site_ids.includes(site.id)
+      : !sitesAgent?.site_id || sitesAgent.site_id === site.id
+    const after = siteScope === 'all' || selectedSiteIds.includes(site.id)
+    if (!before && !after) return []
+    const ports = site.ingress_port ? [site.ingress_protocol + ':' + site.ingress_port, ...(site.additional_ingresses ?? [])] : ['http:80', 'https:443']
+    return [{ site, ports, action: after ? before ? 'retain' : 'add' : 'remove' }]
+  })
+
   const openSites = (agent: Agent) => {
     setSitesAgent(agent)
     setSiteScope(agent.site_scope === 'selected' ? 'selected' : 'all')
@@ -1065,6 +1080,7 @@ export function AgentsPage() {
             <Button
               variant="primary"
               loading={saveSites.isPending}
+              disabled={!scopeOptions.data || scopeOptions.isError || scopeOptions.isFetching}
               onClick={() => saveSites.mutate()}
             >
               {t('common.save')}
@@ -1108,6 +1124,17 @@ export function AgentsPage() {
               : t('pages.agents.siteScopeSelectedHint')}
           </p>
 
+          <section aria-label={t('pages.siteDetail.deployment.preview')}>
+            <h3 className="font-medium">{t('pages.siteDetail.deployment.preview')}</h3>
+            {scopeOptions.isError ? <p role="alert">{t('pages.siteDetail.deployment.previewError')} <button onClick={() => void scopeOptions.refetch()}>{t('common.refresh')}</button></p>
+              : scopeOptions.isPending ? <p>{t('common.loading')}</p>
+              : <ul className="max-h-48 overflow-y-auto text-sm">{scopePreview.length === 0 && <li>{t('pages.agents.noSitesAvailable')}</li>}
+                {scopePreview.map(({site, ports, action}) => <li key={site.id} className="border-b border-line py-1 break-words">
+                  <strong>{t('pages.siteDetail.deployment.' + action)}</strong> · {site.domain} · {ports.join(', ')}
+                  {site.status !== 'active' && ' · ' + t('status.' + site.status)}
+                </li>)}</ul>}
+          </section>
+
           {siteScope === 'selected' && (
             <>
               <div className="flex items-center justify-between gap-3">
@@ -1119,7 +1146,7 @@ export function AgentsPage() {
                     size="sm"
                     variant="ghost"
                     onClick={() =>
-                      setSelectedSiteIds((sites ?? []).map((site) => site.id))
+                      setSelectedSiteIds((scopeOptions.data ?? []).map((site) => site.id))
                     }
                   >
                     {t('pages.agents.selectAllSites')}
@@ -1134,12 +1161,12 @@ export function AgentsPage() {
                 </div>
               </div>
               <div className="max-h-64 overflow-y-auto rounded-md border border-line">
-                {(sites ?? []).length === 0 ? (
+                {(scopeOptions.data ?? []).length === 0 ? (
                   <p className="px-3 py-4 text-xs text-fg-subtle">
                     {t('pages.agents.noSitesAvailable')}
                   </p>
                 ) : (
-                  (sites ?? []).map((site) => (
+                  (scopeOptions.data ?? []).map((site) => (
                     <label
                       key={site.id}
                       className="flex cursor-pointer items-center gap-3 border-b border-line px-3 py-2 last:border-b-0 hover:bg-recessed"

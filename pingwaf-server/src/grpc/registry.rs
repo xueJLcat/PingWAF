@@ -94,6 +94,8 @@ pub struct ApplicationObservation {
     pub generation: i64,
     pub sites: Vec<SiteApplication>,
     pub received_sites: Vec<SiteApplication>,
+    #[serde(skip)]
+    pub endpoint_results: Vec<SiteApplication>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -614,9 +616,24 @@ impl AgentRegistry {
                     protocol,
                 });
             }
+            let mut endpoints = Vec::new();
+            let mut unique = std::collections::HashSet::new();
+            if report.endpoint_results.len() > permitted.len().saturating_mul(pingwaf_proto::MAX_INGRESS_LISTENERS) { return None; }
+            for row in &report.endpoint_results {
+                let id = Uuid::parse_str(&row.site_id).ok()?;
+                let ingress = row.ingress?;
+                let protocol = match ingress.protocol() { IngressProtocol::Http => "http", IngressProtocol::Https => "https", _ => return None };
+                let port = u16::try_from(ingress.port).ok().filter(|p| *p > 0)?;
+                if !permitted.contains(&id) || !unique.insert((id, port, protocol)) ||
+                    row.site_revision.len() != 64 || !row.site_revision.bytes().all(|c| c.is_ascii_hexdigit()) ||
+                    !matches!(row.failure_code.as_str(), "" | "pending" | "bind_failed" | "content_download" | "content_validation" | "config_apply" | "tls_config") { return None; }
+                endpoints.push(SiteApplication { site_id: id, port, protocol: protocol.into(), site_revision: row.site_revision.clone(),
+                    failure_code: (!row.failure_code.is_empty()).then(|| row.failure_code.clone()) });
+            }
             Some((
                 Instant::now(),
                 ApplicationObservation {
+                    endpoint_results: endpoints,
                     observed_at: Utc::now(),
                     authority_epoch,
                     generation: report.generation,
@@ -770,9 +787,13 @@ impl AgentRegistry {
                         })
                         .map(|r| r.site_revision.clone())
                 };
+                if let Some(endpoint) = report.endpoint_results.iter().find(|e| e.site_id == site && i32::from(e.port) == port && e.protocol == protocol) {
+                    let error = endpoint.failure_code.clone();
+                    return (report.observed_at, error.is_none().then(|| endpoint.site_revision.clone()), Some(endpoint.site_revision.clone()), error);
+                }
                 (
                     report.observed_at,
-                    revision(&report.sites),
+                    report.sites.iter().find(|r| r.site_id == site).map(|r| r.site_revision.clone()),
                     revision(&report.received_sites),
                     report.received_sites.iter().find(|r| r.site_id == site && i32::from(r.port) == port && r.protocol == protocol)
                         .and_then(|r| r.failure_code.clone()),
@@ -1599,7 +1620,8 @@ mod tests {
             }],
         };
         let report = ManagedApplyReport {
-            applied_config_hash: String::new(),
+            endpoint_results: Vec::new(),
+        applied_config_hash: String::new(),
             received_sites: Vec::new(),
             session_id: session.to_string(),
             authority_epoch: Uuid::new_v4().to_string(),

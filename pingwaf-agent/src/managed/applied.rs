@@ -219,6 +219,7 @@ impl<T> AppliedState<T> {
             state.receipt = Some((
                 p.received.lease.clone(),
                 pingwaf_proto::ManagedApplyReport {
+                    endpoint_results: Vec::new(),
                     applied_config_hash: String::new(),
                     session_id: version.session.to_string(),
                     authority_epoch: version.authority.to_string(),
@@ -378,7 +379,33 @@ impl<T> AppliedState<T> {
             && bound.panel.as_ref().is_some_and(|p| p.applied_generation == version.generation)
             && active.policy.endpoints().iter().flat_map(|e| &e.site_ids)
                 .all(|id| sites.iter().any(|site| &site.site_id == id));
+        let mut endpoint_results = Vec::new();
+        if let Some(panel) = bound.panel.as_ref().filter(|panel|
+            panel.desired_generation == version.generation && panel.policy_revision == active.policy.policy_revision) {
+            for endpoint in active.policy.endpoints() {
+                let Some(ingress) = endpoint.ingress else { continue };
+                let mut ready = !endpoint.addresses.is_empty();
+                let mut failed = false;
+                for address in &endpoint.addresses {
+                    let socket = panel.sockets.iter().find(|socket| socket.address == *address &&
+                        socket.listener.is_some_and(|l| l.port == ingress.port && l.protocol == ingress.protocol));
+                    ready &= socket.is_some_and(|s| s.listener.unwrap().state() == pingwaf_proto::IngressBindState::Bound);
+                    failed |= socket.is_some_and(|s| !s.error.is_empty() || s.listener.unwrap().state() == pingwaf_proto::IngressBindState::BindFailed);
+                }
+                for id in &endpoint.site_ids {
+                    let Ok(uuid) = Uuid::parse_str(id) else { continue };
+                    let Some(site) = active.policy.sites().get(&uuid) else { continue };
+                    let code = active.site_failures.get(&uuid).copied().unwrap_or_else(|| {
+                        if failed { "bind_failed" } else if ready && (site.ingress.is_some() || defaults_ready) { "" } else { "pending" }
+                    });
+                    endpoint_results.push(pingwaf_proto::ManagedSiteApplication {
+                        ingress: Some(ingress), site_id: id.clone(), site_revision: site.site_revision.clone(), failure_code: code.into(),
+                    });
+                }
+            }
+        }
         Some(pingwaf_proto::ManagedApplyReport {
+            endpoint_results,
             applied_config_hash: if complete { hex::encode(version.hash) } else { String::new() },
             session_id: version.session.to_string(),
             authority_epoch: version.authority.to_string(),

@@ -20,11 +20,19 @@ import type {
   UpsertSslRequest,
 } from './types'
 
+export interface EntrySummary { applied: number; total: number; unknown: number; failed: number }
+interface EntryObservation {
+  port: number; protocol: string; state: string; failure_code: string | null
+  observed_at: string | null; applied_revision: string | null; bound: boolean | null
+}
 interface SiteDeployment {
+  summary: EntrySummary
   desired_revision: string | null
   nodes: {
     id: string
     name: string
+    scope: string
+    entries: EntryObservation[]
     bound: boolean | null
     observed_at: string | null
     applied_revision: string | null
@@ -60,6 +68,13 @@ export const sitesApi = {
   previewArchive: (id: string) => apiClient.post<{url: string}>(`/static-drafts/${id}/preview-session`),
   archiveVersions: (site: string) => apiClient.get<{digest: string; directory_id: string | null; published_at: string}[]>(`/sites/${site}/static-versions`),
 
+  deploymentSummaries: async (ids: string[]) => {
+    const result: Record<string, EntrySummary> = {}
+    for (let offset = 0; offset < ids.length; offset += 50) {
+      Object.assign(result, await apiClient.post<Record<string, EntrySummary>>('/sites/deployment-summaries', ids.slice(offset, offset + 50)))
+    }
+    return result
+  },
   deployment: (id: string) => apiClient.get<SiteDeployment>(`/sites/${id}/deployment`),
 
   ingressOptions: (siteId?: string) =>

@@ -710,6 +710,15 @@
     },
     "siteDetail": {
       "deployment": {
+        "enabled": "已启用",
+        "unassigned": "未分派",
+        "count": "入口生效 {{applied}}/{{total}}",
+        "bind_failed": "监听绑定失败",
+        "preview": "分派变更预览",
+        "previewError": "无法读取节点的站点范围",
+        "add": "接管",
+        "retain": "保留",
+        "remove": "移出",
         "failed": "失败",
         "content_download": "内容下载失败",
         "content_validation": "内容摘要或预置目录校验失败",

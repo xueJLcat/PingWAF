@@ -191,6 +191,27 @@ export function SitesListPage() {
 
   const sites = useMemo(() => sitesQuery.data ?? [], [sitesQuery.data])
 
+  const activeIds = sites.filter(site => site.status === 'active').map(site => site.id)
+  const summaries = useQuery({
+    queryKey: [...siteKeys.all, 'deployment-summaries', activeIds],
+    queryFn: () => sitesApi.deploymentSummaries(activeIds),
+    enabled: activeIds.length > 0,
+    refetchInterval: 20_000,
+  })
+  const statusCell = (site: Site) => {
+    const entry = summaries.data?.[site.id]
+    const base = 'pages.siteDetail.deployment.'
+    return <span className="inline-flex flex-col items-start gap-1">
+      <Badge tone={STATUS_TONE[site.status as SiteStatus] ?? 'neutral'} dot>
+        {site.status === 'active' ? t(base + 'enabled') : t(`status.${site.status}`, site.status)}
+      </Badge>
+      {site.status === 'active' && <span className="text-xs text-fg-subtle">
+        {summaries.isError || !entry ? t(base + 'unknown') : entry.total === 0 ? t(base + 'unassigned')
+          : <>{t(base + 'count', { ...entry })}{entry.failed > 0 && ' · ' + t(base + 'failed')}{entry.unknown > 0 && ' · ' + t(base + 'unknown')}</>}
+      </span>}
+    </span>
+  }
+
   /* ── Row selection (Z1 batch operations) ─────────────────────────── */
   const selectedIds = useMemo(
     () => sites.filter((s) => selected.has(s.id)).map((s) => s.id),
@@ -781,9 +802,7 @@ export function SitesListPage() {
       accessor: (r) => (r.status === 'active' ? 1 : 0),
       width: '120px',
       cell: (r) => (
-        <Badge tone={STATUS_TONE[r.status as SiteStatus] ?? 'neutral'} dot>
-          {t(`status.${r.status}`, r.status)}
-        </Badge>
+        statusCell(r)
       ),
     },
     {
@@ -878,9 +897,7 @@ export function SitesListPage() {
                 </span>
               )}
             </span>
-            <Badge tone={STATUS_TONE[r.status as SiteStatus] ?? 'neutral'} dot>
-              {t(`status.${r.status}`, r.status)}
-            </Badge>
+            {statusCell(r)}
           </span>
           <span className="truncate text-xs text-fg-subtle">{r.name}</span>
           <span className="text-xs text-fg-subtle">{siteType(r)}</span>

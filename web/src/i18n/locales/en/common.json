@@ -710,6 +710,15 @@
     },
     "siteDetail": {
       "deployment": {
+        "enabled": "Enabled",
+        "unassigned": "Unassigned",
+        "count": "Entries applied {{applied}}/{{total}}",
+        "bind_failed": "Listener bind failed",
+        "preview": "Assignment preview",
+        "previewError": "Could not load the node’s site scope",
+        "add": "Add",
+        "retain": "Keep",
+        "remove": "Remove",
         "failed": "Failed",
         "content_download": "Content download failed",
         "content_validation": "Content integrity or directory validation failed",

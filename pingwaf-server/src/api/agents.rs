@@ -327,7 +327,7 @@ pub fn routes() -> Router<AppState> {
         .route("/agents", get(list))
         .route("/agents/enroll", post(enroll))
         .route("/agents/{agent_id}", get(show).patch(update).delete(remove))
-        .route("/agents/{agent_id}/sites", axum::routing::put(update_sites))
+        .route("/agents/{agent_id}/sites", get(scope_options).put(update_sites))
         .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
         .route("/agents/{agent_id}/static-roots", get(static_roots).put(update_static_root))
@@ -772,6 +772,16 @@ fn validate_site_scope(scope: &str) -> Result<(), ApiError> {
 /// memory win for a multi-site edge. Assignments are validated against the
 /// API key owner, so an admin cannot make one tenant's agent serve another
 /// tenant's site.
+async fn scope_options(State(state): State<AppState>, current: AuthUser, Path(agent_id): Path<String>)
+    -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let mut all = load_agent(&state, parse_uuid(&agent_id, "agent id")?, &current).await?;
+    all.site_scope = "all".into();
+    all.site_id = None;
+    let rows = crate::grpc::agent_site_query(&all).order_by_asc(site::Column::Domain).order_by_asc(site::Column::Id).all(&state.db).await?;
+    Ok(Json(rows.into_iter().map(|s| serde_json::json!({"id":s.id,"name":s.name,"domain":s.domain,"status":s.status,
+        "ingress_port":s.ingress_port,"ingress_protocol":s.ingress_protocol,"additional_ingresses":s.additional_ingresses})).collect()))
+}
+
 async fn update_sites(
     State(state): State<AppState>,
     current: AuthUser,

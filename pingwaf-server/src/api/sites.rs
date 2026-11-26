@@ -1447,6 +1447,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites", get(list).post(create))
         .route("/sites/ingress-options", get(ingress_options))
+        .route("/sites/deployment-summaries", post(deployment_summaries))
         .route("/sites/{site_id}/deployment", get(deployment))
         .route("/sites/{site_id}", get(show).put(update).delete(remove))
         .route(
@@ -1499,6 +1500,18 @@ struct IngressOptions {
     writes_enabled: bool,
     agents: Vec<crate::grpc::IngressAgentOption>,
     assigned_agent_ids: Vec<Uuid>,
+}
+
+async fn deployment_summaries(State(state): State<AppState>, current: AuthUser, Json(ids): Json<Vec<Uuid>>)
+    -> Result<Json<HashMap<Uuid, crate::grpc::EntrySummary>>, ApiError> {
+    if ids.len() > 50 { return Err(ApiError::BadRequest("request at most 50 site summaries".into())); }
+    let tx = state.db.begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), Some(sea_orm::AccessMode::ReadOnly)).await?;
+    let mut query = site::Entity::find().filter(site::Column::Id.is_in(ids));
+    if !current.is_admin() { query = query.filter(site::Column::UserId.eq(current.id)); }
+    let rows = query.all(&tx).await?;
+    let result = crate::grpc::deployment_summaries(&tx, &state.agents, &rows).await?;
+    tx.commit().await?;
+    Ok(Json(result))
 }
 
 async fn deployment(

@@ -1,5 +1,6 @@
 import { apiClient } from './client'
 import type {
+  Site,
   Agent,
   AgentCommandRequest,
   AgentCommandResult,
@@ -22,6 +23,7 @@ import type {
  * command lines.
  */
 export const agentsApi = {
+  scopeOptions: (id: string) => apiClient.get<Pick<Site, 'id' | 'name' | 'domain' | 'status' | 'ingress_port' | 'ingress_protocol' | 'additional_ingresses'>[]>(`/agents/${id}/sites`),
   list: (query: AgentListQuery = {}) =>
     apiClient.get<Page<Agent>>('/agents', { query: { page_size: 200, ...query } }),
 

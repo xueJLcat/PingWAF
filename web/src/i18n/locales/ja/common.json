@@ -710,6 +710,15 @@
     },
     "siteDetail": {
       "deployment": {
+        "enabled": "有効",
+        "unassigned": "未割り当て",
+        "count": "入口の反映 {{applied}}/{{total}}",
+        "bind_failed": "リスナーのバインド失敗",
+        "preview": "割り当て変更のプレビュー",
+        "previewError": "ノードのサイトを取得できません",
+        "add": "追加",
+        "retain": "維持",
+        "remove": "解除",
         "failed": "失敗",
         "content_download": "コンテンツのダウンロードに失敗",
         "content_validation": "コンテンツまたはディレクトリの検証に失敗",

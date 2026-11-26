@@ -680,9 +680,13 @@ Each agent has an `id`, a `name` and a `listeners` array of pairs such as `[81, 
 Only current authenticated selected-scope agents with a fresh bound listener are offered.
 When editing a custom site, omit `ingress_agent_ids` to preserve assignments or provide the complete replacement list.
 
+### POST /sites/deployment-summaries
+
+Accepts up to 50 site UUIDs as a JSON array. Returns summaries keyed by visible site ID. Each configured protocol and port on each eligible node counts once. A port counts as applied only when its desired revision and all configured addresses have been confirmed.
+
 ### GET /sites/{site_id}/deployment
 
-Returns the desired site revision and the current deployment state of each eligible assigned node for a custom ingress. Uses the same site visibility as site detail. The revision is null for a paused site. A missing or stale observation gives no assurance of application. The control plane compares the authenticated session, authority epoch, site ID, revision and listener. `bound` reports the local socket status. Each node includes its name, observation time and applied revision when available. A current, verified receipt for the desired revision yields `received` while the node prepares its proxy view. A live, published view on a bound listener yields `applied`. When another listener changes, the edge can continue serving a listener whose complete routing table and site policies are identical in both snapshots. Other states are `pending`, `unknown`, `revoking` and `withdrawn`. A default site has a null revision and an empty node list.
+Returns the desired site revision and the current deployment state of each eligible assigned node for each configured ingress. Uses the same site visibility as site detail. The revision is null for a paused site. A missing or stale observation gives no assurance of application. The control plane compares the authenticated session, authority epoch, site ID, revision and listener. `bound` reports the local socket status. Each node includes its name, observation time and applied revision when available. A current, verified receipt for the desired revision yields `received` while the node prepares its proxy view. A live, published view on a bound listener yields `applied`. When another listener changes, the edge can continue serving a listener whose complete routing table and site policies are identical in both snapshots. Other states are `pending`, `unknown`, `revoking` and `withdrawn`. Default sites include HTTP 80 and HTTPS 443. The response includes a summary and each node’s assignment scope and entries with protocol, port, observed time, revision, state and failure code. A partial bind failure is reported as bind_failed.
 
 ### GET /sites/{site_id}
 
@@ -2176,6 +2180,10 @@ Rules:
   registration still matches on `hostname` + API key, and renaming never
   produces a duplicate node.
 - `404` when the agent does not exist.
+
+### GET /agents/{agent_id}/sites
+
+Returns the complete site catalogue for the owner of the node’s API key, including status and primary and additional listeners, for the assignment preview. Requires access to the node.
 
 ### PUT /agents/{agent_id}/sites
 

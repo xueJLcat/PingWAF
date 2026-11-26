@@ -501,12 +501,34 @@ pub(crate) async fn ingress_agent_options(
 
 #[derive(serde::Serialize)]
 pub(crate) struct SiteDeployment {
+    pub summary: EntrySummary,
     desired_revision: Option<String>,
     nodes: Vec<DeploymentNode>,
 }
 
+#[derive(Default, serde::Serialize)]
+pub(crate) struct EntrySummary {
+    applied: usize,
+    total: usize,
+    unknown: usize,
+    failed: usize,
+}
+
+#[derive(serde::Serialize)]
+struct EntryObservation {
+    port: i32,
+    protocol: String,
+    state: &'static str,
+    failure_code: Option<String>,
+    observed_at: Option<chrono::DateTime<Utc>>,
+    applied_revision: Option<String>,
+    bound: Option<bool>,
+}
+
 #[derive(serde::Serialize)]
 struct DeploymentNode {
+    scope: String,
+    entries: Vec<EntryObservation>,
     failure_code: Option<String>,
     id: Uuid,
     name: String,
@@ -521,18 +543,35 @@ pub(crate) async fn site_deployment(
     registry: &super::AgentRegistry,
     model: &site::Model,
 ) -> Result<SiteDeployment, DbErr> {
-    let mut result = SiteDeployment {
-        desired_revision: None,
-        nodes: Vec::new(),
-    };
-    let (port, protocol) = model.ingress_port.zip(model.ingress_protocol.as_deref()).unwrap_or((80,"http"));
-    if model.status == site_status::ACTIVE {
-        let bundle =
-            assemble_managed_config(tx, std::slice::from_ref(model)).await?;
-        result.desired_revision =
-            bundle.sites.into_iter().next().map(|s| s.site_revision);
-    }
+    let mut revisions = desired_revisions(tx, std::slice::from_ref(model)).await?;
+    deployment_with_revision(tx, registry, model, authority_epoch(tx).await?, revisions.remove(&model.id)).await
+}
+
+async fn desired_revisions(tx: &DatabaseTransaction, rows: &[site::Model]) -> Result<std::collections::HashMap<Uuid,String>, DbErr> {
+    let active: Vec<_> = rows.iter().filter(|r| r.status == site_status::ACTIVE).cloned().collect();
+    Ok(assemble_managed_config(tx, &active).await?.sites.into_iter().filter_map(|s|
+        Some((Uuid::parse_str(&s.site?.id).ok()?, s.site_revision))).collect())
+}
+
+pub(crate) async fn deployment_summaries(tx: &DatabaseTransaction, registry: &super::AgentRegistry, rows: &[site::Model])
+    -> Result<std::collections::HashMap<Uuid, EntrySummary>, DbErr> {
     let epoch = authority_epoch(tx).await?;
+    let mut revisions = desired_revisions(tx, rows).await?;
+    let mut result = std::collections::HashMap::new();
+    for row in rows {
+        result.insert(row.id, deployment_with_revision(tx, registry, row, epoch, revisions.remove(&row.id)).await?.summary);
+    }
+    Ok(result)
+}
+
+async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::AgentRegistry, model: &site::Model,
+    epoch: Uuid, desired_revision: Option<String>) -> Result<SiteDeployment, DbErr> {
+    let mut result = SiteDeployment { desired_revision, nodes: Vec::new(), summary: EntrySummary::default() };
+    let ports = match model.ingress_port.zip(model.ingress_protocol.as_deref()) {
+        Some(primary) => std::iter::once(primary).chain(model.additional_ingresses.iter()
+            .filter_map(|entry| site::parse_listener(entry)).map(|(port, protocol)| (i32::from(port), protocol))).collect(),
+        None => vec![(80, "http"), (443, "https")],
+    };
     let assignments = tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1 ORDER BY agent_id",
         [model.id.into()])).await?;
@@ -547,47 +586,39 @@ pub(crate) async fn site_deployment(
             Err(BuildError::Storage(db)) => return Err(db),
             _ => continue,
         };
-        let (bound, report) = match current_session(tx, id).await? {
-            Some(session) => {
-                registry
-                    .site_observation(
-                        id, session, port, protocol, model.id, epoch,
-                    )
-                    .await
-            },
-            None => (None, None),
-        };
-        let (observed_at, applied_revision, received_revision, failure_code) = report
-            .map(|(at, rev, receipt, failure)| (Some(at), rev, receipt, failure))
-            .unwrap_or_default();
-        let state = match (
-            result.desired_revision.as_ref(),
-            applied_revision.as_ref(),
-            bound,
-            observed_at,
-        ) {
-            (None, Some(_), _, _) => "revoking",
-            (None, None, _, Some(_)) => "withdrawn",
-            (Some(want), Some(have), Some(true), _) if want == have => {
-                "applied"
-            },
-            (Some(want), _, _, Some(_))
-                if received_revision.as_ref() == Some(want) =>
-            {
-                if failure_code.is_some() { "failed" } else { "received" }
-            },
-            (_, _, None, _) | (_, _, _, None) => "unknown",
-            _ => "pending",
-        };
-        result.nodes.push(DeploymentNode {
-            failure_code: failure_code.filter(|_| state == "failed"),
-            id,
-            name: agent.display_name.unwrap_or(agent.hostname),
-            bound,
-            observed_at,
-            applied_revision,
-            state,
-        });
+        let session = current_session(tx, id).await?;
+        let mut entries = Vec::with_capacity(ports.len());
+        for &(port, protocol) in &ports {
+            let (bound, report) = match session {
+                Some(session) => registry.site_observation(id, session, port, protocol, model.id, epoch).await,
+                None => (None, None),
+            };
+            let (observed_at, applied_revision, received_revision, failure) = report
+                .map(|(at, rev, receipt, failure)| (Some(at), rev, receipt, failure)).unwrap_or_default();
+            let bound = if failure.as_deref() == Some("bind_failed") && bound.is_some() { Some(false) } else { bound };
+            let state = match (result.desired_revision.as_ref(), applied_revision.as_ref(), bound, observed_at) {
+                (None, Some(_), _, _) => "revoking",
+                (None, None, _, Some(_)) => "withdrawn",
+                (Some(want), Some(have), Some(true), _) if want == have => "applied",
+                (_, _, None, _) | (_, _, _, None) => "unknown",
+                (Some(want), _, _, _) if received_revision.as_ref() == Some(want) => match failure.as_deref() {
+                    Some("pending") => "pending", Some(_) => "failed", None => "received",
+                },
+                _ => "pending",
+            };
+            result.summary.total += 1;
+            result.summary.applied += usize::from(state == "applied");
+            result.summary.unknown += usize::from(state == "unknown");
+            result.summary.failed += usize::from(state == "failed");
+            entries.push(EntryObservation { port, protocol: protocol.into(), state, bound, applied_revision, observed_at,
+                failure_code: failure.filter(|_| state == "failed") });
+        }
+        let primary = &entries[0];
+        let state = if entries.iter().all(|e| e.state == primary.state) { primary.state }
+            else if entries.iter().any(|e| e.state == "failed") { "failed" } else { "pending" };
+        result.nodes.push(DeploymentNode { id, name: agent.display_name.unwrap_or(agent.hostname), scope: agent.site_scope,
+            failure_code: entries.iter().find_map(|e| e.failure_code.clone()), observed_at: primary.observed_at,
+            applied_revision: primary.applied_revision.clone().filter(|_| state == "applied"), bound: primary.bound, state, entries });
     }
     Ok(result)
 }
@@ -1012,6 +1043,7 @@ pub(super) async fn check_postgres(
     assert_eq!(initial.nodes[0].state, "unknown");
     let wanted = initial.desired_revision.unwrap();
     let mut report = pingwaf_proto::ManagedApplyReport {
+        endpoint_results: Vec::new(),
         applied_config_hash: String::new(),
         received_sites: Vec::new(),
         session_id: session.to_string(),
