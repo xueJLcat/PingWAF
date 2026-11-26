@@ -625,14 +625,22 @@ pub(crate) async fn check_assigned_ingress(
     protocol: &str,
     active: bool,
 ) -> Result<(), crate::api::error::ApiError> {
-    let assignments = effective_agents(tx, site_id).await?;
+    // A restore may re-create a site that has no current listener rows.
+    let assignments = tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT a.id FROM agents a JOIN api_keys k ON k.id=a.api_key_id WHERE k.user_id=$2 AND (
+             (a.site_scope='all' AND (a.site_id IS NULL OR a.site_id=$1) AND EXISTS
+                 (SELECT FROM managed_config_generations g WHERE g.agent_id=a.id AND g.session_id IS NOT NULL))
+             OR (a.site_scope='selected' AND EXISTS
+                 (SELECT FROM agent_sites n WHERE n.agent_id=a.id AND n.site_id=$1))) ORDER BY a.id",
+        [site_id.into(), owner.into()])).await?;
+
     if active && assignments.is_empty() {
         return Err(unavailable(
             "active custom ingress requires a node serving this site",
         ));
     }
     for row in assignments {
-        check_agent_ingress(tx, agents, row, owner, port, protocol)
+        check_agent_ingress(tx, agents, row.try_get("", "id")?, owner, port, protocol)
             .await?;
     }
     Ok(())
@@ -840,10 +848,9 @@ pub(super) async fn check_postgres(
     );
     let session = Uuid::parse_str(&first.session_id).unwrap();
     assert_eq!(first.session_id, managed.managed_session_id);
-    assert_eq!(
-        heartbeat_scope(db, id, session).await.unwrap(),
-        [default.id]
-    );
+    let effective = heartbeat_scope(db, id, session).await.unwrap();
+    assert!(effective.contains(&default.id));
+    assert!(effective.contains(&custom.id));
     assert_eq!(first.generation, 1);
     let config = decode(&first);
     assert_eq!(config.sites.len(), 1);

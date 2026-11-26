@@ -11,7 +11,9 @@ impl MigrationTrait for Migration {
                        split_part(listener, ':', 2)::integer AS port
                 FROM agents a JOIN api_keys k ON k.id = a.api_key_id
                 JOIN sites s ON s.user_id = k.user_id AND (
-                    (a.site_scope='all' AND (a.site_id IS NULL OR a.site_id=s.id))
+                    (a.site_scope='all' AND (a.site_id IS NULL OR a.site_id=s.id)
+                     AND (s.ingress_port IS NULL OR EXISTS (SELECT FROM managed_config_generations g
+                         WHERE g.agent_id=a.id AND g.session_id IS NOT NULL)))
                     OR (a.site_scope='selected' AND EXISTS (SELECT FROM agent_sites n WHERE n.agent_id=a.id AND n.site_id=s.id))
                 )
                 CROSS JOIN LATERAL unnest(CASE WHEN s.ingress_port IS NULL THEN ARRAY['http:80','https:443']
