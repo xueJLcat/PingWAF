@@ -23,9 +23,11 @@ test.describe('cache and compression', () => {
       await dialog.getByRole('spinbutton', { name: 'Edge TTL' }).fill('60')
       await dialog.getByRole('spinbutton', { name: 'Browser TTL' }).fill('0')
       await dialog.getByRole('switch', { name: /Respect origin/ }).uncheck()
+      await dialog.getByRole('switch', { name: 'Enabled', exact: true }).uncheck()
       await dialog.getByRole('button', { name: 'Create', exact: true }).click()
       await expect(dialog).toHaveCount(0)
       const cacheSwitch = app.page.getByRole('switch', { name: /Enable caching for this site/ })
+      await expect(cacheSwitch).not.toBeChecked()
       await cacheSwitch.click()
       await expect
         .poll(() => cacheSwitch.getAttribute('aria-checked'), { timeout: 30_000 })
