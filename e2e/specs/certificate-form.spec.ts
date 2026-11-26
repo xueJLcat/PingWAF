@@ -12,7 +12,11 @@ test('selecting a site preserves the ACME application and its eligibility', asyn
   })
   const issuerId = '00000000-0000-4000-8000-000000000007'
   await page.route(url => url.pathname === '/api/v1/agents', route => {
-    const number = Number(new URL(route.request().url()).searchParams.get('page') ?? '1')
+    const params = new URL(route.request().url()).searchParams
+    const number = Number(params.get('page') ?? '1')
+    if (params.get('site_id') !== sites[1].id) {
+      return route.fulfill({ json: { items: [], page: number, page_size: 1, total: 0 } })
+    }
     const agent = number === 2 ? { id: issuerId, hostname: 'later-issuer', acme_issuer: true }
       : { id: sites[0].id, hostname: 'consumer', acme_issuer: false }
     return route.fulfill({ json: { items: [agent], page: number, page_size: 1, total: 2 } })
@@ -33,6 +37,7 @@ test('selecting a site preserves the ACME application and its eligibility', asyn
   await challenge.selectOption('dns-01')
   await dialog.getByRole('combobox', { name: 'Issuer agent' }).selectOption(issuerId)
   await site.selectOption(sites[0].id)
+  await expect(dialog.getByRole('combobox', { name: 'Issuer agent' })).toHaveValue('')
   await expect(acme).toHaveAttribute('aria-selected', 'true')
   await expect(dialog.getByRole('alert')).toContainText('HTTP 80 or HTTPS 443')
   await expect(apply).toBeDisabled()
@@ -46,6 +51,7 @@ test('selecting a site preserves the ACME application and its eligibility', asyn
   await expect(apply).toBeEnabled()
   await expect(email).toHaveValue('operator@example.test')
   await expect(challenge).toHaveValue('dns-01')
+  await dialog.getByRole('combobox', { name: 'Issuer agent' }).selectOption(issuerId)
   await expect(dialog.getByLabel('Domain', { exact: true })).toHaveValue(sites[1].domain)
   await page.route('**/api/v1/certificates', route => route.fulfill({
     status: 503, json: { error: { message: 'Isolated test' } },

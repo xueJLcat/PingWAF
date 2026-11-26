@@ -172,9 +172,9 @@ export function GlobalSslPage() {
   const hasPending = certs.some((cert) => cert.status === 'pending')
 
   const issuersQuery = useQuery({
-    queryKey: ['agents', 'acme-issuers'],
-    queryFn: () => agentsApi.inventory(),
-    enabled: dialogOpen && form.mode === 'acme' && form.challengeType === 'dns-01',
+    queryKey: ['agents', 'acme-issuers', form.siteId],
+    queryFn: () => agentsApi.inventory({ site_id: form.siteId }),
+    enabled: dialogOpen && !!form.siteId && form.mode === 'acme' && form.challengeType === 'dns-01',
   })
   const issuers = (issuersQuery.data?.items ?? []).filter((a) => a.acme_issuer)
 
@@ -967,7 +967,7 @@ export function GlobalSslPage() {
                   .filter((s) => s.id === siteId)
                   .flatMap((s) => [s.domain, ...s.alternate_domains])
                   .join(',')
-                setForm((f) => ({ ...f, siteId, domain: domain || f.domain }))
+                setForm((f) => ({ ...f, siteId, issuerAgentId: '', domain: domain || f.domain }))
                 setFormError(null)
               }}
             />
