@@ -654,8 +654,15 @@ impl AgentRegistry {
             sync.target.as_ref().is_some_and(|(epoch, generation)|
                 *generation == observation.generation && *epoch == observation.authority_epoch.to_string()))
         {
-            sync.receipt.failures = observation.received_sites.iter().filter_map(|s|
-                s.failure_code.as_ref().map(|code| (s.site_id, code.clone()))).collect();
+            let mut failed_sites = std::collections::HashSet::new();
+            sync.receipt.failures = observation.received_sites.iter()
+                .chain(&observation.endpoint_results)
+                .filter_map(|site| {
+                    let code = site.failure_code.as_ref()?;
+                    (code != "pending" && failed_sites.insert(site.site_id))
+                        .then(|| (site.site_id, code.clone()))
+                })
+                .collect();
             sync.receipt.status = if !sync.receipt.failures.is_empty() { "failed" }
                 else if applied { "confirmed" } else { "pending" };
         }
