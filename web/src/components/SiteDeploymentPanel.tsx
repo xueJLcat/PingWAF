@@ -111,7 +111,7 @@ export function SiteDeploymentPanel({ siteId }: { siteId: string }) {
       <Button size="sm" loading={deployment.isFetching} onClick={() => void deployment.refetch()} icon={<ArrowClockwise className="h-4 w-4" />}>{t('common.refresh')}</Button>
     </header>
     {deployment.isError ? <ErrorState variant="inline" error={deployment.error} /> : deployment.isPending ? <p role="status">{t('common.loading')}</p>
-      : data.nodes.length ? data.nodes.map(node => <NodeCard key={node.id} node={node} desired={data.desired_revision} refresh={refresh} />)
+      : data?.nodes.length ? data.nodes.map(node => <NodeCard key={node.id} node={node} desired={data.desired_revision} refresh={refresh} />)
       : <p className="text-fg-subtle">{t(prefix + 'empty')}</p>}
   </section>
 }

@@ -201,15 +201,26 @@ export function SitesListPage() {
   const statusCell = (site: Site) => {
     const entry = summaries.data?.[site.id]
     const base = 'pages.siteDetail.deployment.'
-    return <span className="inline-flex flex-col items-start gap-1">
-      <Badge tone={STATUS_TONE[site.status as SiteStatus] ?? 'neutral'} dot>
-        {site.status === 'active' ? t(base + 'enabled') : t(`status.${site.status}`, site.status)}
-      </Badge>
-      {site.status === 'active' && <span className="text-xs text-fg-subtle">
-        {summaries.isError || !entry ? t(base + 'unknown') : entry.total === 0 ? t(base + 'unassigned')
-          : <>{t(base + 'count', { ...entry })}{entry.failed > 0 && ' · ' + t(base + 'failed')}{entry.unknown > 0 && ' · ' + t(base + 'unknown')}</>}
-      </span>}
-    </span>
+    if (site.status !== 'active') {
+      return <Badge size="sm" tone={STATUS_TONE[site.status as SiteStatus] ?? 'neutral'} dot>{t(`status.${site.status}`, site.status)}</Badge>
+    }
+    let label = t(base + 'unknown')
+    let tone: 'neutral' | 'success' | 'danger' | 'warning' = 'neutral'
+    if (entry && !summaries.isError) {
+      label = entry.total ? t(base + 'count', { ...entry }) : t(base + 'unassigned')
+      if (entry.failed) {
+        label += ' · ' + t(base + 'failed')
+        tone = 'danger'
+      } else if (entry.unknown) {
+        label += ' · ' + t(base + 'unknown')
+        tone = 'warning'
+      } else if (entry.total > 0) {
+        tone = entry.applied === entry.total ? 'success' : 'warning'
+      }
+    }
+    return <Badge size="sm" tone={tone} dot className="tabular-nums" title={t(base + 'enabled') + ' · ' + label}>
+      <span className="sr-only">{t(base + 'enabled')} · </span>{label}
+    </Badge>
   }
 
   /* ── Row selection (Z1 batch operations) ─────────────────────────── */
