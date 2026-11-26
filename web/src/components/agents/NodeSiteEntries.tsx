@@ -33,7 +33,7 @@ export function NodeSiteEntries({ id }: { id: string }) {
         <div className="max-h-80 overflow-auto" tabIndex={0} role="region" aria-label={title + ' · ' + t('common.details')}>
           <table className="w-full whitespace-nowrap text-left text-sm" aria-label={title}>
             <thead className="sticky top-0 z-10 bg-recessed text-xs text-fg-subtle"><tr>
-              {[t('pages.agents.site'), t(prefix + 'entry'), t('pages.agents.status'), t(prefix + 'failureReason')].map(label =>
+              {[t('pages.agents.site'), t(prefix + 'entry'), t('common.status'), t(prefix + 'failureReason')].map(label =>
                 <th scope="col" key={label} className="px-3 py-2 font-medium">{label}</th>)}
             </tr></thead>
             <tbody>{data.items.flatMap(site => site.entries.map(entry =>
