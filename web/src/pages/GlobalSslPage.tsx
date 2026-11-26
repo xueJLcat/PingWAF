@@ -783,6 +783,7 @@ export function GlobalSslPage() {
       {!error && tab === 'certificates' && (
         <Card className="mt-4">
           <CardHeader
+            className="flex-col items-stretch md:flex-row md:items-start"
             title={t('pages.ssl.certificates')}
             description={t('pages.sslGlobal.certificatesHint')}
             action={
@@ -859,6 +860,7 @@ export function GlobalSslPage() {
       {!error && tab === 'log' && (
         <Card className="mt-4">
           <CardHeader
+            className="flex-col items-stretch md:flex-row md:items-start"
             title={t('pages.sslGlobal.tabLog')}
             description={t('pages.sslGlobal.logHint')}
             action={
