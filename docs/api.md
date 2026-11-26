@@ -1718,7 +1718,7 @@ Event log for one certificate, newest first (paginated).
 
 ### GET /ssl-events
 
-Cross-certificate event log for every site the caller may see (paginated). Supports the same `certificate_id` and `event_type` filters; each event additionally carries the resolved `domain` and `site_domain`.
+Cross-certificate event log for every site the caller may see (paginated). Both event endpoints default to newest first and accept `oldest_first=true` to reverse chronological order before pagination. Supports the same `certificate_id` and `event_type` filters; each event additionally carries the resolved `domain` and `site_domain`.
 
 ---
 

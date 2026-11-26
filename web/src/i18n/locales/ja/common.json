@@ -2719,7 +2719,7 @@
       "tabCertificates": "証明書",
       "tabLog": "申請履歴",
       "certificatesHint": "全サイトの証明書。サイトまたはステータスで絞り込めます。",
-      "logHint": "ACME 証明書の申請と更新の履歴（新しい順）。",
+      "logHint": "ACME 証明書の申請と更新の履歴。",
       "logEmpty": "申請履歴がありません",
       "logEmptyHint": "ACME で証明書を申請すると、ここに履歴が表示されます。",
       "emptyDescription": "無料証明書を申請するか独自の証明書をアップロードして、サイトの HTTPS を有効にします。",

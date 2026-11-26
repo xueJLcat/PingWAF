@@ -41,9 +41,9 @@ export const sslApi = {
   inventory: (query: Omit<CertificateListQuery, 'page' | 'page_size'> = {}) =>
     readInventory(page => sslApi.listAll({ ...query, page })),
   /* ── Per site ────────────────────────────────────────────────────── */
-  list: (siteId: string) =>
+  list: (siteId: string, query: PaginationQuery = {}) =>
     apiClient.get<Page<SslCertificate>>(`/sites/${siteId}/certificates`, {
-      query: { page_size: 200 },
+      query: { page_size: 200, ...query },
     }),
 
   create: (siteId: string, data: CreateSslRequest) =>

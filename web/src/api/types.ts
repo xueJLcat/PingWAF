@@ -2117,6 +2117,7 @@ export interface CertificateEvent {
 }
 
 export interface CertificateEventListQuery extends PaginationQuery {
+  oldest_first?: boolean
   certificate_id?: string
   event_type?: string
 }

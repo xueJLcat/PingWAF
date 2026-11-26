@@ -123,6 +123,7 @@ export function GlobalSslPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CertificateWithSite | null>(null)
   const [eventPage, setEventPage] = useState(1)
+  const [oldestFirst, setOldestFirst] = useState(false)
   const [eventTypeFilter, setEventTypeFilter] = useState('')
   const [bindTarget, setBindTarget] = useState<CertificateWithSite | null>(null)
   const [bindSelection, setBindSelection] = useState<string[]>([])
@@ -177,7 +178,7 @@ export function GlobalSslPage() {
   })
   const issuers = (issuersQuery.data?.items ?? []).filter((a) => a.acme_issuer)
 
-  const eventFilter = { event_type: eventTypeFilter || undefined, page: eventPage, page_size: 20 }
+  const eventFilter = { event_type: eventTypeFilter || undefined, oldest_first: oldestFirst, page: eventPage, page_size: 20 }
   const eventsQuery = useQuery({
     queryKey: sslKeys.events(eventFilter),
     queryFn: () => sslApi.listAllEvents(eventFilter),
@@ -622,9 +623,10 @@ export function GlobalSslPage() {
   const logColumns: Column<CertificateEvent>[] = [
     {
       key: 'created_at',
-      header: t('pages.sslGlobal.eventTime'),
-      accessor: (r) => r.created_at,
-      sortable: true,
+      header: <button type="button" className="pw-touch-target" aria-pressed={oldestFirst}
+        onClick={() => { setOldestFirst(!oldestFirst); setEventPage(1) }}>
+        {t('pages.sslGlobal.eventTime')} {oldestFirst ? '↑' : '↓'}
+      </button>,
       width: '180px',
       cell: (r) => (
         <span className="text-fg">{formatDateTime(r.created_at)}</span>

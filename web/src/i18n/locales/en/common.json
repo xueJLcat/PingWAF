@@ -2719,7 +2719,7 @@
       "tabCertificates": "Certificates",
       "tabLog": "Application log",
       "certificatesHint": "Certificates from every site. Filter by site or status.",
-      "logHint": "ACME applications and renewals, newest first.",
+      "logHint": "ACME applications and renewals.",
       "logEmpty": "No applications yet",
       "logEmptyHint": "Once you apply for a certificate with ACME, its history shows up here.",
       "emptyDescription": "Apply for a free certificate or upload your own to turn on HTTPS for a site.",

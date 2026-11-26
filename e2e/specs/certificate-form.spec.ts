@@ -67,7 +67,8 @@ test('application log fetches the selected page and resets the page on filter ch
     const filtered = query.get('event_type') === 'failed'
     const event = {
       id: 'event-' + number, event_type: 'failed', created_at: new Date().toISOString(),
-      message: (filtered ? 'Filtered' : 'Unfiltered') + ' result on page ' + number,
+      message: (filtered ? 'Filtered' : 'Unfiltered') + ' result on page ' + number
+        + (query.get('oldest_first') === 'true' ? ' ascending' : ''),
     }
     return route.fulfill({ json: { items: [event], page: number, page_size: 20, total: filtered ? 1 : 61 } })
   })
@@ -78,6 +79,8 @@ test('application log fetches the selected page and resets the page on filter ch
   await page.getByRole('tab', { name: 'Application log' }).click()
   await page.getByRole('button', { name: '4', exact: true }).click()
   await expect(page.getByText('Unfiltered result on page 4')).toBeVisible()
+  await page.getByRole('button', { name: /Time ↓/ }).click()
+  await expect(page.getByText('Unfiltered result on page 1 ascending')).toBeVisible()
   await page.getByRole('combobox', { name: 'Event', exact: true }).selectOption('failed')
   await expect(page.getByText('Filtered result on page 1')).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)

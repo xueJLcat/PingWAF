@@ -2846,6 +2846,8 @@ async fn write_cert_event(
 #[derive(Debug, Deserialize)]
 pub struct EventsQuery {
     #[serde(default)]
+    pub oldest_first: bool,
+    #[serde(default)]
     pub certificate_id: Option<String>,
     #[serde(default)]
     pub event_type: Option<String>,
@@ -2876,7 +2878,10 @@ async fn list_certificate_events(
 
     let paginator = certificate_events::Entity::find()
         .filter(condition)
-        .order_by_desc(certificate_events::Column::CreatedAt)
+        .order_by(
+            certificate_events::Column::CreatedAt,
+            if query.oldest_first { sea_orm::Order::Asc } else { sea_orm::Order::Desc },
+        )
         .order_by_asc(certificate_events::Column::Id)
         .paginate(&state.db, pagination.limit());
 
@@ -2927,7 +2932,10 @@ async fn list_all_events(
 
     let paginator = certificate_events::Entity::find()
         .filter(condition)
-        .order_by_desc(certificate_events::Column::CreatedAt)
+        .order_by(
+            certificate_events::Column::CreatedAt,
+            if query.oldest_first { sea_orm::Order::Asc } else { sea_orm::Order::Desc },
+        )
         .order_by_asc(certificate_events::Column::Id)
         .paginate(&state.db, pagination.limit());
 

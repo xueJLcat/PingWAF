@@ -2719,7 +2719,7 @@
       "tabCertificates": "证书",
       "tabLog": "申请日志",
       "certificatesHint": "所有站点的证书，可按站点或状态筛选。",
-      "logHint": "ACME 证书的申请与续期记录，按创建时间倒序。",
+      "logHint": "ACME 证书的申请与续期记录。",
       "logEmpty": "暂无申请记录",
       "logEmptyHint": "使用 ACME 申请证书后，记录会显示在这里。",
       "emptyDescription": "申请免费证书或上传自有证书，即可为站点开启 HTTPS。",

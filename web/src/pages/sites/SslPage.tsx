@@ -33,6 +33,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
+import { readInventory } from '@/api/pagination'
 import { CertWarningsBadge } from '@/components/ssl/CertWarnings'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone, groupCertsByRelation } from '@/api/ssl'
@@ -264,7 +265,7 @@ export function SslPage() {
 
   const certsQuery = useQuery({
     queryKey: sslKeys.list(siteId),
-    queryFn: () => sslApi.list(siteId),
+    queryFn: () => readInventory(page => sslApi.list(siteId, { page })),
     select: (page) => page.items,
     enabled: Boolean(siteId),
   })
@@ -329,7 +330,7 @@ export function SslPage() {
   // picker dialog is open.
   const availableQuery = useQuery({
     queryKey: sslKeys.available(siteId),
-    queryFn: () => sslApi.listAvailable(siteId),
+    queryFn: () => readInventory(page => sslApi.listAvailable(siteId, { page })),
     enabled: shareOpen && Boolean(siteId),
   })
   const availableCerts = availableQuery.data?.items ?? []
@@ -1332,6 +1333,8 @@ export function SslPage() {
         <div className="flex flex-col gap-2">
           {availableQuery.isPending ? (
             <SkeletonRows rows={3} columns={2} />
+          ) : availableQuery.error ? (
+            <ErrorState error={availableQuery.error} onRetry={() => void availableQuery.refetch()} />
           ) : availableCerts.length === 0 ? (
             <EmptyState
               className="border-0 py-8"
