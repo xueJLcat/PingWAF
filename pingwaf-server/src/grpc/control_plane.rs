@@ -1281,7 +1281,12 @@ impl ControlPlaneTrait for ControlPlaneService {
         let mut skipped = 0usize;
         for site_row in &selected {
             match build_rule_bundle(&self.db, site_row, &visible_sites).await {
-                Ok(bundle) => {
+                Ok(mut bundle) => {
+                    if let Some(ssl) = bundle.ssl.as_mut() {
+                        super::scope_ssl_for_agent(ssl, &row.id.to_string(), row.acme_issuer);
+                        bundle.config_hash.clear();
+                        bundle.config_hash = super::config::fingerprint(&bundle);
+                    }
                     // Delta sync: the agent already runs this exact configuration.
                     if !current_hash.is_empty()
                         && bundle.config_hash == current_hash

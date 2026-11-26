@@ -275,7 +275,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000107_tunnel_listener_error::Migration),
             Box::new(m20240101_000108_acme_dns_provider_backfill::Migration),
             Box::new(m20240101_000108_site_listeners::Migration),
+            Box::new(m20240101_000109_agent_acme_issuer::Migration),
             Box::new(m20240101_000109_static_drafts::Migration),
+            Box::new(m20240101_000110_certificate_issuer_agent::Migration),
             Box::new(m20240101_000110_site_handlers::Migration),
             Box::new(m20240101_000111_static_releases::Migration),
             Box::new(m20240101_000112_directory_versions::Migration),
@@ -288,8 +290,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000119_tunnel_listener_error::Migration),
             Box::new(m20240101_000120_syslog::Migration),
             Box::new(m20240101_000121_all_site_listeners::Migration),
-            Box::new(m20240101_000109_agent_acme_issuer::Migration),
-            Box::new(m20240101_000110_certificate_issuer_agent::Migration),
         ]
     }
 }
