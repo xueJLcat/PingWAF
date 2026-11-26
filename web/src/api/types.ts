@@ -1190,6 +1190,11 @@ export interface Agent {
   site_domain: string | null
   /** `all` = every site owned by the API key; `selected` = `site_ids`. */
   site_scope: 'all' | 'selected'
+  /**
+   * Whether the agent may run ACME issuance and receive DNS provider
+   * credentials. Consumers serve the distributed PEM without seeing the token.
+   */
+  acme_issuer: boolean
   /** Sites assigned to a selected agent; empty for `all`. */
   site_ids: string[]
   /** Domains matching `site_ids`, in order. */
@@ -1759,6 +1764,8 @@ export interface SslCertificate {
   acme_challenge_type: string
   acme_dns_provider: string | null
   acme_dns_config: unknown | null
+  /** Agent allowed to issue this certificate; null = agent-level scope. */
+  acme_issuer_agent_id?: string | null
   status: CertificateStatus | string
   /** Why the last ACME issuance was given up on; null while healthy. */
   failure_reason: string | null
@@ -1852,6 +1859,8 @@ export interface CreateSslRequest {
   acme_challenge_type?: AcmeChallengeType | string | null
   acme_dns_provider?: string | null
   acme_dns_config?: unknown | null
+  /** Agent allowed to issue this certificate; omit for the agent-level scope. */
+  acme_issuer_agent_id?: string | null
   /** Manual upload. */
   cert_pem?: string | null
   key_pem?: string | null

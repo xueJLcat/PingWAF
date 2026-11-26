@@ -81,6 +81,49 @@ pub(crate) fn agent_site_query(row: &agent::Model) -> sea_orm::Select<site::Enti
     }
 }
 
+/// Removes ACME issuance material from a bundle an agent must not use to
+/// issue.
+///
+/// A consumer keeps `cert_pem`/`key_pem` and serves TLS, but it never receives
+/// the site's DNS provider credentials (`acme_dns_config`) and never starts an
+/// order. The embedded all-in-one issuer keeps the full bundle.
+pub(crate) fn scope_acme_for_agent(
+    config: &mut SiteConfig,
+    agent_id: Uuid,
+    acme_issuer: bool,
+) {
+    scope_acme_sites(config.sites.iter_mut(), agent_id, acme_issuer);
+}
+
+fn scope_acme_sites<'a>(sites: impl Iterator<Item = &'a mut pingwaf_proto::control_plane::Site>, agent_id: Uuid, acme_issuer: bool) {
+    let agent_id = agent_id.to_string();
+    for site in sites {
+        let Some(rules) = site.rules.as_mut() else {
+            continue;
+        };
+        let Some(ssl) = rules.ssl.as_mut() else {
+            continue;
+        };
+        // A per-certificate designation wins over the agent-level flag: only
+        // the named agent may issue that certificate. Without one, the agent
+        // must be marked as an issuer.
+        let designated = ssl.acme_issuer_agent_id.trim();
+        let allowed = if designated.is_empty() {
+            acme_issuer
+        } else {
+            designated == agent_id
+        };
+        if allowed {
+            continue;
+        }
+        ssl.acme_enabled = false;
+        ssl.acme_email.clear();
+        ssl.acme_challenge_type = 0;
+        ssl.acme_dns_provider.clear();
+        ssl.acme_dns_config.clear();
+    }
+}
+
 /// The command that replaces an agent's configuration with `site_config`.
 fn update_site_command(site_config: SiteConfig) -> ServerCommand {
     ServerCommand {
@@ -119,7 +162,9 @@ pub(crate) async fn repush_agent_config(
 
 async fn legacy_agent_command(db: &DatabaseConnection, row: &agent::Model) -> Result<ServerCommand, DbErr> {
     let visible = agent_visible_site_ids(db, row).await?;
-    Ok(update_site_command(build_site_config(db, Some(&visible)).await?))
+    let mut config = build_site_config(db, Some(&visible)).await?;
+    scope_acme_for_agent(&mut config, row.id, row.acme_issuer);
+    Ok(update_site_command(config))
 }
 
 pub(crate) async fn manual_agent_sync(state: &AppState, row: &agent::Model) -> Result<ManualDelivery, DbErr> {
@@ -149,16 +194,27 @@ pub async fn notify_config_changed(
     site_id: Uuid,
     actor: Option<&str>,
 ) {
+    notify_config_changed_for(&state.db, &state.agents, site_id, actor).await;
+}
+
+/// The same push, for callers that hold the database and registry directly
+/// (the gRPC plane has no REST `AppState`).
+pub(crate) async fn notify_config_changed_for(
+    db: &DatabaseConnection,
+    registry: &AgentRegistry,
+    site_id: Uuid,
+    actor: Option<&str>,
+) {
     // Schedule the version capture independently of delivery, including
     // when no agent is connected to receive it.
     // The ~19-table capture is best-effort and off the request path (same
     // detached-task pattern as notification delivery): a slow capture must
     // not stretch every API mutation. Hash-based dedup happens inside
     // record_version, so repeat pushes stay cheap even when two spawns race.
-    let db = state.db.clone();
+    let history_db = db.clone();
     let actor = actor.map(str::to_string);
     tokio::spawn(async move {
-        let config_hash = match history_config_hash(&db, &[site_id]).await {
+        let config_hash = match history_config_hash(&history_db, &[site_id]).await {
             Ok(hash) => hash,
             Err(err) => {
                 tracing::warn!(%site_id, error = %err, "failed to fingerprint site configuration history");
@@ -167,7 +223,7 @@ pub async fn notify_config_changed(
             },
         };
         if let Err(err) = config_history::record_version(
-            &db,
+            &history_db,
             VersionScope::Site(site_id),
             config_version::source::API,
             actor.as_deref(),
@@ -181,7 +237,7 @@ pub async fn notify_config_changed(
 
     // Deliver to every agent that serves this site: agents bound to it, and
     // unbound agents of the owning user (they run all of the owner's sites).
-    let agents = match agent::Entity::find().all(&state.db).await {
+    let agents = match agent::Entity::find().all(db).await {
         Ok(rows) => rows,
         Err(err) => {
             tracing::warn!(%site_id, error = %err, "failed to list agents for config push");
@@ -191,7 +247,7 @@ pub async fn notify_config_changed(
 
     let mut delivered = 0usize;
     for row in &agents {
-        let visible = match agent_visible_site_ids(&state.db, row).await {
+        let visible = match agent_visible_site_ids(db, row).await {
             Ok(visible) if visible.contains(&site_id) => visible,
             Ok(_) => continue,
             Err(err) => {
@@ -199,13 +255,13 @@ pub async fn notify_config_changed(
                 continue;
             },
         };
-        if let Some(hinted) = state.agents.hint_managed_config(&row.id).await {
+        if let Some(hinted) = registry.hint_managed_config(&row.id).await {
             delivered += usize::from(hinted);
             continue;
         }
         // Even for a single binding use the legacy builder: moving the site
         // to custom ingress must send an empty replacement, not its history.
-        let payload = match build_site_config(&state.db, Some(&visible)).await {
+        let mut payload = match build_site_config(db, Some(&visible)).await {
             Ok(payload) => payload,
             Err(err) => {
                 tracing::warn!(
@@ -217,8 +273,9 @@ pub async fn notify_config_changed(
                 continue;
             },
         };
+        scope_acme_for_agent(&mut payload, row.id, row.acme_issuer);
         let command = update_site_command(payload);
-        if state.agents.send_command(&row.id, command).await {
+        if registry.send_command(&row.id, command).await {
             delivered += 1;
         }
     }
@@ -451,7 +508,7 @@ async fn push_visible_bundle(
     if let Some(delivered) = registry.hint_managed_config(&row.id).await {
         return delivered;
     }
-    let payload = match bundle_cache.get(visible) {
+    let mut payload = match bundle_cache.get(visible) {
         Some(config) => config.clone(),
         None => {
             let config = match build_site_config(db, Some(visible)).await {
@@ -469,6 +526,7 @@ async fn push_visible_bundle(
             config
         },
     };
+    scope_acme_for_agent(&mut payload, row.id, row.acme_issuer);
     registry
         .send_command(&row.id, update_site_command(payload))
         .await
@@ -722,4 +780,114 @@ pub(crate) async fn check_legacy_ingress_delivery(
 
     managed::check_postgres(db, &service, raw_key, key_id, default, custom)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pingwaf_proto::control_plane::{RuleBundle, SslConfig};
+
+    fn bundle(acme: bool) -> SiteConfig {
+        SiteConfig {
+            sites: vec![pingwaf_proto::control_plane::Site {
+                id: "site-1".to_string(),
+                rules: Some(RuleBundle {
+                    ssl: Some(SslConfig {
+                        cert_pem: "CERT".to_string(),
+                        key_pem: "KEY".to_string(),
+                        acme_enabled: acme,
+                        acme_email: "ops@example.com".to_string(),
+                        acme_challenge_type: 1,
+                        acme_dns_provider: "cf".to_string(),
+                        acme_dns_config: [(
+                            "token".to_string(),
+                            "secret".to_string(),
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn consumer_bundle_keeps_pem_and_drops_acme_credentials() {
+        let mut config = bundle(true);
+        scope_acme_for_agent(&mut config, Uuid::new_v4(), false);
+        let ssl = config.sites[0]
+            .rules
+            .as_ref()
+            .and_then(|rules| rules.ssl.as_ref())
+            .expect("the test bundle carries TLS material");
+        assert_eq!(ssl.cert_pem, "CERT");
+        assert_eq!(ssl.key_pem, "KEY");
+        assert!(!ssl.acme_enabled);
+        assert!(ssl.acme_email.is_empty());
+        assert!(ssl.acme_dns_provider.is_empty());
+        assert!(ssl.acme_dns_config.is_empty());
+    }
+
+    #[test]
+    fn issuer_bundle_keeps_acme_credentials() {
+        let mut config = bundle(true);
+        scope_acme_for_agent(&mut config, Uuid::new_v4(), true);
+        let ssl = config.sites[0]
+            .rules
+            .as_ref()
+            .and_then(|rules| rules.ssl.as_ref())
+            .expect("the test bundle carries TLS material");
+        assert!(ssl.acme_enabled);
+        assert_eq!(ssl.acme_dns_provider, "cf");
+        assert_eq!(
+            ssl.acme_dns_config.get("token"),
+            Some(&"secret".to_string())
+        );
+    }
+
+    #[test]
+    fn per_certificate_issuer_wins_over_the_agent_flag() {
+        let designated = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        // A flagged issuer that is not the designated one gets a consumer
+        // bundle for this certificate.
+        let mut config = bundle(true);
+        config.sites[0]
+            .rules
+            .as_mut()
+            .and_then(|rules| rules.ssl.as_mut())
+            .expect("the test bundle carries TLS material")
+            .acme_issuer_agent_id = designated.to_string();
+        scope_acme_for_agent(&mut config, other, true);
+        let ssl = config.sites[0]
+            .rules
+            .as_ref()
+            .and_then(|rules| rules.ssl.as_ref())
+            .expect("the test bundle carries TLS material");
+        assert!(!ssl.acme_enabled);
+        assert!(ssl.acme_dns_config.is_empty());
+
+        // The designated agent keeps the material even without the agent-level
+        // flag: the designation is the narrower permission.
+        let mut config = bundle(true);
+        config.sites[0]
+            .rules
+            .as_mut()
+            .and_then(|rules| rules.ssl.as_mut())
+            .expect("the test bundle carries TLS material")
+            .acme_issuer_agent_id = designated.to_string();
+        scope_acme_for_agent(&mut config, designated, false);
+        let ssl = config.sites[0]
+            .rules
+            .as_ref()
+            .and_then(|rules| rules.ssl.as_ref())
+            .expect("the test bundle carries TLS material");
+        assert!(ssl.acme_enabled);
+        assert_eq!(ssl.acme_dns_provider, "cf");
+    }
 }

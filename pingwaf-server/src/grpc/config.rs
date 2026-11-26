@@ -856,6 +856,10 @@ fn ssl_to_proto(
         acme_challenge_type: acme_challenge_type.unwrap_or_default(),
         acme_dns_provider,
         acme_dns_config: acme_dns_config.into_iter().collect(),
+        acme_issuer_agent_id: selected
+            .and_then(|cert| cert.acme_issuer_agent_id)
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
         min_tls_version: row.min_tls_version.clone(),
         hsts_enabled: row.hsts_enabled,
         hsts_max_age: row.hsts_max_age.max(0) as u32,
@@ -3431,6 +3435,7 @@ mod tests {
             acme_challenge_type: acme_challenge::HTTP_01.to_string(),
             acme_dns_provider: None,
             acme_dns_config: None,
+            acme_issuer_agent_id: None,
             status: "active".to_string(),
             failure_reason: None,
             created_at: Utc::now(),

@@ -26,6 +26,48 @@ use crate::probe::{self, HostSample, ProbeBuffer};
 mod managed;
 #[cfg(target_os = "linux")]
 pub use managed::ManagedHost;
+/// The subset of the data plane's `acme_state.toml` the publisher needs.
+///
+/// The file is written by the config manager; the publisher only reports
+/// ACME-managed entries that carry material.
+#[derive(Debug, Default, serde::Deserialize)]
+struct AcmeStateFile {
+    #[serde(default)]
+    certificates: HashMap<String, AcmeStateCertificate>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AcmeStateCertificate {
+    #[serde(default)]
+    acme: Option<String>,
+    #[serde(default)]
+    domains: String,
+    #[serde(default)]
+    tls_cert: String,
+    #[serde(default)]
+    tls_key: String,
+}
+
+/// Stable in-process key for "this exact PEM was already handled".
+fn certificate_fingerprint(site_id: &str, cert_pem: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cert_pem.hash(&mut hasher);
+    format!("{site_id}:{:x}", hasher.finish())
+}
+
+/// Whether retrying the same PEM cannot succeed (a permission or validation
+/// refusal). Transport and internal errors are worth retrying.
+fn permanent_publish_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<tonic::Status>().is_some_and(|status| {
+        matches!(
+            status.code(),
+            tonic::Code::PermissionDenied
+                | tonic::Code::InvalidArgument
+                | tonic::Code::FailedPrecondition
+        )
+    })
+}
 
 /// Log entry that can be queued for shipping to the control plane.
 /// This is a simplified local type that gets converted to proto at send time.
@@ -662,6 +704,7 @@ impl ControlPlaneClient {
             self.run_cert_event_shipper(channel.clone(), &agent_id);
         let metric_shipper_fut =
             self.run_metric_shipper(channel.clone(), &agent_id);
+        let publisher_fut = self.run_certificate_publisher(channel.clone(), &agent_id);
 
         // Wait for either to complete (usually means disconnection)
         tokio::select! {
@@ -690,12 +733,129 @@ impl ControlPlaneClient {
                     return Err(e);
                 }
             }
+            result = publisher_fut => {
+                if let Err(e) = result {
+                    error!(error = %e, "Certificate publisher ended");
+                    return Err(e);
+                }
+            }
             _ = self.wait_for_shutdown() => {
                 info!("Shutdown signal received");
             }
         }
 
         Ok(())
+    }
+
+    /// Publishes locally issued ACME certificates to the control plane.
+    ///
+    /// The data plane writes issued material to `acme_state.toml`; a
+    /// designated issuer reports it here so the control plane can store it and
+    /// fan it out. The loop is idempotent: the server accepts an unchanged PEM
+    /// as a no-op, and a refused PEM is remembered so the same bytes are not
+    /// retried forever.
+    async fn run_certificate_publisher(
+        &self,
+        channel: Channel,
+        _agent_id: &str,
+    ) -> anyhow::Result<()> {
+        let path = self.rule_cache.cache_dir().join("acme_state.toml");
+        let mut handled: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if self.shutdown_signal.load(Ordering::Relaxed) {
+                break;
+            }
+            let Ok(text) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let Ok(state) = toml::from_str::<AcmeStateFile>(&text) else {
+                continue;
+            };
+            for (name, cert) in state.certificates {
+                let Some(site_id) = name.strip_suffix("_cert") else {
+                    continue;
+                };
+                if cert.acme.as_deref().is_none_or(str::is_empty)
+                    || cert.domains.trim().is_empty()
+                    || cert.tls_cert.trim().is_empty()
+                    || cert.tls_key.trim().is_empty()
+                {
+                    continue;
+                }
+                let fingerprint =
+                    certificate_fingerprint(site_id, &cert.tls_cert);
+                if handled.contains(&fingerprint) {
+                    continue;
+                }
+                match self
+                    .publish_certificate(
+                        channel.clone(),
+                        site_id,
+                        &cert.domains,
+                        &cert.tls_cert,
+                        &cert.tls_key,
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        handled.insert(fingerprint);
+                        debug!(
+                            site_id,
+                            message = %response.message,
+                            "certificate published"
+                        );
+                    },
+                    Err(err) => {
+                        if permanent_publish_error(&err) {
+                            handled.insert(fingerprint);
+                            warn!(
+                                site_id,
+                                error = %err,
+                                "certificate publication refused"
+                            );
+                        } else {
+                            warn!(
+                                site_id,
+                                error = %err,
+                                "certificate publication failed; will retry"
+                            );
+                        }
+                    },
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reports one issued certificate to the control plane.
+    async fn publish_certificate(
+        &self,
+        channel: Channel,
+        site_id: &str,
+        domains: &str,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> anyhow::Result<proto::PublishCertificateResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = ProtoClient::new(channel);
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            client.publish_certificate(proto::PublishCertificateRequest {
+                agent_token: token,
+                site_id: site_id.to_string(),
+                domains: domains.to_string(),
+                cert_pem: cert_pem.to_string(),
+                key_pem: key_pem.to_string(),
+            }),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))??;
+        Ok(response.into_inner())
     }
 
     /// Run the periodic edge-metrics shipper.
@@ -3231,5 +3391,46 @@ mod tests {
             (40..=80).contains(&observed),
             "no registration happened, so backoff must stay in the jittered top half, got {observed}"
         );
+    }
+}
+
+#[cfg(test)]
+mod publisher_tests {
+    use super::*;
+
+    #[test]
+    fn parses_acme_state_entries_for_publication() {
+        let text = r#"
+[certificates.11111111-1111-1111-1111-111111111111_cert]
+acme = "http://ops@example.com"
+domains = "example.com,*.example.com"
+tls_cert = "CERT"
+tls_key = "KEY"
+
+[certificates.22222222-2222-2222-2222-222222222222_cert]
+domains = "empty.example"
+"#;
+        let state: AcmeStateFile = toml::from_str(text).unwrap();
+        let cert = state
+            .certificates
+            .get("11111111-1111-1111-1111-111111111111_cert")
+            .expect("the issued entry must parse");
+        assert_eq!(cert.domains, "example.com,*.example.com");
+        assert_eq!(cert.tls_cert, "CERT");
+        assert!(cert.acme.is_some());
+        let empty = state
+            .certificates
+            .get("22222222-2222-2222-2222-222222222222_cert")
+            .expect("the empty entry must parse");
+        assert!(empty.acme.is_none());
+        assert!(empty.tls_cert.is_empty());
+    }
+
+    #[test]
+    fn permanent_refusals_are_not_retried() {
+        let refused = anyhow::anyhow!(tonic::Status::permission_denied("no"));
+        assert!(permanent_publish_error(&refused));
+        let transient = anyhow::anyhow!(tonic::Status::unavailable("down"));
+        assert!(!permanent_publish_error(&transient));
     }
 }

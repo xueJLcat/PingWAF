@@ -104,7 +104,9 @@ pingwaf agent
 
 当前 agent **未绑定站点**：会收到 API key 属主的全部站点，而不是单个站点；控制面自身的控制台站点（通常上游 `127.0.0.1:9080`）也会下发，在边缘节点上该回环地址没有控制台，站点会 502。尚无按节点绑定站点的 API，部署边缘时应使用专用控制面，或删除边缘不应运行的站点。
 
-如果控制面是 ACME 签发者，需 **0.32.40+** 才会把内嵌数据面签发的 PEM 同步并推送给 agent。旧控制面只下发 `acme_email`、没有 PEM，每个 agent 会自己发起 HTTP-01，验证请求落到控制面而不是 agent，最终 `acme_failed`。暂不能升级控制面时，可在 agent 单元设置 `PINGAP_DISABLE_ACME=true` 停止重试，并改用上传证书。从 0.33.2 起支持 Amazon Route 53 的 DNS-01：选择 `dns-01` + `route53`，可用 `acme_dns_config.hosted_zone_id` 指定托管区域，签发进程需具备 AWS 凭证（最简单是 EC2 实例角色）。签发者只需该区域的 `GetHostedZone`、`ListResourceRecordSets`、`ChangeResourceRecordSets`（自动发现还需 `ListHostedZones`），消费型 agent 无需 AWS 权限。安装器会把 `--server-ca-cert` 复制到 `/etc/pingwaf/grpc-ca.pem`，控制台生成的命令不含 CA / `--server-tls-name`，自签控制面需手动补上。
+如果控制面是 ACME 签发者，需 **0.32.40+** 才会把内嵌数据面签发的 PEM 同步并推送给 agent。旧控制面只下发 `acme_email`、没有 PEM，每个 agent 会自己发起 HTTP-01，验证请求落到控制面而不是 agent，最终 `acme_failed`。暂不能升级控制面时，可在 agent 单元设置 `PINGAP_DISABLE_ACME=true` 停止重试，并改用上传证书。只有标记为 ACME 签发者的 agent 才会收到 DNS 服务商凭据并发起订单；内嵌 all-in-one 签发者会自动标记，远程签发者需通过 `PATCH /api/v1/agents/{id}` 设置 `{"acme_issuer": true}`。消费型 agent 只使用下发的 PEM，不接触凭据。被标记的远程签发者会通过已认证的控制面通道回传签发的证书，控制面校验指定关系、站点分配、主机名集合与私钥后再分发。
+
+从 0.33.2 起支持 Amazon Route 53 的 DNS-01：选择 `dns-01` + `route53`，可用 `acme_dns_config.hosted_zone_id` 指定托管区域，签发进程需具备 AWS 凭证（最简单是 EC2 实例角色）。签发者只需该区域的 `GetHostedZone`、`ListResourceRecordSets`、`ChangeResourceRecordSets`（自动发现还需 `ListHostedZones`），消费型 agent 无需 AWS 权限。安装器会把 `--server-ca-cert` 复制到 `/etc/pingwaf/grpc-ca.pem`，控制台生成的命令不含 CA / `--server-tls-name`，自签控制面需手动补上。
 
 ## 隧道（内网服务免入站端口）
 

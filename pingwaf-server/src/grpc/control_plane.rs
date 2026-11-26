@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use pingwaf_proto::control_plane::{
     control_plane_server::ControlPlane as ControlPlaneTrait, AgentHeartbeat,
+    PublishCertificateRequest, PublishCertificateResponse,
     BlockedIp, CertEventAck, CertEventEntry, GetManagedSnapshotRequest,
     GetSiteConfigRequest, HostSample, LogAck, LogEntry, ManagedSnapshot,
     Metric, MetricAck, MetricBatch, RegisterAgentRequest,
@@ -439,9 +440,11 @@ impl ControlPlaneService {
     ) -> Result<SiteConfig, Status> {
         let sites = self.visible_sites(row).await?;
         let ids: Vec<Uuid> = sites.iter().map(|site| site.id).collect();
-        build_site_config(&self.db, Some(&ids))
+        let mut config = build_site_config(&self.db, Some(&ids))
             .await
-            .map_err(db_status)
+            .map_err(db_status)?;
+        crate::grpc::scope_acme_for_agent(&mut config, row.id, row.acme_issuer);
+        Ok(config)
     }
 
     async fn telemetry_sites(&self, agent: &agent::Model, session: Option<Uuid>) -> Result<Vec<Uuid>, Status> {
@@ -533,6 +536,14 @@ impl ControlPlaneTrait for ControlPlaneService {
         // unbound agent serves all of the owner's sites; a future manual
         // binding API can narrow the scope explicitly.
         let site_id = None;
+        // The embedded all-in-one issuer reaches the control plane over
+        // loopback; a remote agent starts as a consumer and must be marked
+        // explicitly. The flag is set only on insert: a re-registration must
+        // not undo an operator's choice.
+        let acme_issuer = peer_ip
+            .as_deref()
+            .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback());
 
         let row = match existing {
             Some(row) => {
@@ -576,6 +587,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                     id: Set(agent_id),
                     site_id: Set(site_id),
                     site_scope: Set("all".to_string()),
+                    acme_issuer: Set(acme_issuer),
                     hostname: Set(payload.hostname.clone()),
                     // The label is the operator's: a registering agent never
                     // supplies or clears it.
@@ -1870,9 +1882,14 @@ impl ControlPlaneTrait for ControlPlaneService {
                     "agent is not allowed to read this site",
                 ));
             }
-            let config = build_site_config(&self.db, Some(&[id]))
+            let mut config = build_site_config(&self.db, Some(&[id]))
                 .await
                 .map_err(db_status)?;
+            crate::grpc::scope_acme_for_agent(
+                &mut config,
+                row.id,
+                row.acme_issuer,
+            );
             // The site may have left default ingress since the visibility read.
             if config.sites.is_empty() {
                 return Err(Status::permission_denied(
@@ -1899,6 +1916,98 @@ impl ControlPlaneTrait for ControlPlaneService {
         }
 
         Ok(Response::new(config))
+    }
+
+    /// `PublishCertificate` — a designated issuer reports the material it
+    /// just issued.
+    ///
+    /// The caller must be an issuer and serve the site; the certificate row
+    /// must be ACME-managed, match the submitted hostname set and (when it
+    /// names one) be designated to this agent. The PEM/key pair and its
+    /// validity are checked before the row is promoted and the site config is
+    /// fanned out to every assigned agent.
+    async fn publish_certificate(
+        &self,
+        request: Request<PublishCertificateRequest>,
+    ) -> Result<Response<PublishCertificateResponse>, Status> {
+        let payload = request.into_inner();
+        let row = self.authorize(&payload.agent_token).await?;
+        if !row.acme_issuer {
+            return Err(Status::permission_denied(
+                "this agent is not an ACME issuer",
+            ));
+        }
+        let site_id = Uuid::parse_str(payload.site_id.trim())
+            .map_err(|_| Status::invalid_argument("site_id is not a UUID"))?;
+        let visible = self.visible_sites(&row).await?;
+        if !visible.iter().any(|site| site.id == site_id) {
+            return Err(Status::permission_denied(
+                "agent does not serve this site",
+            ));
+        }
+        const MAX_PEM_BYTES: usize = 1024 * 1024;
+        if payload.cert_pem.trim().is_empty()
+            || payload.key_pem.trim().is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "cert_pem and key_pem are required",
+            ));
+        }
+        if payload.cert_pem.len() > MAX_PEM_BYTES
+            || payload.key_pem.len() > MAX_PEM_BYTES
+        {
+            return Err(Status::invalid_argument(
+                "certificate material is too large",
+            ));
+        }
+
+        match crate::acme_state_sync::import_certificate(
+            &self.db,
+            site_id,
+            None,
+            &payload.domains,
+            &payload.cert_pem,
+            &payload.key_pem,
+            Some(row.id),
+        )
+        .await
+        {
+            Ok(crate::acme_state_sync::ImportOutcome::Updated) => {
+                tracing::info!(
+                    agent_id = %row.id,
+                    %site_id,
+                    "certificate published by agent"
+                );
+                crate::grpc::notify_config_changed_for(
+                    &self.db,
+                    &self.agents,
+                    site_id,
+                    Some("agent-publish"),
+                )
+                .await;
+                Ok(Response::new(PublishCertificateResponse {
+                    accepted: true,
+                    message: "certificate published".to_string(),
+                }))
+            },
+            Ok(crate::acme_state_sync::ImportOutcome::Unchanged) => {
+                Ok(Response::new(PublishCertificateResponse {
+                    accepted: true,
+                    message: "certificate already current".to_string(),
+                }))
+            },
+            Ok(crate::acme_state_sync::ImportOutcome::Skipped(reason)) => {
+                let status = if reason.contains("designated") {
+                    Status::permission_denied(reason)
+                } else {
+                    Status::invalid_argument(reason)
+                };
+                Err(status)
+            },
+            Err(err) => Err(Status::internal(format!(
+                "could not store the published certificate: {err}"
+            ))),
+        }
     }
 
     // ── Visitor authentication ─────────────────────────────────────────

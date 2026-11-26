@@ -61,14 +61,22 @@ function stateOf(tunnel: Tunnel): 'active' | 'pending' | 'disabled' {
  * pool is bound to it. Creating one here is a pairing operation — the console
  * mints a one-time token and shows the command that installs the connector.
  */
-export function TunnelsTab() {
+interface TunnelsTabProps {
+  /** Owned by the page so the shared header can open the create dialog. */
+  createOpen: boolean
+  onCreateOpenChange: (open: boolean) => void
+}
+
+export function TunnelsTab({
+  createOpen,
+  onCreateOpenChange,
+}: TunnelsTabProps) {
   const { t } = useTranslation()
   const toast = useToast()
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
   const now = useNow(15_000)
 
-  const [createOpen, setCreateOpen] = useState(false)
   const [pairing, setPairing] = useState<TunnelPairing | null>(null)
   const [detail, setDetail] = useState<Tunnel | null>(null)
   const [renaming, setRenaming] = useState<Tunnel | null>(null)
@@ -337,15 +345,6 @@ export function TunnelsTab() {
               {t('pages.tunnels.settings')}
             </Button>
           )}
-          {canWrite && (
-            <Button
-              variant="primary"
-              icon={<Plus weight="bold" className="h-4 w-4" />}
-              onClick={() => setCreateOpen(true)}
-            >
-              {t('pages.tunnels.create')}
-            </Button>
-          )}
         </div>
       </div>
 
@@ -378,7 +377,7 @@ export function TunnelsTab() {
                     <Button
                       variant="primary"
                       icon={<Plus weight="bold" className="h-4 w-4" />}
-                      onClick={() => setCreateOpen(true)}
+                      onClick={() => onCreateOpenChange(true)}
                     >
                       {t('pages.tunnels.create')}
                     </Button>
@@ -400,9 +399,9 @@ export function TunnelsTab() {
       {/* Create → pairing command */}
       <CreateTunnelDialog
         open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        onClose={() => onCreateOpenChange(false)}
         onPaired={(result) => {
-          setCreateOpen(false)
+          onCreateOpenChange(false)
           setPairing(result)
           invalidate()
         }}

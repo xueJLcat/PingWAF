@@ -39,6 +39,11 @@ pub mod agents {
         /// `all` (legacy: every site owned by the API key) or `selected`
         /// (only the rows in `agent_sites`; may be empty).
         pub site_scope: String,
+        /// Whether this agent may run ACME issuance and receive the site's
+        /// DNS provider credentials. The embedded all-in-one issuer is marked
+        /// automatically; consumer-only edges are not, so they serve the
+        /// distributed PEM without ever seeing a Cloudflare/Aliyun token.
+        pub acme_issuer: bool,
         pub hostname: String,
         /// Operator-editable label shown instead of `hostname` when set.
         ///

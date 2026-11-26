@@ -17,6 +17,49 @@ verbatim for reference and attribution, and is not maintained here.
 - Add ServerChan Turbo and ServerChan³ notification channels with masked SendKeys.
 - Allow administrators to delete an individual configuration snapshot. Snapshot action icons show their labels on keyboard focus and hover.
 - Give site types their own aligned table column and show the same labels beneath the site name on mobile. Page protection is accessible through the sidebar and site settings.
+## [PingWAF 0.33.3] — 2026-11-26
+
+### Added
+
+- **ACME issuer scope per agent.** An agent either issues certificates or only
+  serves them. Only an issuer receives the site's `acme_dns_config` (the
+  Cloudflare/Aliyun/Tencent/Huawei token) and only an issuer opens orders; a
+  consumer keeps serving the distributed PEM and never sees the credential.
+  The embedded all-in-one issuer is marked automatically because it registers
+  over loopback; a remote issuer is marked with
+  `PATCH /api/v1/agents/{id}` (`{"acme_issuer": true}`) or the toggle in the
+  agent detail panel. Migration `000109` adds the column and keeps an existing
+  single-agent deployment issuing. Route 53 is unaffected in the config (its
+  `acme_dns_config` carries only a hosted-zone ID; AWS credentials stay in the
+  issuer's runtime).
+- **ACME state import validation.** The control plane now refuses an entry
+  that is expired, not yet valid, older than the certificate already stored, or
+  issued by an ACME staging CA (unless `PINGAP_ACME_STAGING` is set), instead
+  of marking it active and pushing it to every agent.
+- **Per-certificate issuer and certificate publication.** A managed
+  certificate can name one issuer agent (`site_certificates.acme_issuer_agent_id`,
+  migration `000110`); only that agent receives the ACME material and only its
+  publication is accepted. The designated issuer reports the issued chain and
+  key over the authenticated `PublishCertificate` gRPC call; the control plane
+  validates the caller, the site assignment, the exact hostname set, the
+  key/leaf pair and the certificate's validity, then promotes it and fans it
+  out. The embedded all-in-one issuer keeps using its local ACME state file;
+  the two paths are idempotent. The certificate form exposes the optional
+  issuer selector.
+
+### Changed
+
+- A non-issuer agent's bundle no longer carries `acme_dns_config` or
+  `acme_enabled`, so consumer-only edges cannot read the provider token or
+  start a duplicate order.
+- **The edge page hosts agents and tunnels under one header.** "Create tunnel"
+  and "Add node" sit side by side in the shared header (the active tab's action
+  is primary), the tunnel tab no longer renders its own header/tabs, and the
+  page description now covers both. The agents tab's refresh moved next to
+  its filters and its empty state offers "Add node" like the tunnel empty state
+  offers "Create tunnel".
+- A certificate designated to one agent is skipped by the local ACME state
+  import: the file sync cannot overwrite another agent's certificate.
 
 ## [PingWAF 0.33.2] — 2026-11-26
 

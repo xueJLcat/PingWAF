@@ -113,6 +113,7 @@ export function AgentsPage() {
   // themselves and the tunnel connectors that dial into them.
   const [tab, setTab] = useState<'agents' | 'tunnels'>('agents')
   const [enrollOpen, setEnrollOpen] = useState(false)
+  const [createTunnelOpen, setCreateTunnelOpen] = useState(false)
   const [enrollName, setEnrollName] = useState('')
   const [enrollResult, setEnrollResult] = useState<AgentEnrollResponse | null>(null)
 
@@ -271,6 +272,19 @@ export function AgentsPage() {
     },
     onError: (error) => {
       toast.error(t('pages.agents.tunnelIngressFailed'), errorMessage(error))
+    },
+  })
+
+  const setAcmeIssuer = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: boolean }) =>
+      agentsApi.update(id, { acme_issuer: value }),
+    onSuccess: (agent) => {
+      toast.success(t('pages.agents.acmeIssuerSaved'), displayName(agent))
+      setDetail((prev) => (prev?.id === agent.id ? agent : prev))
+      invalidate()
+    },
+    onError: (error) => {
+      toast.error(t('pages.agents.acmeIssuerFailed'), errorMessage(error))
     },
   })
 
@@ -598,49 +612,33 @@ export function AgentsPage() {
     { value: 'tunnels', label: t('pages.agents.tabTunnels') },
   ]
 
-  if (tab === 'tunnels') {
-    return (
-      <div className="animate-slide-up">
-        <PageHeader
-          title={t('pages.agents.title')}
-          description={t('pages.agents.description')}
-        />
-        <Tabs
-          items={tabItems}
-          value={tab}
-          onChange={(value) => setTab(value === 'tunnels' ? 'tunnels' : 'agents')}
-          className="mb-4"
-        />
-        <TunnelsTab />
-      </div>
-    )
-  }
-
   return (
     <div className="animate-slide-up">
       <PageHeader
         title={t('pages.agents.title')}
         description={t('pages.agents.description')}
         actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              loading={agentsQuery.isFetching}
-              onClick={() => agentsQuery.refetch()}
-              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
-            >
-              {t('common.refresh')}
-            </Button>
-            {canWrite && (
+          canWrite ? (
+            <div className="flex items-center gap-2">
               <Button
-                variant="primary"
+                variant={tab === 'tunnels' ? 'primary' : 'secondary'}
+                icon={<Plugs weight="duotone" className="h-4 w-4" />}
+                onClick={() => {
+                  setTab('tunnels')
+                  setCreateTunnelOpen(true)
+                }}
+              >
+                {t('pages.tunnels.create')}
+              </Button>
+              <Button
+                variant={tab === 'agents' ? 'primary' : 'secondary'}
                 icon={<Plus weight="bold" className="h-4 w-4" />}
                 onClick={openEnroll}
               >
                 {t('pages.agents.addNode')}
               </Button>
-            )}
-          </div>
+            </div>
+          ) : undefined
         }
       />
 
@@ -651,148 +649,175 @@ export function AgentsPage() {
         className="mb-4"
       />
 
-      {/* Fleet summary */}
-      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {stats.map((stat) => {
-          const Icon = stat.icon
-          return (
-            <Card key={stat.key}>
-              <CardBody className="flex items-center gap-3 py-3.5">
-                <span
-                  className={cn(
-                    'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
-                    stat.tone,
-                  )}
-                >
-                  <Icon weight="duotone" className="h-4 w-4" />
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate text-xs text-fg-subtle">{stat.label}</p>
-                  {stat.value === undefined ? (
-                    <span className="pw-skeleton mt-1 block h-5 w-12 rounded" />
-                  ) : (
-                    <p className="tabular-nums text-lg font-semibold leading-tight text-fg-strong">
-                      {stat.value}
-                    </p>
-                  )}
-                </div>
-              </CardBody>
-            </Card>
-          )
-        })}
-      </div>
-
-      {summaryQuery.data && (
-        <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-line bg-elevated px-4 py-2.5 text-[13px] text-fg-subtle">
-          <span>
-            {t('pages.dashboard.requestsWindow')}:{' '}
-            <strong className="tabular-nums text-fg-strong">
-              {formatNumber(summaryQuery.data.requests)}
-            </strong>
-          </span>
-          <span>
-            {t('pages.dashboard.blockedWindow')}:{' '}
-            <strong className="tabular-nums text-fg-danger">
-              {formatNumber(summaryQuery.data.blocked_requests)}
-            </strong>
-          </span>
-          <span>
-            {t('pages.dashboard.avgLatency')}:{' '}
-            <strong className="tabular-nums text-fg-strong">
-              {formatLatency(summaryQuery.data.avg_latency_ms)}
-            </strong>
-          </span>
+      {tab === 'agents' ? (
+        <>
+        {/* Fleet summary */}
+        <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {stats.map((stat) => {
+            const Icon = stat.icon
+            return (
+              <Card key={stat.key}>
+                <CardBody className="flex items-center gap-3 py-3.5">
+                  <span
+                    className={cn(
+                      'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
+                      stat.tone,
+                    )}
+                  >
+                    <Icon weight="duotone" className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-xs text-fg-subtle">{stat.label}</p>
+                    {stat.value === undefined ? (
+                      <span className="pw-skeleton mt-1 block h-5 w-12 rounded" />
+                    ) : (
+                      <p className="tabular-nums text-lg font-semibold leading-tight text-fg-strong">
+                        {stat.value}
+                      </p>
+                    )}
+                  </div>
+                </CardBody>
+              </Card>
+            )
+          })}
         </div>
-      )}
 
-      {statusQuery.data && !statusQuery.data.grpc_tls && (
-        <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
-          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
-          {t('pages.agents.grpcPlaintext')}
-        </p>
-      )}
+        {summaryQuery.data && (
+          <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-line bg-elevated px-4 py-2.5 text-[13px] text-fg-subtle">
+            <span>
+              {t('pages.dashboard.requestsWindow')}:{' '}
+              <strong className="tabular-nums text-fg-strong">
+                {formatNumber(summaryQuery.data.requests)}
+              </strong>
+            </span>
+            <span>
+              {t('pages.dashboard.blockedWindow')}:{' '}
+              <strong className="tabular-nums text-fg-danger">
+                {formatNumber(summaryQuery.data.blocked_requests)}
+              </strong>
+            </span>
+            <span>
+              {t('pages.dashboard.avgLatency')}:{' '}
+              <strong className="tabular-nums text-fg-strong">
+                {formatLatency(summaryQuery.data.avg_latency_ms)}
+              </strong>
+            </span>
+          </div>
+        )}
 
-      {/* Filters */}
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="w-full max-w-xs">
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('pages.agents.searchPlaceholder')}
-            prefixIcon={<MagnifyingGlass weight="duotone" />}
-            aria-label={t('common.search')}
+        {statusQuery.data && !statusQuery.data.grpc_tls && (
+          <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
+            <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
+            {t('pages.agents.grpcPlaintext')}
+          </p>
+        )}
+
+        {/* Filters */}
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <div className="w-full max-w-xs">
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t('pages.agents.searchPlaceholder')}
+              prefixIcon={<MagnifyingGlass weight="duotone" />}
+              aria-label={t('common.search')}
+            />
+          </div>
+          <Select
+            aria-label={t('common.status')}
+            className="h-9 w-40"
+            value={statusFilter}
+            options={[
+              { value: '', label: t('pages.agents.anyStatus') },
+              ...AGENT_STATUSES.map((s) => ({ value: s, label: t(`status.${s}`, s) })),
+            ]}
+            onChange={(e) => setStatusFilter(e.target.value)}
           />
+          <Select
+            aria-label={t('pages.agents.site')}
+            className="h-9 w-48"
+            value={siteFilter}
+            options={siteOptions}
+            onChange={(e) => setSiteFilter(e.target.value)}
+          />
+          <div className="ml-auto">
+            <Button
+              variant="ghost"
+              loading={agentsQuery.isFetching}
+              onClick={() => agentsQuery.refetch()}
+              icon={<ArrowClockwise weight="duotone" className="h-4 w-4" />}
+            >
+              {t('common.refresh')}
+            </Button>
+          </div>
         </div>
-        <Select
-          aria-label={t('common.status')}
-          className="h-9 w-40"
-          value={statusFilter}
-          options={[
-            { value: '', label: t('pages.agents.anyStatus') },
-            ...AGENT_STATUSES.map((s) => ({ value: s, label: t(`status.${s}`, s) })),
-          ]}
-          onChange={(e) => setStatusFilter(e.target.value)}
-        />
-        <Select
-          aria-label={t('pages.agents.site')}
-          className="h-9 w-48"
-          value={siteFilter}
-          options={siteOptions}
-          onChange={(e) => setSiteFilter(e.target.value)}
-        />
-      </div>
 
-      {agentsQuery.isError && !agentsQuery.data ? (
-        <ErrorState
-          error={agentsQuery.error}
-          onRetry={() => agentsQuery.refetch()}
-          retrying={agentsQuery.isFetching}
-        />
+        {agentsQuery.isError && !agentsQuery.data ? (
+          <ErrorState
+            error={agentsQuery.error}
+            onRetry={() => agentsQuery.refetch()}
+            retrying={agentsQuery.isFetching}
+          />
+        ) : (
+          <Card>
+            <CardBody className="p-0">
+              {agentsQuery.isPending ? (
+                <SkeletonRows rows={6} columns={7} />
+              ) : agents.length === 0 ? (
+                <EmptyState
+                  className="py-14"
+                  icon={<Desktop weight="duotone" className="h-8 w-8" />}
+                  title={
+                    search || statusFilter || siteFilter
+                      ? t('pages.agents.noResults')
+                      : t('pages.agents.empty')
+                  }
+                  description={
+                    search || statusFilter || siteFilter
+                      ? t('pages.agents.noResultsDescription')
+                      : t('pages.agents.emptyDescription')
+                  }
+                  action={
+                    search || statusFilter || siteFilter ? (
+                      <Button
+                        variant="secondary"
+                        onClick={() => {
+                          setSearch('')
+                          setStatusFilter('')
+                          setSiteFilter('')
+                        }}
+                      >
+                        {t('common.reset')}
+                      </Button>
+                    ) : canWrite ? (
+                      <Button
+                        variant="primary"
+                        icon={<Plus weight="bold" className="h-4 w-4" />}
+                        onClick={openEnroll}
+                      >
+                        {t('pages.agents.addNode')}
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <Table
+                  columns={columns}
+                  data={agents}
+                  rowKey={(a) => a.id}
+                  dense
+                  onRowClick={(a) => setDetail(a)}
+                />
+              )}
+            </CardBody>
+          </Card>
+        )}
+        </>
       ) : (
-        <Card>
-          <CardBody className="p-0">
-            {agentsQuery.isPending ? (
-              <SkeletonRows rows={6} columns={9} />
-            ) : agents.length === 0 ? (
-              <EmptyState
-                className="py-14"
-                icon={<Desktop weight="duotone" className="h-8 w-8" />}
-                title={
-                  search || statusFilter || siteFilter
-                    ? t('pages.agents.noResults')
-                    : t('pages.agents.empty')
-                }
-                description={
-                  search || statusFilter || siteFilter
-                    ? t('pages.agents.noResultsDescription')
-                    : t('pages.agents.emptyDescription')
-                }
-                action={
-                  search || statusFilter || siteFilter ? (
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        setSearch('')
-                        setStatusFilter('')
-                        setSiteFilter('')
-                      }}
-                    >
-                      {t('common.reset')}
-                    </Button>
-                  ) : undefined
-                }
-              />
-            ) : (
-              <Table
-                columns={columns}
-                data={agents}
-                rowKey={(a) => a.id}
-                dense
-                onRowClick={(a) => setDetail(a)}
-              />
-            )}
-          </CardBody>
-        </Card>
+        <TunnelsTab
+          createOpen={createTunnelOpen}
+          onCreateOpenChange={setCreateTunnelOpen}
+        />
       )}
 
       {/* Agent detail */}
@@ -932,6 +957,36 @@ export function AgentsPage() {
             </div>
 
             <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+              <DetailRow
+                label={t('pages.agents.acmeIssuer')}
+                title={t('pages.agents.acmeIssuerHint')}
+                value={
+                  <span className="inline-flex items-center gap-2">
+                    <span>
+                      {detail.acme_issuer
+                        ? t('pages.agents.acmeIssuerYes')
+                        : t('pages.agents.acmeIssuerNo')}
+                    </span>
+                    {canWrite && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={setAcmeIssuer.isPending}
+                        onClick={() =>
+                          setAcmeIssuer.mutate({
+                            id: detail.id,
+                            value: !detail.acme_issuer,
+                          })
+                        }
+                      >
+                        {detail.acme_issuer
+                          ? t('pages.agents.acmeIssuerDisable')
+                          : t('pages.agents.acmeIssuerEnable')}
+                      </Button>
+                    )}
+                  </span>
+                }
+              />
               <DetailRow label={t('pages.agents.publicIp')} value={detail.public_ip} mono />
               <DetailRow label={t('pages.agents.privateIp')} value={detail.private_ip} mono />
               <DetailRow label={t('pages.agents.ipAddress')} value={detail.ip_address} />

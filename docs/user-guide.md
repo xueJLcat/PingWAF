@@ -604,6 +604,12 @@ the CA validates the order. For manual DNS-01, select manual TXT verification an
 An older DNS-01 order with an unsupported provider retains its settings until
 an administrator chooses a supported provider.
 
+The control plane imports the issuer's local ACME state only when the entry is
+ACME-managed, matches the certificate row's hostname set, and is currently
+valid: expired, not-yet-valid, older-than-stored, and (unless
+`PINGAP_ACME_STAGING` is set on the control plane) staging-CA certificates are
+rejected with a warning instead of being pushed to agents.
+
 Certificates auto-renew 30 days before expiry.
 
 ### Manual Upload
@@ -1135,6 +1141,47 @@ Agents → [agent] → Manage sites
 The assignment is validated against the API key's owner and takes effect
 immediately for a connected agent; an offline node receives it on reconnect.
 The same setting is available as `PUT /api/v1/agents/{id}/sites`.
+
+### ACME issuer scope
+
+An agent either **issues** certificates or only **serves** them. Only an issuer
+receives the site's `acme_dns_config` (the Cloudflare/Aliyun/Tencent/Huawei
+token) and only an issuer opens ACME orders; a consumer keeps serving the PEM
+the control plane distributes and never sees the DNS credential. Route 53 is
+different: its `acme_dns_config` holds only a hosted-zone ID, and the AWS
+credentials come from the issuer's own runtime.
+
+- The embedded all-in-one issuer is marked automatically (it registers over
+  loopback).
+- A remote agent that should issue must be marked explicitly:
+  `PATCH /api/v1/agents/{id}` with `{"acme_issuer": true}`, or the toggle in
+  **Agents → [agent]**.
+- Mark consumer-only edges `acme_issuer=false` so a compromised edge cannot
+  open orders or read the provider token. The console shows the scope in the
+  agent detail panel.
+
+A control-plane-only deployment with no embedded issuer has no issuer until one
+is marked. A remote issuer that is marked (and assigned to the site) can return
+its issued PEM over the authenticated `PublishCertificate` gRPC call: the
+control plane validates the caller, the site assignment, the certificate's
+hostname set, the key/leaf pair and the certificate's validity before promoting
+it and fanning it out to every assigned agent. The embedded all-in-one issuer
+keeps working through its local ACME state file; the two paths are idempotent.
+
+### Per-certificate issuer
+
+The agent-level flag decides whether a node may issue at all. To narrow one
+certificate to one agent, set `acme_issuer_agent_id` on the certificate (the
+"Issuer agent" selector in the certificate form, or the field on
+`POST/PUT /api/v1/certificates`). When it is set:
+
+- only that agent receives the certificate's ACME material;
+- only that agent's `PublishCertificate` call is accepted for it;
+- every other agent gets the consumer bundle and serves the distributed PEM.
+
+Leave it empty to keep the agent-level scope (the embedded all-in-one issuer
+and single-agent deployments need no designation). The designated agent must
+already be marked `acme_issuer=true` and serve the certificate's site.
 
 ### Monitoring Agents
 

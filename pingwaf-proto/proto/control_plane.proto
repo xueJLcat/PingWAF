@@ -34,6 +34,12 @@ service ControlPlane {
   rpc ReadPageIntegrity(PageIntegrityRead) returns (PageIntegrityRules);
   rpc ObservePageIntegrity(PageIntegrityObservation) returns (PageIntegrityAck);
 
+  // Certificate publication (designated issuer agent -> control plane).
+  // The control plane validates the caller, the site assignment, the
+  // certificate's designation, the hostname set and the key/leaf pair before
+  // atomically promoting the material and fanning it out.
+  rpc PublishCertificate(PublishCertificateRequest) returns (PublishCertificateResponse);
+
   // Visitor authentication.
   //
   // A protected site's visitors are signed in by the data plane, but their
@@ -1101,6 +1107,9 @@ message SslConfig {
   // predates these fields keeps serving both protocols.
   optional bool http1_enabled = 21;
   optional bool http2_enabled = 22;
+  // Agent allowed to issue this certificate (the site_certificates row's
+  // acme_issuer_agent_id). Empty keeps the agent-level acme_issuer scope.
+  string acme_issuer_agent_id = 23;
 }
 
 enum AcmeChallengeType {
@@ -1480,6 +1489,20 @@ message CertEventAck {
   uint64 received_count = 1;
   bool success = 2;
   string error_message = 3;
+}
+
+message PublishCertificateRequest {
+  string agent_token = 1;
+  string site_id = 2;
+  // Comma-separated SAN list, exactly as the issuer stored it.
+  string domains = 3;
+  string cert_pem = 4;
+  string key_pem = 5;
+}
+
+message PublishCertificateResponse {
+  bool accepted = 1;
+  string message = 2;
 }
 
 // ============================================================

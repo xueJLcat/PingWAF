@@ -51,7 +51,11 @@ export const agentsApi = {
    */
   update: (
     id: string,
-    data: { display_name?: string | null; tunnel_ingress_addr?: string | null },
+    data: {
+      display_name?: string | null
+      tunnel_ingress_addr?: string | null
+      acme_issuer?: boolean
+    },
   ) => apiClient.patch<Agent>(`/agents/${id}`, data),
 
   /**

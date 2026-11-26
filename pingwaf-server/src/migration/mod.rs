@@ -140,6 +140,8 @@ mod m20240101_000120_syslog;
 mod m20240101_000121_all_site_listeners;
 #[cfg(test)]
 mod site_ingress_tests;
+mod m20240101_000109_agent_acme_issuer;
+mod m20240101_000110_certificate_issuer_agent;
 
 use sea_orm_migration::prelude::*;
 
@@ -286,6 +288,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000119_tunnel_listener_error::Migration),
             Box::new(m20240101_000120_syslog::Migration),
             Box::new(m20240101_000121_all_site_listeners::Migration),
+            Box::new(m20240101_000109_agent_acme_issuer::Migration),
+            Box::new(m20240101_000110_certificate_issuer_agent::Migration),
         ]
     }
 }
@@ -297,7 +301,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 125);
+        assert_eq!(migrations.len(), 127);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

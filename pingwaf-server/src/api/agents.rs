@@ -73,6 +73,10 @@ pub struct AgentResponse {
     pub site_domain: Option<String>,
     /// `all` (legacy: every site owned by the API key) or `selected`.
     pub site_scope: String,
+    /// Whether this agent may run ACME issuance and receive DNS provider
+    /// credentials. Consumer-only edges are false: they serve the PEM without
+    /// ever seeing the provider token.
+    pub acme_issuer: bool,
     /// Sites assigned to a `selected` agent (empty for `all`).
     pub site_ids: Vec<Uuid>,
     /// Domains matching `site_ids`, in the same order.
@@ -234,13 +238,19 @@ pub struct UpdateAgentRequest {
     /// clears it (the agent stops being offered as a tunnel ingress).
     #[serde(default)]
     pub tunnel_ingress_addr: Option<String>,
+    /// Whether the agent may issue ACME certificates and receive DNS provider
+    /// credentials. Absent leaves the stored value alone. Turning it off makes
+    /// the agent a consumer: it keeps serving the distributed PEM but stops
+    /// receiving `acme_dns_config` and stops opening orders.
+    #[serde(default)]
+    pub acme_issuer: Option<bool>,
 }
 
 /// Deserializes a present-but-nullable field into `Option<Option<T>>`.
 ///
 /// serde only calls this when the key is present, so the outer `Option`
 /// separates "absent" (`None`) from a JSON `null` (`Some(None)`).
-fn deserialize_present_nullable<'de, D, T>(
+pub(crate) fn deserialize_present_nullable<'de, D, T>(
     deserializer: D,
 ) -> Result<Option<Option<T>>, D::Error>
 where
@@ -737,6 +747,7 @@ async fn update(
         .as_deref()
         .map(normalise_ingress_addr)
         .transpose()?;
+    let previous_issuer = row.acme_issuer;
     let mut active: agent::ActiveModel = row.into();
     let mut renamed = false;
     if let Some(display_name) = payload.display_name {
@@ -749,14 +760,30 @@ async fn update(
         ingress_changed = true;
         active.tunnel_ingress_addr = Set(ingress);
     }
+    let mut issuer_changed = false;
+    if let Some(acme_issuer) = payload.acme_issuer {
+        issuer_changed = previous_issuer != acme_issuer;
+        active.acme_issuer = Set(acme_issuer);
+    }
     active.update(&state.db).await?;
 
     tracing::info!(
         agent_id = %id,
         renamed,
         ingress_changed,
+        issuer_changed,
         "agent updated"
     );
+
+    // The flag decides whether the next bundle carries the ACME credentials
+    // and the issuance task, so the agent has to receive the new scope now.
+    if issuer_changed {
+        if let Err(err) =
+            crate::grpc::repush_agent_config(&state.db, &state.agents, id).await
+        {
+            tracing::warn!(agent_id = %id, error = %err, "could not push the ACME issuer scope change");
+        }
+    }
 
     // A connector dials the address recorded here, so a change has to reach
     // every connected connector now instead of on its next reconnect.
@@ -1159,6 +1186,7 @@ async fn enrich(
             site_domain: row.site_id.and_then(|id| domains.get(&id).cloned()),
             site_id: row.site_id,
             site_scope: row.site_scope.clone(),
+            acme_issuer: row.acme_issuer,
             site_ids,
             site_domains,
             entry_summary: None,

@@ -1407,6 +1407,13 @@ and only needs `GetHostedZone`, `ListResourceRecordSets` and
 `ListHostedZones`. A failed order reports the Route 53 error code in the
 certificate event.
 
+`acme_issuer_agent_id` (optional) pins the certificate to one issuer agent.
+The agent must already be marked `acme_issuer=true` and serve the
+certificate's site; only that agent then receives the ACME material and only
+its `PublishCertificate` call is accepted. Omitted or `null` keeps the
+agent-level scope (the embedded all-in-one issuer and single-agent deployments
+need no designation).
+
 The response is the saved certificate, `warnings` included (see
 [Certificate `warnings`](#certificate-warnings)).
 
@@ -1579,6 +1586,7 @@ Every field is optional and omitted fields keep their value.
 | `cert_pem` / `key_pem` | Replacing either half re-validates the pair **as it will be after this request** (a replacement certificate is checked against the stored key and vice versa, so a mismatched pair cannot be assembled one request at a time). Sending `key_pem` without a certificate (new or stored) is refused with `400`. |
 | `issuer`, `not_before`, `expires_at`, `auto_renew` | Metadata updates. |
 | `acme_email`, `acme_challenge_type`, `acme_dns_provider`, `acme_dns_config` | ACME settings; `acme_challenge_type` must be `http-01` or `dns-01` (`400` otherwise). An ACME order without a stored PEM for a wildcard hostname requires `dns-01` (`400` otherwise). |
+| `acme_issuer_agent_id` | Tri-state: absent keeps the designation, `null` clears it (back to the agent-level scope), an agent id sets it. The agent must be marked `acme_issuer=true` and serve the certificate's site (`400` otherwise). |
 | `status` | Must be a valid certificate status (`400` otherwise); setting it back to `pending` also clears a stored `failure_reason`. |
 
 **Permissions:** the update is authorised through the certificate's owning
@@ -2147,14 +2155,15 @@ Get agent details. The response carries the same `display_name` /
 
 ### PATCH /agents/{agent_id}
 
-Set or clear the operator-facing display name and/or the tunnel ingress
-address. Requires write access (non-viewer).
+Set or clear the operator-facing display name, the tunnel ingress
+address, and/or the ACME issuer scope. Requires write access (non-viewer).
 
 **Request:**
 ```json
 {
   "display_name": "edge-01 (backup)",
-  "tunnel_ingress_addr": "edge1.example.com:9443"
+  "tunnel_ingress_addr": "edge1.example.com:9443",
+  "acme_issuer": true
 }
 ```
 
@@ -2175,6 +2184,13 @@ Rules:
   are read-only here; the last one explains a configured listener that could
   not bind (for example the port is taken), so the console can tell "not
   configured" apart from "configured but failing".
+- `acme_issuer` (boolean) controls whether this agent may run ACME issuance.
+  Only an issuer receives the site's `acme_dns_config` (the DNS provider
+  token) and only an issuer opens orders; a consumer keeps serving the
+  distributed PEM and never sees the credential. The embedded all-in-one
+  issuer is marked automatically. A remote agent that should issue must be
+  marked here; a change takes effect immediately and is re-pushed to the node.
+  The response carries `acme_issuer` on every agent read.
 - At most `100` characters; control characters are rejected (`display_name
   must be at most 100 characters` / `display_name must not contain control
   characters`).

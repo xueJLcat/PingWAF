@@ -262,6 +262,7 @@ async fn build_in_view(
     if !supports_site_archives { sites.retain(|site| site.site_handler.as_ref().and_then(|v| v["kind"].as_str()) != Some("zip")); }
     if !supports_site_handlers { sites.retain(|site| site.site_handler.is_none()); }
     let mut config = assemble_managed_config(tx, &sites).await?;
+    super::scope_acme_sites(config.sites.iter_mut().filter_map(|entry| entry.site.as_mut()), agent_id, agent.acme_issuer);
     if !supports_dynamic_pages { config.sites.retain(|s| s.protected_pages.iter().all(|r| r.dynamic_stage == "off" || r.dynamic_stage.is_empty())); }
     if !supports_page_integrity { config.sites.retain(|site| site.protected_pages.is_empty()); }
     if supports_panel_listeners {
