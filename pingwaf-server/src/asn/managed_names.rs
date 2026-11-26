@@ -100,7 +100,7 @@ pub fn status() -> Status {
         entries: table.names.len(),
         error: table.error.clone(),
         path: PATH,
-        operator_path: std::env::var(NAMES_FILE_ENV).ok(),
+        operator_path: super::operator_names_path().map(|path| path.display().to_string()),
     }
 }
 

@@ -607,8 +607,7 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                   loading={!data}
                   error={overviewQuery.error}
                   onRetry={() => void overviewQuery.refetch()}
-                  emptyTitle={t('common.noData')}
-                  emptyDescription={t('pages.traffic.topAsnsEmpty')}
+                  emptyTitle={t('pages.traffic.topAsnsEmpty')}
                 />
               </CardBody>
             </Card>

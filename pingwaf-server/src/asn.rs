@@ -94,6 +94,14 @@ pub fn display_name(asn: u32) -> String {
     }
 }
 
+/// Operator override, or the versioned name table installed with a native release.
+fn operator_names_path() -> Option<PathBuf> {
+    std::env::var_os(NAMES_FILE_ENV).map(PathBuf::from).or_else(|| {
+        let path = PathBuf::from("/var/lib/pingwaf/asn-release-names.tsv");
+        path.is_file().then_some(path)
+    })
+}
+
 /// Forces the ASN→name mapping to load, so the first analytics request does
 /// not pay for the (small) file read. Called from the startup warm-up task.
 pub fn warm_names() {
@@ -107,7 +115,7 @@ fn load() -> HashMap<u32, String> {
     let (mut names, issues) = parse(BUNDLED);
     report("bundled", &issues);
 
-    let Some(path) = std::env::var_os(NAMES_FILE_ENV) else {
+    let Some(path) = operator_names_path() else {
         tracing::debug!(
             entries = names.len(),
             "ASN name mapping loaded from the bundled snapshot"
@@ -115,7 +123,6 @@ fn load() -> HashMap<u32, String> {
         return names;
     };
 
-    let path = std::path::PathBuf::from(path);
     // Not named `display`: the `%value` sigil of the `tracing` macros expands
     // to `tracing::field::display`, and a local of that name shadows it.
     let file_label = path.display().to_string();
