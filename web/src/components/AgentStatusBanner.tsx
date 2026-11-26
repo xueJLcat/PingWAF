@@ -17,7 +17,7 @@ export function AgentStatusBanner({ siteId }: { siteId?: string }) {
 
   const agentsQuery = useQuery({
     queryKey: agentKeys.list({ site_id: siteId || undefined }),
-    queryFn: () => agentsApi.list({ site_id: siteId || undefined }),
+    queryFn: () => agentsApi.inventory({ site_id: siteId || undefined }),
     staleTime: 30_000,
   })
 

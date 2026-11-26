@@ -23,7 +23,7 @@ export function GlobalTrafficPage() {
 
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({}),
-    queryFn: () => sitesApi.list(),
+    queryFn: () => sitesApi.inventory(),
     select: (page) => page.items,
   })
 

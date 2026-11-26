@@ -697,6 +697,7 @@ async fn list(
     let paginator = agent::Entity::find()
         .filter(condition)
         .order_by_desc(agent::Column::RegisteredAt)
+        .order_by_asc(agent::Column::Id)
         .paginate(&state.db, pagination.limit());
 
     let total = paginator.num_items().await?;

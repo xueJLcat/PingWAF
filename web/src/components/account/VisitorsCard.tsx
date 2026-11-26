@@ -58,7 +58,7 @@ export function VisitorsCard({ canWrite }: { canWrite: boolean }) {
   // sites to pick" rather than taking the whole card down.
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({}),
-    queryFn: () => sitesApi.list({}),
+    queryFn: () => sitesApi.inventory({}),
     retry: false,
   })
   const sites = sitesQuery.data?.items ?? []

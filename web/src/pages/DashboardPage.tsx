@@ -268,7 +268,7 @@ export function DashboardPage() {
 
   const agents = useQuery({
     queryKey: agentKeys.list(),
-    queryFn: () => agentsApi.list(),
+    queryFn: () => agentsApi.inventory(),
     select: (page) => page.items,
     refetchInterval: REFRESH_MS,
     staleTime: REFRESH_STALE_MS,

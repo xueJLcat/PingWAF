@@ -29,6 +29,7 @@ import { Select } from '@/components/ui/Select'
 import { SkeletonStat } from '@/components/ui/Skeleton'
 import { Switch } from '@/components/ui/Switch'
 import { Table, type Column } from '@/components/ui/Table'
+import { Pagination } from '@/components/ui/Pagination'
 import { Tabs } from '@/components/ui/Tabs'
 import { Textarea } from '@/components/ui/Textarea'
 import { useToast } from '@/components/ui/Toast'
@@ -121,6 +122,7 @@ export function GlobalSslPage() {
   const [form, setForm] = useState<FormState>(emptyForm())
   const [formError, setFormError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CertificateWithSite | null>(null)
+  const [eventPage, setEventPage] = useState(1)
   const [eventTypeFilter, setEventTypeFilter] = useState('')
   const [bindTarget, setBindTarget] = useState<CertificateWithSite | null>(null)
   const [bindSelection, setBindSelection] = useState<string[]>([])
@@ -134,15 +136,8 @@ export function GlobalSslPage() {
 
   const sitesQuery = useQuery({
     queryKey: [...siteKeys.all, 'certificate-site-options'],
-    queryFn: async () => {
-      let page = await sitesApi.list()
-      const items = [...page.items]
-      while (page.items.length > 0 && page.page * page.page_size < page.total) {
-        page = await sitesApi.list({ page: page.page + 1 })
-        items.push(...page.items)
-      }
-      return items
-    },
+    queryFn: () => sitesApi.inventory(),
+    select: result => result.items,
   })
   const sites = sitesQuery.data ?? []
   const selectedSite = sites.find((site) => site.id === form.siteId)
@@ -165,7 +160,7 @@ export function GlobalSslPage() {
   })
   const certsQuery = useQuery({
     queryKey: sslKeys.global(filter),
-    queryFn: () => sslApi.listAll(filter),
+    queryFn: () => sslApi.inventory(filter),
     refetchInterval: (query) =>
       query.state.data?.items.some((cert) => cert.status === 'pending')
         ? 10_000
@@ -177,22 +172,24 @@ export function GlobalSslPage() {
 
   const issuersQuery = useQuery({
     queryKey: ['agents', 'acme-issuers'],
-    queryFn: () => agentsApi.list({ page_size: 200 }),
-    enabled: form.mode === 'acme' && form.challengeType === 'dns-01',
+    queryFn: () => agentsApi.inventory(),
+    enabled: dialogOpen && form.mode === 'acme' && form.challengeType === 'dns-01',
   })
   const issuers = (issuersQuery.data?.items ?? []).filter((a) => a.acme_issuer)
 
+  const eventFilter = { event_type: eventTypeFilter || undefined, page: eventPage, page_size: 20 }
   const eventsQuery = useQuery({
-    queryKey: sslKeys.events({
-      event_type: eventTypeFilter || undefined,
-    }),
-    queryFn: () =>
-      sslApi.listAllEvents({
-        event_type: eventTypeFilter || undefined,
-      }),
+    queryKey: sslKeys.events(eventFilter),
+    queryFn: () => sslApi.listAllEvents(eventFilter),
+    enabled: tab === 'log',
     // The issuance log grows while an order runs; poll alongside the list.
     refetchInterval: hasPending ? 10_000 : false,
   })
+
+  if (eventsQuery.data) {
+    const lastPage = Math.max(1, Math.ceil(eventsQuery.data.total / eventFilter.page_size))
+    if (eventPage > lastPage) setEventPage(lastPage)
+  }
 
   const summary = summaryQuery.data
 
@@ -876,17 +873,16 @@ export function GlobalSslPage() {
                   })),
                 ]}
                 value={eventTypeFilter}
-                onChange={(e) => setEventTypeFilter(e.target.value)}
+                onChange={(e) => { setEventTypeFilter(e.target.value); setEventPage(1) }}
               />
             }
           />
           <CardBody className="p-0">
-            <Table
+            {eventsQuery.error ? <ErrorState error={eventsQuery.error} onRetry={() => void eventsQuery.refetch()} /> : <Table
               columns={logColumns}
               data={events}
               rowKey={(r) => r.id}
               loading={eventsQuery.isLoading}
-              pageSize={20}
               empty={
                 <EmptyState
                   icon={<ArrowsClockwise weight="duotone" />}
@@ -894,7 +890,10 @@ export function GlobalSslPage() {
                   description={t('pages.sslGlobal.logEmptyHint')}
                 />
               }
-            />
+            />}
+            {eventsQuery.data && (eventPage > 1 || eventsQuery.data.total > 20) && (
+              <Pagination page={eventPage} pageSize={20} total={eventsQuery.data.total} onChange={setEventPage} />
+            )}
           </CardBody>
         </Card>
       )}
@@ -1046,6 +1045,9 @@ export function GlobalSslPage() {
                         setForm((f) => ({ ...f, issuerAgentId: e.target.value }))
                       }
                     />
+                  )}
+                  {form.challengeType === 'dns-01' && issuersQuery.error && (
+                    <ErrorState variant="inline" error={issuersQuery.error} onRetry={() => void issuersQuery.refetch()} />
                   )}
                   {form.dnsProvider && (
                     <div className="flex flex-col gap-2">

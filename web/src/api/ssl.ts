@@ -1,3 +1,4 @@
+import { readInventory } from './pagination'
 import { apiClient } from './client'
 import type {
   CertificateEvent,
@@ -37,6 +38,8 @@ export interface RenewalAck {
  * The private key is write-only: it can be uploaded but never read back.
  */
 export const sslApi = {
+  inventory: (query: Omit<CertificateListQuery, 'page' | 'page_size'> = {}) =>
+    readInventory(page => sslApi.listAll({ ...query, page })),
   /* ── Per site ────────────────────────────────────────────────────── */
   list: (siteId: string) =>
     apiClient.get<Page<SslCertificate>>(`/sites/${siteId}/certificates`, {

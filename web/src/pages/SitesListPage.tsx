@@ -170,7 +170,7 @@ export function SitesListPage() {
 
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({ search: debouncedQuery || undefined }),
-    queryFn: () => sitesApi.list({ search: debouncedQuery || undefined }),
+    queryFn: () => sitesApi.inventory({ search: debouncedQuery || undefined }),
     select: (page) => page.items,
   })
 
@@ -410,7 +410,7 @@ export function SitesListPage() {
     [form.ingress.listener, ...(form.ingress.additional ?? [])].some(row => row.startsWith('https:')))
   const certificates = useQuery({
     queryKey: ['certificates', 'site-creation'],
-    queryFn: () => sslApi.listAll(),
+    queryFn: () => sslApi.inventory(),
     enabled: canWrite && showCertificate && (dialogOpen || urlCreateOpen),
   })
   const ingressInventory = useQuery({

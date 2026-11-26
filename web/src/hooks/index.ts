@@ -16,7 +16,7 @@ import type { SiteListQuery } from '@/api/types'
 export function useSitesList(query: SiteListQuery = {}) {
   return useQuery({
     queryKey: siteKeys.list(query),
-    queryFn: () => sitesApi.list(query),
+    queryFn: () => sitesApi.inventory(query),
     select: (page) => page.items,
   })
 }

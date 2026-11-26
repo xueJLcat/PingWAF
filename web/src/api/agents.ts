@@ -1,3 +1,4 @@
+import { readInventory } from './pagination'
 import type { SiteDeployment } from './sites'
 import { apiClient } from './client'
 import type {
@@ -24,6 +25,8 @@ import type {
  * command lines.
  */
 export const agentsApi = {
+  inventory: (query: Omit<AgentListQuery, 'page' | 'page_size'> = {}) =>
+    readInventory(page => agentsApi.list({ ...query, page })),
   siteEntries: (id: string, page: number) =>
     apiClient.get<Page<Pick<Site, 'id' | 'domain' | 'status'> & { entries: SiteDeployment['nodes'][number]['entries'] }>>(
       `/agents/${id}/site-entries`, { query: { page, page_size: 10 } }),

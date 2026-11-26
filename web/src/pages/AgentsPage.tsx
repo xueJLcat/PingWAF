@@ -127,9 +127,9 @@ export function AgentsPage() {
       site_id: siteFilter || undefined,
     }),
     queryFn: () =>
-      agentsApi.list({
+      agentsApi.inventory({
         include_entries: true,
-      search: debouncedSearch || undefined,
+        search: debouncedSearch || undefined,
         status: statusFilter || undefined,
         site_id: siteFilter || undefined,
       }),
@@ -804,6 +804,7 @@ export function AgentsPage() {
                 <Table
                   columns={columns}
                   data={agents}
+                  pageSize={20}
                   rowKey={(a) => a.id}
                   dense
                   onRowClick={(a) => setDetail(a)}

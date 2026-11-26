@@ -1,3 +1,4 @@
+import { readInventory } from './pagination'
 import { apiClient } from './client'
 import type {
   CreatePoolRequest,
@@ -65,6 +66,8 @@ export interface IngressOptions {
  * rather than `403` so existence is never leaked.
  */
 export const sitesApi = {
+  inventory: (query: Omit<SiteListQuery, 'page' | 'page_size'> = {}) =>
+    readInventory(page => sitesApi.list({ ...query, page })),
   uploadArchive: (file: File) => apiClient.post<{id: string; sha256: string; files: string[]}>('/static-drafts', file, {headers: {'Content-Type': 'application/zip'}}),
   discardArchive: (id: string) => apiClient.delete<void>(`/static-drafts/${id}`),
   previewArchive: (id: string) => apiClient.post<{url: string}>(`/static-drafts/${id}/preview-session`),

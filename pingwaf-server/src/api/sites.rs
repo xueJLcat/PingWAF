@@ -1713,6 +1713,7 @@ async fn list(
         ])
         .filter(condition)
         .order_by_desc(site::Column::CreatedAt)
+        .order_by_asc(site::Column::Id)
         .into_model::<SiteListRow>()
         .paginate(&state.db, pagination.limit());
 

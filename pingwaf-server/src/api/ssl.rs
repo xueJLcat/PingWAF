@@ -1019,6 +1019,7 @@ async fn list_certificates(
     let paginator = certificate_list_query()
         .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
+        .order_by_asc(site_certificates::Column::Id)
         .into_model::<CertificateListRow>()
         .paginate(&state.db, pagination.limit());
 
@@ -1278,6 +1279,7 @@ async fn list_available_certificates(
     let paginator = certificate_list_query()
         .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
+        .order_by_asc(site_certificates::Column::Id)
         .into_model::<CertificateListRow>()
         .paginate(&state.db, pagination.limit());
     let total = paginator.num_items().await?;
@@ -2147,6 +2149,7 @@ async fn list_all_certificates(
     let paginator = certificate_list_query()
         .filter(condition)
         .order_by_desc(site_certificates::Column::CreatedAt)
+        .order_by_asc(site_certificates::Column::Id)
         .into_model::<CertificateListRow>()
         .paginate(&state.db, pagination.limit());
 
@@ -2874,6 +2877,7 @@ async fn list_certificate_events(
     let paginator = certificate_events::Entity::find()
         .filter(condition)
         .order_by_desc(certificate_events::Column::CreatedAt)
+        .order_by_asc(certificate_events::Column::Id)
         .paginate(&state.db, pagination.limit());
 
     let total = paginator.num_items().await?;
@@ -2924,6 +2928,7 @@ async fn list_all_events(
     let paginator = certificate_events::Entity::find()
         .filter(condition)
         .order_by_desc(certificate_events::Column::CreatedAt)
+        .order_by_asc(certificate_events::Column::Id)
         .paginate(&state.db, pagination.limit());
 
     let total = paginator.num_items().await?;

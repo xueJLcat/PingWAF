@@ -8,6 +8,10 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## Local changes based on PingWAF 0.33.3
+
+- The console includes later pages in site, node and certificate inventories, fleet counts and DNS issuer selection. The issuance log fetches the selected page and supports retry after a read failure.
+
 ## Local changes based on PingWAF 0.33.1
 
 - Search and page through all permitted sites when creating or uploading a backup. Reopening the upload dialog starts a fresh preview, and backup actions wrap below the filename on small screens.
