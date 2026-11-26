@@ -93,35 +93,40 @@ pub(crate) fn scope_acme_for_agent(
     acme_issuer: bool,
 ) {
     scope_acme_sites(config.sites.iter_mut(), agent_id, acme_issuer);
+    config.config_hash.clear();
+    config.config_hash = config::fingerprint(config);
 }
 
 fn scope_acme_sites<'a>(sites: impl Iterator<Item = &'a mut pingwaf_proto::control_plane::Site>, agent_id: Uuid, acme_issuer: bool) {
     let agent_id = agent_id.to_string();
     for site in sites {
-        if let Some(ssl) = site.rules.as_mut().and_then(|rules| rules.ssl.as_mut()) {
+        let Some(rules) = site.rules.as_mut() else { continue };
+        if let Some(ssl) = rules.ssl.as_mut() {
             scope_ssl_for_agent(ssl, &agent_id, acme_issuer);
+            rules.config_hash.clear();
+            rules.config_hash = config::fingerprint(rules);
         }
     }
 }
 
 fn scope_ssl_for_agent(ssl: &mut pingwaf_proto::control_plane::SslConfig, agent_id: &str, acme_issuer: bool) {
-        // A per-certificate designation wins over the agent-level flag: only
-        // the named agent may issue that certificate. Without one, the agent
-        // must be marked as an issuer.
-        let designated = ssl.acme_issuer_agent_id.trim();
-        let allowed = if designated.is_empty() {
-            acme_issuer
-        } else {
-            designated == agent_id
-        };
-        if allowed {
-            return;
-        }
-        ssl.acme_enabled = false;
-        ssl.acme_email.clear();
-        ssl.acme_challenge_type = 0;
-        ssl.acme_dns_provider.clear();
-        ssl.acme_dns_config.clear();
+    // A per-certificate designation wins over the agent-level flag: only
+    // the named agent may issue that certificate. Without one, the agent
+    // must be marked as an issuer.
+    let designated = ssl.acme_issuer_agent_id.trim();
+    let allowed = if designated.is_empty() {
+        acme_issuer
+    } else {
+        designated == agent_id
+    };
+    if allowed {
+        return;
+    }
+    ssl.acme_enabled = false;
+    ssl.acme_email.clear();
+    ssl.acme_challenge_type = 0;
+    ssl.acme_dns_provider.clear();
+    ssl.acme_dns_config.clear();
 }
 
 /// The command that replaces an agent's configuration with `site_config`.
