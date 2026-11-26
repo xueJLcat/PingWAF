@@ -2183,6 +2183,10 @@ Rules:
   produces a duplicate node.
 - `404` when the agent does not exist.
 
+### GET /agents/{agent_id}/site-entries
+
+Returns a page of sites assigned to this node with their configured protocol, port, current application state and failure code. Uses the same observation as the site detail view. Pagination counts sites and keeps all ports for a site together.
+
 ### GET /agents/{agent_id}/sites
 
 Returns the complete site catalogue for the owner of the node’s API key, including status and primary and additional listeners, for the assignment preview. Requires access to the node.

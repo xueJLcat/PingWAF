@@ -327,6 +327,7 @@ pub fn routes() -> Router<AppState> {
         .route("/agents", get(list))
         .route("/agents/enroll", post(enroll))
         .route("/agents/{agent_id}", get(show).patch(update).delete(remove))
+        .route("/agents/{agent_id}/site-entries", get(node_entries))
         .route("/agents/{agent_id}/sites", get(scope_options).put(update_sites))
         .route("/agents/{agent_id}/samples", get(samples))
         .route("/agents/{agent_id}/commands", post(send_command))
@@ -780,6 +781,17 @@ async fn scope_options(State(state): State<AppState>, current: AuthUser, Path(ag
     let rows = crate::grpc::agent_site_query(&all).order_by_asc(site::Column::Domain).order_by_asc(site::Column::Id).all(&state.db).await?;
     Ok(Json(rows.into_iter().map(|s| serde_json::json!({"id":s.id,"name":s.name,"domain":s.domain,"status":s.status,
         "ingress_port":s.ingress_port,"ingress_protocol":s.ingress_protocol,"additional_ingresses":s.additional_ingresses})).collect()))
+}
+
+async fn node_entries(State(state): State<AppState>, current: AuthUser, Path(agent_id): Path<String>,
+    Query(page): Query<Pagination>) -> Result<Json<Page<crate::grpc::NodeSiteEntries>>, ApiError> {
+    let id = parse_uuid(&agent_id, "agent id")?;
+    load_agent(&state, id, &current).await?;
+    let tx = state.db.begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None).await?;
+    let owner = (!current.is_admin()).then_some(current.id);
+    let result = crate::grpc::node_site_entries(&tx, &state.agents, id, owner, page.normalise()).await?;
+    tx.commit().await?;
+    Ok(Json(result))
 }
 
 async fn update_sites(

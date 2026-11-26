@@ -30,6 +30,7 @@ import { Tabs } from '@/components/ui/Tabs'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { AgentProbePanel } from '@/components/agents/AgentProbePanel'
+import { NodeSiteEntries } from '@/components/agents/NodeSiteEntries'
 import { StaticRootsDialog } from '@/components/agents/StaticRootsDialog'
 import { ListenerPolicyDialog } from '@/components/agents/ListenerPolicyDialog'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -818,7 +819,7 @@ export function AgentsPage() {
         footer={
           <>
             {canWrite && detail && (
-              <div className="mr-auto flex items-center gap-2">
+              <div className="mr-auto flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
                   variant="secondary"
@@ -887,6 +888,8 @@ export function AgentsPage() {
               </div>
             )}
 
+            <NodeSiteEntries key={detail.id} id={detail.id} />
+
             {(detail.logs_dropped ?? 0) > 0 && (
               <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg">
                 <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
@@ -922,16 +925,6 @@ export function AgentsPage() {
             </div>
 
             <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
-              <DetailRow
-                label={t('pages.agents.site')}
-                value={
-                  detail.site_scope === 'selected'
-                    ? detail.site_domains.length > 0
-                      ? detail.site_domains.join(', ')
-                      : t('pages.agents.noSites')
-                    : t('pages.agents.allSites')
-                }
-              />
               <DetailRow label={t('pages.agents.publicIp')} value={detail.public_ip} mono />
               <DetailRow label={t('pages.agents.privateIp')} value={detail.private_ip} mono />
               <DetailRow label={t('pages.agents.ipAddress')} value={detail.ip_address} />

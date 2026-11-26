@@ -710,6 +710,9 @@
     },
     "siteDetail": {
       "deployment": {
+        "nodeEntries": "负责的站点与入口",
+        "failureReason": "失败原因",
+        "noAssignedSites": "此节点尚未分派站点",
         "push": "下发站点配置",
         "pushHint": "将此节点负责的全部站点配置重新下发。",
         "lastPush": "最近一次节点下发",

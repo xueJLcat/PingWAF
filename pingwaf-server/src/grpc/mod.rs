@@ -14,7 +14,7 @@ pub mod control_plane;
 mod managed;
 pub(crate) use managed::{
     check_agent_site, check_assigned_ingress, check_site_ingress,
-    ingress_agent_options, deployment_summaries, EntrySummary, site_deployment, IngressAgentOption, SiteDeployment,
+    node_site_entries, NodeSiteEntries, ingress_agent_options, deployment_summaries, EntrySummary, site_deployment, IngressAgentOption, SiteDeployment,
 };
 pub mod registry;
 pub mod tunnel_registry;

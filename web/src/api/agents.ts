@@ -1,3 +1,4 @@
+import type { SiteDeployment } from './sites'
 import { apiClient } from './client'
 import type {
   Site,
@@ -23,6 +24,9 @@ import type {
  * command lines.
  */
 export const agentsApi = {
+  siteEntries: (id: string, page: number) =>
+    apiClient.get<Page<Pick<Site, 'id' | 'domain' | 'status'> & { entries: SiteDeployment['nodes'][number]['entries'] }>>(
+      `/agents/${id}/site-entries`, { query: { page, page_size: 10 } }),
   scopeOptions: (id: string) => apiClient.get<Pick<Site, 'id' | 'name' | 'domain' | 'status' | 'ingress_port' | 'ingress_protocol' | 'additional_ingresses'>[]>(`/agents/${id}/sites`),
   list: (query: AgentListQuery = {}) =>
     apiClient.get<Page<Agent>>('/agents', { query: { page_size: 200, ...query } }),

@@ -530,3 +530,5 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 以及 JSON-RPC 批量调用；通知返回 `202 Accepted`。
 
 `/mcp` 挂在根路由上，因此 9080 的自保护栈（访问日志、IP 白名单、WAF）同样作用于它。
+
+节点详情使用 `GET /agents/{agent_id}/site-entries` 按站点分页查询分派范围内的入口。每个协议端口显示该节点的应用状态、失败原因，点击域名直达站点详情。

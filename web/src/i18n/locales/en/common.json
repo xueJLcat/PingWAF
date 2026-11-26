@@ -710,6 +710,9 @@
     },
     "siteDetail": {
       "deployment": {
+        "nodeEntries": "Assigned sites and entries",
+        "failureReason": "Failure reason",
+        "noAssignedSites": "No sites assigned to this node",
         "push": "Push site configuration",
         "pushHint": "Resends the assigned configuration for all sites on this node.",
         "lastPush": "Last node push",

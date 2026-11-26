@@ -572,14 +572,82 @@ pub(crate) async fn deployment_summaries(tx: &DatabaseTransaction, registry: &su
     Ok(result)
 }
 
-async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::AgentRegistry, model: &site::Model,
-    epoch: Uuid, desired_revision: Option<String>) -> Result<SiteDeployment, DbErr> {
-    let mut result = SiteDeployment { desired_revision, nodes: Vec::new(), summary: EntrySummary::default() };
+async fn observe_entries(registry: &super::AgentRegistry, model: &site::Model, id: Uuid,
+    session: Option<Uuid>, epoch: Uuid, desired_revision: Option<&str>) -> Vec<EntryObservation> {
     let ports = match model.ingress_port.zip(model.ingress_protocol.as_deref()) {
         Some(primary) => std::iter::once(primary).chain(model.additional_ingresses.iter()
             .filter_map(|entry| site::parse_listener(entry)).map(|(port, protocol)| (i32::from(port), protocol))).collect(),
         None => vec![(80, "http"), (443, "https")],
     };
+    let mut entries = Vec::with_capacity(ports.len());
+    for (port, protocol) in ports {
+        let (bound, report) = match session {
+            Some(session) => registry.site_observation(id, session, port, protocol, model.id, epoch).await,
+            None => (None, None),
+        };
+        let (observed_at, applied_revision, received_revision, failure) = report
+            .map(|(at, rev, receipt, failure)| (Some(at), rev, receipt, failure)).unwrap_or_default();
+        let bound = if failure.as_deref() == Some("bind_failed") && bound.is_some() { Some(false) } else { bound };
+        let state = match (desired_revision, applied_revision.as_deref(), bound, observed_at) {
+            (None, Some(_), _, _) => "revoking",
+            (None, None, _, Some(_)) => "withdrawn",
+            (Some(want), Some(have), Some(true), _) if want == have => "applied",
+            (_, _, None, _) | (_, _, _, None) => "unknown",
+            (Some(want), _, _, _) if received_revision.as_deref() == Some(want) => match failure.as_deref() {
+                Some("pending") => "pending", Some(_) => "failed", None => "received",
+            },
+            _ => "pending",
+        };
+        entries.push(EntryObservation { port, protocol: protocol.into(), state, bound, applied_revision, observed_at,
+            failure_code: failure.filter(|_| state == "failed") });
+    }
+    entries
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct NodeSiteEntries {
+    id: Uuid,
+    domain: String,
+    status: String,
+    entries: Vec<EntryObservation>,
+}
+
+pub(crate) async fn node_site_entries(
+    tx: &DatabaseTransaction, registry: &super::AgentRegistry, id: Uuid, caller_owner: Option<Uuid>,
+    mut page: crate::api::common::Pagination,
+) -> Result<crate::api::common::Page<NodeSiteEntries>, DbErr> {
+    use crate::api::common::Page;
+    use sea_orm::PaginatorTrait;
+    let row = match authorize(tx, id).await {
+        Ok((row, owner)) if caller_owner.is_none_or(|user| user == owner) => row,
+        Err(BuildError::Storage(err)) => return Err(err),
+        _ => return Ok(Page::new(Vec::new(), 0, page)),
+    };
+    let session = current_session(tx, id).await?;
+    let mut sites = super::agent_site_query(&row);
+    if row.site_scope == "all" && session.is_none() {
+        // Legacy all-scope nodes receive only default listeners, as in panel_site_listeners.
+        sites = sites.filter(site::Column::IngressPort.is_null());
+    }
+    let pages = sites.order_by_asc(site::Column::Domain).order_by_asc(site::Column::Id).paginate(tx, page.limit());
+    let total = pages.num_items().await?;
+    page.page = page.page.min(total.div_ceil(page.limit()).max(1));
+    let models = pages.fetch_page(page.index()).await?;
+    let mut items = Vec::with_capacity(models.len());
+    if !models.is_empty() {
+        let revisions = desired_revisions(tx, &models).await?;
+        let epoch = authority_epoch(tx).await?;
+        for model in models {
+            let entries = observe_entries(registry, &model, id, session, epoch, revisions.get(&model.id).map(String::as_str)).await;
+            items.push(NodeSiteEntries { id: model.id, domain: model.domain, status: model.status, entries });
+        }
+    }
+    Ok(Page::new(items, total, page))
+}
+
+async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::AgentRegistry, model: &site::Model,
+    epoch: Uuid, desired_revision: Option<String>) -> Result<SiteDeployment, DbErr> {
+    let mut result = SiteDeployment { desired_revision, nodes: Vec::new(), summary: EntrySummary::default() };
     let assignments = tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1 ORDER BY agent_id",
         [model.id.into()])).await?;
@@ -595,31 +663,12 @@ async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::Ag
             _ => continue,
         };
         let session = current_session(tx, id).await?;
-        let mut entries = Vec::with_capacity(ports.len());
-        for &(port, protocol) in &ports {
-            let (bound, report) = match session {
-                Some(session) => registry.site_observation(id, session, port, protocol, model.id, epoch).await,
-                None => (None, None),
-            };
-            let (observed_at, applied_revision, received_revision, failure) = report
-                .map(|(at, rev, receipt, failure)| (Some(at), rev, receipt, failure)).unwrap_or_default();
-            let bound = if failure.as_deref() == Some("bind_failed") && bound.is_some() { Some(false) } else { bound };
-            let state = match (result.desired_revision.as_ref(), applied_revision.as_ref(), bound, observed_at) {
-                (None, Some(_), _, _) => "revoking",
-                (None, None, _, Some(_)) => "withdrawn",
-                (Some(want), Some(have), Some(true), _) if want == have => "applied",
-                (_, _, None, _) | (_, _, _, None) => "unknown",
-                (Some(want), _, _, _) if received_revision.as_ref() == Some(want) => match failure.as_deref() {
-                    Some("pending") => "pending", Some(_) => "failed", None => "received",
-                },
-                _ => "pending",
-            };
+        let entries = observe_entries(registry, model, id, session, epoch, result.desired_revision.as_deref()).await;
+        for entry in &entries {
             result.summary.total += 1;
-            result.summary.applied += usize::from(state == "applied");
-            result.summary.unknown += usize::from(state == "unknown");
-            result.summary.failed += usize::from(state == "failed");
-            entries.push(EntryObservation { port, protocol: protocol.into(), state, bound, applied_revision, observed_at,
-                failure_code: failure.filter(|_| state == "failed") });
+            result.summary.applied += usize::from(entry.state == "applied");
+            result.summary.unknown += usize::from(entry.state == "unknown");
+            result.summary.failed += usize::from(entry.state == "failed");
         }
         let primary = &entries[0];
         let state = if entries.iter().all(|e| e.state == primary.state) { primary.state }

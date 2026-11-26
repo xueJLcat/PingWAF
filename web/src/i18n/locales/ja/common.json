@@ -710,6 +710,9 @@
     },
     "siteDetail": {
       "deployment": {
+        "nodeEntries": "担当サイトと入口",
+        "failureReason": "失敗の理由",
+        "noAssignedSites": "このノードに割り当てられたサイトはありません",
         "push": "サイト設定を配信",
         "pushHint": "このノードに割り当てられた全サイトの設定を再配信します。",
         "lastPush": "直近のノード配信",
