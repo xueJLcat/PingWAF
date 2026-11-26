@@ -2183,6 +2183,8 @@ Rules:
   produces a duplicate node.
 - `404` when the agent does not exist.
 
+The agent list accepts `include_entries=true`. Each result then includes `entry_summary` with assigned site count, total and applied site entries, and failed entries with site ID, domain, protocol, port and reason.
+
 ### GET /agents/{agent_id}/site-entries
 
 Returns a page of sites assigned to this node with their configured protocol, port, current application state and failure code. Uses the same observation as the site detail view. Pagination counts sites and keeps all ports for a site together.

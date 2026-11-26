@@ -1179,6 +1179,12 @@ export type AgentStatus = 'online' | 'offline' | 'degraded'
 
 /** `api::agents::AgentResponse` */
 export interface Agent {
+  entry_summary?: {
+    sites: number
+    applied: number
+    total: number
+    failures: { site_id: string; domain: string; port: number; protocol: string; reason: string | null }[]
+  }
   id: string
   site_id: string | null
   site_domain: string | null
@@ -1339,6 +1345,7 @@ export interface TunnelSettings {
 }
 
 export interface AgentListQuery extends PaginationQuery {
+  include_entries?: boolean
   site_id?: string
   status?: string
   search?: string

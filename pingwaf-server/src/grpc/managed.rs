@@ -612,16 +612,12 @@ pub(crate) struct NodeSiteEntries {
     entries: Vec<EntryObservation>,
 }
 
-pub(crate) async fn node_site_entries(
-    tx: &DatabaseTransaction, registry: &super::AgentRegistry, id: Uuid, caller_owner: Option<Uuid>,
-    mut page: crate::api::common::Pagination,
-) -> Result<crate::api::common::Page<NodeSiteEntries>, DbErr> {
-    use crate::api::common::Page;
-    use sea_orm::PaginatorTrait;
+async fn node_scope(tx: &DatabaseTransaction, id: Uuid, caller_owner: Option<Uuid>)
+    -> Result<Option<(sea_orm::Select<site::Entity>, Option<Uuid>)>, DbErr> {
     let row = match authorize(tx, id).await {
         Ok((row, owner)) if caller_owner.is_none_or(|user| user == owner) => row,
         Err(BuildError::Storage(err)) => return Err(err),
-        _ => return Ok(Page::new(Vec::new(), 0, page)),
+        _ => return Ok(None),
     };
     let session = current_session(tx, id).await?;
     let mut sites = super::agent_site_query(&row);
@@ -629,6 +625,73 @@ pub(crate) async fn node_site_entries(
         // Legacy all-scope nodes receive only default listeners, as in panel_site_listeners.
         sites = sites.filter(site::Column::IngressPort.is_null());
     }
+    Ok(Some((sites, session)))
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub(crate) struct NodeSummary {
+    sites: usize,
+    total: usize,
+    applied: usize,
+    failures: Vec<NodeFailure>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct NodeFailure {
+    site_id: Uuid,
+    domain: String,
+    port: i32,
+    protocol: String,
+    reason: Option<String>,
+}
+
+pub(crate) async fn node_summaries(tx: &DatabaseTransaction, registry: &super::AgentRegistry,
+    ids: &[Uuid], owner: Option<Uuid>) -> Result<std::collections::HashMap<Uuid, NodeSummary>, DbErr> {
+    use sea_orm::QuerySelect;
+    use std::collections::{HashMap, HashSet};
+    let mut assigned = Vec::new();
+    let mut distinct = HashSet::new();
+    for &id in ids {
+        if let Some((sites, session)) = node_scope(tx, id, owner).await? {
+            let keys: Vec<Uuid> = sites.select_only().column(site::Column::Id)
+                .order_by_asc(site::Column::Domain).order_by_asc(site::Column::Id)
+                .into_tuple().all(tx).await?;
+            distinct.extend(keys.iter().copied());
+            assigned.push((id, session, keys));
+        }
+    }
+    let models = site::Entity::find().filter(site::Column::Id.is_in(distinct)).all(tx).await?;
+    let revisions = desired_revisions(tx, &models).await?;
+    let models: HashMap<_, _> = models.into_iter().map(|m| (m.id, m)).collect();
+    let epoch = authority_epoch(tx).await?;
+    let mut result = HashMap::new();
+    for (id, session, keys) in assigned {
+        let mut summary = NodeSummary { sites: keys.len(), ..Default::default() };
+        for key in keys {
+            let model = &models[&key];
+            for entry in observe_entries(registry, model, id, session, epoch, revisions.get(&key).map(String::as_str)).await {
+                summary.total += 1;
+                if entry.state == "applied" { summary.applied += 1; }
+                if entry.state == "failed" {
+                    summary.failures.push(NodeFailure { site_id: key, domain: model.domain.clone(),
+                        port: entry.port, protocol: entry.protocol, reason: entry.failure_code });
+                }
+            }
+        }
+        result.insert(id, summary);
+    }
+    Ok(result)
+}
+
+pub(crate) async fn node_site_entries(
+    tx: &DatabaseTransaction, registry: &super::AgentRegistry, id: Uuid, caller_owner: Option<Uuid>,
+    mut page: crate::api::common::Pagination,
+) -> Result<crate::api::common::Page<NodeSiteEntries>, DbErr> {
+    use crate::api::common::Page;
+    use sea_orm::PaginatorTrait;
+    let Some((sites, session)) = node_scope(tx, id, caller_owner).await? else {
+        return Ok(Page::new(Vec::new(), 0, page));
+    };
     let pages = sites.order_by_asc(site::Column::Domain).order_by_asc(site::Column::Id).paginate(tx, page.limit());
     let total = pages.num_items().await?;
     page.page = page.page.min(total.div_ceil(page.limit()).max(1));

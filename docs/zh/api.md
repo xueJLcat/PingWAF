@@ -531,4 +531,6 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 `/mcp` 挂在根路由上，因此 9080 的自保护栈（访问日志、IP 白名单、WAF）同样作用于它。
 
+节点列表可传 `include_entries=true`。返回的 `entry_summary` 包含负责站点数、配置与已生效入口数，以及失败入口的站点 ID、域名、协议、端口和原因。
+
 节点详情使用 `GET /agents/{agent_id}/site-entries` 按站点分页查询分派范围内的入口。每个协议端口显示该节点的应用状态、失败原因，点击域名直达站点详情。

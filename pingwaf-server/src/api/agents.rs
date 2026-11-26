@@ -77,6 +77,8 @@ pub struct AgentResponse {
     pub site_ids: Vec<Uuid>,
     /// Domains matching `site_ids`, in the same order.
     pub site_domains: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) entry_summary: Option<crate::grpc::NodeSummary>,
     pub hostname: String,
     /// Operator-editable label; `null` means "use the hostname".
     ///
@@ -171,6 +173,8 @@ pub struct UpdateSitesRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
+    #[serde(default)]
+    pub include_entries: bool,
     #[serde(flatten)]
     pub pagination: Pagination,
     pub site_id: Option<String>,
@@ -687,7 +691,16 @@ async fn list(
 
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
-    let items = enrich(&state, &current, rows).await?;
+    let mut items = enrich(&state, &current, rows).await?;
+    if query.include_entries && !items.is_empty() {
+        let tx = state.db.begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None).await?;
+        let ids: Vec<_> = items.iter().map(|a| a.id).collect();
+        let mut summaries = crate::grpc::node_summaries(&tx, &state.agents, &ids, (!current.is_admin()).then_some(current.id)).await?;
+        tx.commit().await?;
+        for item in &mut items {
+            item.entry_summary = Some(summaries.remove(&item.id).unwrap_or_default());
+        }
+    }
 
     Ok(Json(Page::new(items, total, pagination)))
 }
@@ -1148,6 +1161,7 @@ async fn enrich(
             site_scope: row.site_scope.clone(),
             site_ids,
             site_domains,
+            entry_summary: None,
             name: row
                 .display_name
                 .clone()

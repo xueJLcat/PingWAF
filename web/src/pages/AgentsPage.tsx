@@ -96,6 +96,7 @@ export function AgentsPage() {
   const debouncedSearch = useDebouncedValue(search.trim(), 350)
   const [statusFilter, setStatusFilter] = useState('')
   const [siteFilter, setSiteFilter] = useState('')
+  const [failureNode, setFailureNode] = useState<string | null>(null)
   const [selectedAgent, setDetail] = useState<Agent | null>(null)
   const syncRequests = useRef(new Set<string>())
   const [syncing, setSyncing] = useState(new Set<string>())
@@ -119,13 +120,15 @@ export function AgentsPage() {
 
   const agentsQuery = useQuery({
     queryKey: agentKeys.list({
+      include_entries: true,
       search: debouncedSearch || undefined,
       status: statusFilter || undefined,
       site_id: siteFilter || undefined,
     }),
     queryFn: () =>
       agentsApi.list({
-        search: debouncedSearch || undefined,
+        include_entries: true,
+      search: debouncedSearch || undefined,
         status: statusFilter || undefined,
         site_id: siteFilter || undefined,
       }),
@@ -133,6 +136,7 @@ export function AgentsPage() {
   })
 
   const agents = useMemo(() => agentsQuery.data?.items ?? [], [agentsQuery.data])
+  const failureAgent = agents.find(a => a.id === failureNode)
   const detail = agents.find(a => a.id === selectedAgent?.id) ?? selectedAgent
   const total = agentsQuery.data?.total ?? 0
   const counts = useMemo(() => countByStatus(agents), [agents])
@@ -382,63 +386,47 @@ export function AgentsPage() {
           >
             <Desktop weight="duotone" className="h-4 w-4" />
           </span>
-          <div className="min-w-0">
-            <p className="truncate text-[13px] font-medium text-fg-strong">{displayName(a)}</p>
-            {a.display_name ? (
-              <p className="pw-mono truncate text-xs text-fg-subtle">
-                {a.hostname} · {a.ip_address}
-              </p>
-            ) : (
-              <p className="pw-mono truncate text-xs text-fg-subtle">{a.ip_address}</p>
-            )}
-            {/* The address the control plane accepted the stream from. Shown
-                only when it differs from the self-reported one — otherwise the
-                line is noise, and a NAT'd agent is exactly where it matters. */}
-            {a.peer_ip && a.peer_ip !== a.ip_address && (
-              <p
-                className="pw-mono truncate text-[11px] text-fg-subtle"
-                // `title` carries the explanation; an `aria-label` here would
-                // repeat the visible text (and then some) for screen readers.
-                title={
-                  peerAddressHint(a) === 'private'
-                    ? t('pages.agents.peerPrivateHint')
-                    : t('pages.agents.peerIpHint')
-                }
-              >
-                {t('pages.agents.peerVia', { ip: a.peer_ip })}
-              </p>
-            )}
-          </div>
+          <span className="whitespace-nowrap text-[13px] font-medium text-fg-strong">
+            {displayName(a)}{a.display_name && a.display_name !== a.hostname && <span className="ml-2 text-xs text-fg-subtle">{a.hostname}</span>}
+          </span>
         </div>
       ),
     },
     {
+      key: 'address',
+      header: t('pages.agents.ipAddress'),
+      accessor: (a) => a.ip_address,
+      cell: (a) => <span className="pw-mono whitespace-nowrap text-xs">{a.ip_address}
+        {a.peer_ip && a.peer_ip !== a.ip_address && <span className="ml-2 text-fg-subtle" title={t(peerAddressHint(a) === 'private' ? 'pages.agents.peerPrivateHint' : 'pages.agents.peerIpHint')}>
+          {t('pages.agents.peerVia', { ip: a.peer_ip })}
+        </span>}
+      </span>,
+    },
+    {
       key: 'site',
       header: t('pages.agents.site'),
-      accessor: (a) => a.site_domain ?? '',
+      accessor: (a) => a.entry_summary?.sites ?? 0,
+      cell: (a) => <span className="inline-flex items-center gap-2 whitespace-nowrap tabular-nums">
+        <strong>{a.entry_summary?.sites ?? '—'}</strong>
+        <span className="text-xs text-fg-subtle">{t(a.site_scope === 'all' ? 'pages.agents.allSites' : 'pages.agents.siteScopeSelected')}</span>
+      </span>,
+    },
+    {
+      key: 'entries',
+      header: t('pages.agents.entriesApplied'),
+      accessor: (a) => a.entry_summary?.applied ?? 0,
       cell: (a) => {
-        const domains = a.site_domains ?? []
-        if (a.site_scope === 'selected' && domains.length === 0) {
-          return (
-            <span className="text-[13px] text-fg-subtle" title={t('pages.agents.noSitesHint')}>
-              {t('pages.agents.noSites')}
-            </span>
-          )
-        }
-        if (domains.length > 0) {
-          return (
-            <span className="pw-mono truncate text-[13px] text-fg" title={domains.join(', ')}>
-              {domains.join(', ')}
-            </span>
-          )
-        }
-        // `all` agents serve every site of their owner (config-push
-        // visibility) — "all sites", not "unassigned".
-        return (
-          <span className="text-[13px] text-fg-subtle" title={t('pages.agents.allSitesHint')}>
-            {t('pages.agents.allSites')}
-          </span>
-        )
+        const summary = a.entry_summary
+        if (!summary) return '—'
+        return <div className="inline-flex items-center gap-2 whitespace-nowrap tabular-nums">
+          <span>{summary.applied}/{summary.total}</span>
+          {summary.failures.length > 0 && <button type="button"
+            className="rounded px-1.5 py-0.5 text-xs font-medium text-fg-danger underline underline-offset-2"
+            onKeyDown={e => e.stopPropagation()}
+            onClick={e => { e.stopPropagation(); setFailureNode(a.id) }}>
+            {t('pages.agents.failedEntries', { count: summary.failures.length })}
+          </button>}
+        </div>
       },
     },
     {
@@ -497,7 +485,7 @@ export function AgentsPage() {
       accessor: (a) => a.last_config_sync_at ?? '',
       width: '1%',
       cell: (a) => (
-        <div className="space-y-0.5">
+        <div className="inline-flex items-center gap-3 whitespace-nowrap">
           <p
             className="whitespace-nowrap text-[13px] text-fg"
             title={
@@ -524,7 +512,9 @@ export function AgentsPage() {
               ? formatRelative(a.last_policy_sync_at, now)
               : t('pages.agents.noSyncReport')}
           </p>
-          {syncReceipt(a)}
+          {a.manual_sync && <span className="text-xs text-fg-subtle" title={formatDateTime(a.manual_sync.requested_at)}>
+            {t(`pages.agents.manual_${a.manual_sync.status}`)}
+          </span>}
         </div>
       ),
     },
@@ -762,7 +752,7 @@ export function AgentsPage() {
         <Card>
           <CardBody className="p-0">
             {agentsQuery.isPending ? (
-              <SkeletonRows rows={6} columns={7} />
+              <SkeletonRows rows={6} columns={9} />
             ) : agents.length === 0 ? (
               <EmptyState
                 className="py-14"
@@ -810,6 +800,23 @@ export function AgentsPage() {
         name={agents.find(a=>a.id===rootNode)?.hostname} close={()=>openRoots(null)}/>}
       {isAdmin && listenerNode && <ListenerPolicyDialog key={listenerNode} node={listenerNode}
         name={agents.find(a => a.id === listenerNode)?.hostname} close={() => openListeners(null)} />}
+      <Dialog open={Boolean(failureAgent)} onClose={() => setFailureNode(null)} size="lg"
+        title={t('pages.agents.failureDetails')} description={failureAgent && displayName(failureAgent)}>
+        {failureAgent && (failureAgent.entry_summary?.failures.length ? <div className="overflow-auto" tabIndex={0}>
+          <table className="w-full whitespace-nowrap text-left text-sm">
+            <thead className="text-fg-subtle"><tr>
+              {[t('pages.agents.site'), t('pages.siteDetail.deployment.entry'), t('pages.siteDetail.deployment.failureReason')].map(label =>
+                <th key={label} scope="col" className="px-3 py-2">{label}</th>)}
+            </tr></thead>
+            <tbody>{failureAgent.entry_summary.failures.map(f =>
+              <tr key={f.site_id + ':' + f.protocol + ':' + f.port} className="border-t border-line">
+                <td className="px-3 py-2"><Link className="text-link hover:underline" to={`/sites/${f.site_id}/basic`}>{f.domain}</Link></td>
+                <td className="px-3 py-2 font-mono">{f.protocol.toUpperCase()} {f.port}</td>
+                <td className="px-3 py-2 text-fg-danger">{t('pages.siteDetail.deployment.' + (f.reason ?? 'failed'))}</td>
+              </tr>)}</tbody>
+          </table>
+        </div> : <p role="status">{t('pages.agents.noFailedEntries')}</p>)}
+      </Dialog>
       <Dialog
         open={detail !== null}
         onClose={() => setDetail(null)}
