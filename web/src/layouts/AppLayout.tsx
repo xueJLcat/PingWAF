@@ -485,7 +485,6 @@ function SidebarFooter({
 function SidebarExternalLinks({ collapsed }: { collapsed: boolean }) {
   const { t } = useTranslation()
   const links = [
-    { href: 'https://db-ip.com', label: 'IP Geolocation by DB-IP', icon: Globe },
     { href: 'https://www.pingwaf.com', label: t('sidebar.website'), icon: Globe },
     {
       href: 'https://github.com/shuaiZend/PingWAF',

@@ -91,6 +91,11 @@ export function AsnDataCard({ canWrite, standalone }: { canWrite: boolean; stand
       <fieldset disabled={busy || !db.data || db.isError} className="grid min-w-0 gap-2">
         <legend className="font-medium">网络编号数据库</legend>
         {!db.isError && <p className="break-all">{db.data ? (db.data.active ? db.data.database_type : '未启用') + ' · ' + db.data.path : '加载中…'}</p>}
+        {db.data?.active && db.data.database_type?.startsWith('DBIP-') && (
+          <a className="w-fit text-xs text-fg-subtle underline" href="https://db-ip.com" target="_blank" rel="noreferrer">
+            IP Geolocation by DB-IP
+          </a>
+        )}
         {db.data?.error && <div className="space-y-1">
           <p>{!db.data.configured && db.data.error.includes('(os error 2)')
             ? '尚未安装 ASN 数据库。选择 MMDB 文件并安装后即可识别网络编号。'
