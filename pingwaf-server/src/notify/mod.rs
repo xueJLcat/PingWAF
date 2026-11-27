@@ -340,8 +340,8 @@ impl NotificationManager {
             .await
             .unwrap_or_default();
         // Rows hold sealed secrets (see `secretbox`); delivery needs the
-        // real values, so open them here — the only place raw rows are
-        // turned into live channel configs.
+        // real values, so open them before caching. Test sends also open
+        // the individual channel read directly from the database.
         for channel in &mut channels {
             secretbox::open_config(&mut channel.config);
         }
@@ -411,7 +411,7 @@ impl NotificationManager {
 
     /// Sends a test alert through one channel and reports the outcome.
     pub async fn test_channel(&self, channel_id: Uuid) -> Result<(), String> {
-        let Some(channel) =
+        let Some(mut channel) =
             notification_channel::Entity::find_by_id(channel_id)
                 .one(&self.db)
                 .await
@@ -431,6 +431,7 @@ impl NotificationManager {
             details: None,
             dedup_key: None,
         };
+        secretbox::open_config(&mut channel.config);
         self.deliver(&channel, &event).await
     }
 
@@ -517,7 +518,7 @@ impl NotificationManager {
              )",
             [MAX_EVENT_ROWS.into()],
         );
-        if let Err(err) = self.db.execute(stmt).await {
+        if let Err(err) = self.db.execute_raw(stmt).await {
             tracing::warn!(error = %err, "could not cap notification events");
         }
     }
