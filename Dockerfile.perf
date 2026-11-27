@@ -77,6 +77,8 @@ COPY pingap-webhook/Cargo.toml pingap-webhook/
 COPY pingwaf-proto/Cargo.toml pingwaf-proto/
 COPY pingwaf-profiler/Cargo.toml pingwaf-profiler/
 COPY pingwaf-system/Cargo.toml pingwaf-system/
+COPY pingwaf-content/Cargo.toml pingwaf-content/
+COPY pingwaf-tunnel/Cargo.toml pingwaf-tunnel/
 COPY pingwaf-server/Cargo.toml pingwaf-server/
 COPY pingwaf-agent/Cargo.toml pingwaf-agent/
 COPY pingwaf-waf/Cargo.toml pingwaf-waf/
@@ -93,7 +95,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
        pingap-imageoptim pingap-webhook pingwaf-profiler pingwaf-system \
        pingwaf-server \
        pingwaf-agent \
-       pingwaf-waf pingwaf-challenge; do \
+       pingwaf-waf pingwaf-challenge pingwaf-content pingwaf-tunnel; do \
        mkdir -p "$dir/src" && echo "" > "$dir/src/lib.rs"; \
     done \
     && for bench_dir in pingap-core pingap-cache pingap-util pingap-location \
@@ -104,7 +106,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
 
 # Dependency warm-up under the same profile, so the release-perf artifacts
 # (target/release-perf/) are what the cached layers carry.
-RUN cargo build --locked --profile release-perf --features full || true; \
+RUN cargo build --locked --profile release-perf --bin pingwaf --features full || true; \
     ls target/release-perf/deps/*.rlib >/dev/null 2>&1 \
       || { echo "ERROR: dependency warm-up produced no rlib — check build log above" >&2; exit 1; }
 
@@ -135,6 +137,8 @@ COPY pingap-webhook/ pingap-webhook/
 COPY pingwaf-proto/ pingwaf-proto/
 COPY pingwaf-profiler/ pingwaf-profiler/
 COPY pingwaf-system/ pingwaf-system/
+COPY pingwaf-content/ pingwaf-content/
+COPY pingwaf-tunnel/ pingwaf-tunnel/
 COPY pingwaf-server/ pingwaf-server/
 COPY pingwaf-agent/ pingwaf-agent/
 COPY pingwaf-waf/ pingwaf-waf/

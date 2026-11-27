@@ -68,7 +68,7 @@ WORKDIR /app
 # 2b.【关键修复】预热前必须拷入：
 #     - build.rs（根 Cargo.toml 声明 build = "build.rs"，缺失会导致预热 cargo build 立即失败）
 #     - pingwaf-proto/proto/（pingwaf-proto/build.rs 需要 control_plane.proto 生成 gRPC stub）
-#     - 根 Cargo.toml/lock + 全部 25 个成员的 Cargo.toml
+#     - 根 Cargo.toml/lock + 全部工作区成员的 Cargo.toml
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY pingwaf-proto/proto/ pingwaf-proto/proto/
 
@@ -95,6 +95,8 @@ COPY pingap-webhook/Cargo.toml pingap-webhook/
 COPY pingwaf-proto/Cargo.toml pingwaf-proto/
 COPY pingwaf-profiler/Cargo.toml pingwaf-profiler/
 COPY pingwaf-system/Cargo.toml pingwaf-system/
+COPY pingwaf-content/Cargo.toml pingwaf-content/
+COPY pingwaf-tunnel/Cargo.toml pingwaf-tunnel/
 COPY pingwaf-server/Cargo.toml pingwaf-server/
 COPY pingwaf-agent/Cargo.toml pingwaf-agent/
 COPY pingwaf-waf/Cargo.toml pingwaf-waf/
@@ -114,7 +116,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
        pingap-imageoptim pingap-webhook pingwaf-profiler pingwaf-system \
        pingwaf-server \
        pingwaf-agent \
-       pingwaf-waf pingwaf-challenge; do \
+       pingwaf-waf pingwaf-challenge pingwaf-content pingwaf-tunnel; do \
        mkdir -p "$dir/src" && echo "" > "$dir/src/lib.rs"; \
     done \
     && for bench_dir in pingap-core pingap-cache pingap-util pingap-location \
@@ -126,7 +128,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
 # 2d. 依赖预热构建（修复：build.rs 与 proto/ 已前置 COPY，预热现在真正生效）
 #     编译产物留在镜像层中，供 CI type=gha/type=registry 缓存后端正确导出和恢复
 #     保留 `|| true` 因 dummy 源可能触发个别 crate 的编译错误
-RUN cargo build --locked --release --features full || true; \
+RUN cargo build --locked --release --bin pingwaf --features full || true; \
     ls target/release/deps/*.rlib >/dev/null 2>&1 \
       || { echo "ERROR: dependency warm-up produced no rlib — check build log above" >&2; exit 1; }
 
@@ -158,6 +160,8 @@ COPY pingap-webhook/ pingap-webhook/
 COPY pingwaf-proto/ pingwaf-proto/
 COPY pingwaf-profiler/ pingwaf-profiler/
 COPY pingwaf-system/ pingwaf-system/
+COPY pingwaf-content/ pingwaf-content/
+COPY pingwaf-tunnel/ pingwaf-tunnel/
 COPY pingwaf-server/ pingwaf-server/
 COPY pingwaf-agent/ pingwaf-agent/
 COPY pingwaf-waf/ pingwaf-waf/
@@ -167,7 +171,7 @@ COPY pingwaf-challenge/ pingwaf-challenge/
 COPY --from=frontend-builder /app/web/dist/ web/dist/
 
 # 2g. 最终构建：touch 使 workspace crate 的 mtime 指纹失效（排除 target/ 避免污染生成代码），
-#     触发 25 个 workspace crate 重编，而第三方 .rlib 从预热层继承、不受影响
+#     触发 工作区 crate 重编，而第三方 .rlib 从预热层继承、不受影响
 #     （Docker 层叠加：target/ 存在于 2d 预热层的文件系统中，后续 COPY 源码层不会覆盖它）
 RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
     && cargo build --locked --release --bin pingwaf --features full
