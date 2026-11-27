@@ -12,7 +12,9 @@ pub mod channel_kind {
     pub const WEBHOOK: &str = "webhook";
 
     pub const SERVERCHAN: &str = "serverchan";
-    pub const ALL: [&str; 5] = [EMAIL, WECOM, DINGTALK, WEBHOOK, SERVERCHAN];
+    pub const TELEGRAM: &str = "telegram";
+
+    pub const ALL: [&str; 6] = [EMAIL, WECOM, DINGTALK, WEBHOOK, SERVERCHAN, TELEGRAM];
 }
 
 /// Event types emitted by the control plane.

@@ -10,6 +10,7 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## Local changes based on PingWAF 0.33.3
 
+- Add the official Telegram Bot API notification channel alongside ServerChan, including encrypted tokens and provider error handling.
 - Restore the content and tunnel workspace crates in the standard and profiling Docker builds.
 - Console test notifications open encrypted channel credentials before delivery, matching scheduled alerts.
 - Update the control plane to SeaORM 2, the bundled geo lookup library to tor-geoip 0.47, and the console build to TypeScript 7 with react-i18next 17.

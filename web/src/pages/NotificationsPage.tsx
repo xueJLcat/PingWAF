@@ -48,6 +48,7 @@ const KIND_TONE: Record<string, 'info' | 'success' | 'warning' | 'neutral'> = {
   dingtalk: 'info',
   serverchan: 'info',
   webhook: 'neutral',
+  telegram: 'info',
 }
 
 const SEVERITY_TONE: Record<string, 'info' | 'warning' | 'danger'> = {
@@ -940,9 +941,35 @@ function ChannelDialog({ initial, onClose, onSaved }: ChannelDialogProps) {
               { value: 'dingtalk', label: t('pages.notifications.kind_dingtalk') },
               { value: 'serverchan', label: t('pages.notifications.kind_serverchan') },
               { value: 'webhook', label: t('pages.notifications.kind_webhook') },
+              { value: 'telegram', label: t('pages.notifications.kind_telegram') },
             ]}
           />
         </div>
+
+        {kind === 'telegram' && (
+          <>
+            <Input
+              type="password"
+              label={t('pages.notifications.telegramBotToken')}
+              value={fieldValue('bot_token')}
+              onChange={(e) => setField('bot_token', e.target.value)}
+              hint={t('pages.notifications.telegramBotTokenHint')}
+            />
+            <Input
+              label={t('pages.notifications.telegramChatId')}
+              value={fieldValue('chat_id')}
+              onChange={(e) => setField('chat_id', e.target.value)}
+              placeholder="-1001234567890"
+              hint={t('pages.notifications.telegramChatIdHint')}
+            />
+            <Input
+              label={t('pages.notifications.telegramThreadId')}
+              value={fieldValue('message_thread_id')}
+              onChange={(e) => setField('message_thread_id', e.target.value)}
+              hint={t('pages.notifications.telegramThreadIdHint')}
+            />
+          </>
+        )}
 
         {kind === 'email' && (
           <>

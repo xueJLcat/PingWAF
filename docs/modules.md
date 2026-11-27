@@ -88,6 +88,7 @@ reviewed as an egress path:
 | --- | --- | --- |
 | AI provider (OpenAI-compatible) | Chat messages and MCP tool results: site metadata, access logs, WAF events, and for administrators control-plane audit entries | Only when the assistant is enabled; write tools are off by default. See [user-guide.md → AI Assistant](user-guide.md#ai-assistant) |
 | Webhooks (WeCom/DingTalk/generic) | Alert title/message/details | URLs are SSRF-checked against private ranges |
+| Telegram bot | Alert title/message/details as plain text (no `parse_mode`) | Fixed `api.telegram.org` endpoint, no user-controlled URL and therefore no SSRF surface; HTTP 429 counts as a delivery failure with no retry |
 | SMTP relay | Notification e-mails | Credentials sealed with `PINGWAF_SECRET_KEY` |
 | Elasticsearch | The same log documents as PostgreSQL (headers and bodies included) | Optional shipper; index retention is independent |
 | ACME / DNS provider, GeoIP | Certificate order data / login IPs | Credentials sealed; GeoIP URL is SSRF-checked |

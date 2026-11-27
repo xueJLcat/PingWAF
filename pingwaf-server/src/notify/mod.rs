@@ -20,6 +20,7 @@ pub mod email;
 pub mod login_anomaly;
 pub mod secretbox;
 pub mod self_monitor;
+pub mod telegram;
 pub mod upstream_monitor;
 pub mod webhook;
 
@@ -543,6 +544,9 @@ async fn deliver_to(
         },
         crate::models::channel_kind::DINGTALK => {
             webhook::send_dingtalk(http, &channel.config, event).await
+        },
+        crate::models::channel_kind::TELEGRAM => {
+            telegram::send(http, &channel.config, event).await
         },
         crate::models::channel_kind::WEBHOOK => {
             webhook::send_generic(http, &channel.config, event).await

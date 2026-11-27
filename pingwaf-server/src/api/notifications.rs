@@ -82,6 +82,10 @@ fn validate_config(kind: &str, config: &Value) -> Result<(), ApiError> {
         channel_kind::SERVERCHAN => {
             crate::notify::webhook::serverchan_url(config).map_err(ApiError::BadRequest)?;
         },
+        channel_kind::TELEGRAM => {
+            crate::notify::telegram::validate_config(config)
+                .map_err(ApiError::BadRequest)?;
+        },
         channel_kind::WEBHOOK => {
             get_url()?;
         },
