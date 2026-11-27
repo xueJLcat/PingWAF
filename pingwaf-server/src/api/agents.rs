@@ -360,7 +360,7 @@ async fn root_report(state: &AppState, id: Uuid, current: &AuthUser) -> Result<p
 
 async fn directory_users(state: &AppState, id: Uuid) -> Result<std::collections::BTreeMap<String, Vec<String>>, ApiError> {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
-    let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let rows = state.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT DISTINCT s.site_handler->>'directory_id' AS directory_id, s.domain
          FROM sites s JOIN panel_site_listeners a ON a.site_id=s.id
          WHERE a.agent_id=$1 AND s.site_handler->>'kind'='static' ORDER BY s.domain", [id.into()])).await?;
@@ -384,7 +384,7 @@ async fn listener_policy(State(state): State<AppState>, current: AuthUser, Path(
     current.require_admin().map_err(ApiError::from)?;
     load_agent(&state, id, &current).await?;
     let policy = crate::listener_policy::read(&state.db, id).await?;
-    let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let rows = state.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT l.site_id, s.domain, l.port, l.status FROM panel_site_listeners l JOIN sites s ON s.id=l.site_id
          WHERE l.agent_id=$1 ORDER BY s.domain,l.port", [id.into()])).await?;
     let mut sites = Vec::new();
@@ -420,14 +420,14 @@ async fn update_listener_policy(State(state): State<AppState>, current: AuthUser
     require_listener_capability(&state,id).await?;
     policy.normalize().map_err(ApiError::BadRequest)?;
     let tx = state.db.begin().await?;
-    let updated = tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    let updated = tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE node_listener_policies SET addresses=$2, revision=revision+1, updated_by=$3 WHERE id=$1 AND revision=$4",
         [id.into(), policy.addresses.clone().into(), current.email.clone().into(), policy.revision.into()])).await?;
     if updated.rows_affected() != 1 { return Err(ApiError::Conflict("listener policy changed; refresh the node".into())); }
-    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "DELETE FROM node_listener_overrides WHERE agent_id=$1", [id.into()])).await?;
     for item in &policy.overrides {
-        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO node_listener_overrides(agent_id,site_id,port,addresses) VALUES ($1,$2,$3,$4)",
             [id.into(), item.site_id.into(), i32::from(item.port).into(), item.addresses.clone().into()])).await?;
     }
@@ -673,7 +673,7 @@ async fn list(
     }
     if let Some(id) = site_filter {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
-        let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        let rows = state.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1", [id.into()])).await?;
         let assigned = rows.into_iter().map(|row| row.try_get::<Uuid>("", "agent_id"))
             .collect::<Result<Vec<_>, _>>()?;

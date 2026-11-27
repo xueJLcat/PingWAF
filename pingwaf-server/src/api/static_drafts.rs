@@ -45,7 +45,7 @@ async fn versions(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Version>>, ApiError> {
     super::common::load_site(&state.db, id, &current, false).await?;
-    let rows = state.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let rows = state.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT digest,published_at,NULL::text AS directory_id FROM static_releases WHERE site_id=$1
          UNION ALL SELECT digest,published_at,directory_id FROM static_directory_versions WHERE site_id=$1
          ORDER BY published_at DESC,digest", [id.into()])).await?;
@@ -83,12 +83,12 @@ pub(super) async fn bind_version(
             .ok_or_else(|| invalid("missing digest"))?;
         let args = [site.into(), name.into(), digest.into()];
         if directory["rollback"] == true {
-            if tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            if tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "SELECT 1 FROM static_directory_versions WHERE site_id=$1 AND directory_id=$2 AND digest=$3", args)).await?.is_none() {
                 return Err(invalid("unknown registered directory version"));
             }
         } else {
-            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "INSERT INTO static_directory_versions(site_id,directory_id,digest) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
                 args)).await?;
         }
@@ -105,7 +105,7 @@ pub(super) async fn bind_version(
         };
     };
     if let Some(id) = draft {
-        let moved = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        let moved = tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "WITH content AS (DELETE FROM static_drafts WHERE id=$1 AND owner_id=$2 AND digest=$3 AND expires_at>now()
                 RETURNING digest,archive)
              INSERT INTO static_releases(site_id,digest,archive) SELECT $4,digest,archive FROM content
@@ -115,7 +115,7 @@ pub(super) async fn bind_version(
             return Err(invalid("upload expired or inaccessible"));
         }
     } else if tx
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT 1 FROM static_releases WHERE site_id=$1 AND digest=$2",
             [site.into(), digest.into()],
@@ -170,7 +170,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let row = db.query_one(Statement::from_string(DbBackend::Postgres, "SELECT to_regclass('users') IS NULL AND to_regclass('seaql_migrations') IS NULL AS fresh")).await.unwrap().unwrap();
+        let row = db.query_one_raw(Statement::from_string(DbBackend::Postgres, "SELECT to_regclass('users') IS NULL AND to_regclass('seaql_migrations') IS NULL AS fresh")).await.unwrap().unwrap();
         assert!(row.try_get::<bool>("", "fresh").unwrap());
         crate::migration::Migrator::up(&db, None).await.unwrap();
         let state = AppState::new(
@@ -182,7 +182,7 @@ mod tests {
             AuthUser::new(Uuid::new_v4(), "draft@example.test", "admin");
         let other =
             AuthUser::new(Uuid::new_v4(), "other@example.test", "admin");
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO users(id,email,password_hash,created_at,updated_at) VALUES($1,$2,'unused',now(),now())",
             [owner.id.into(), owner.email.clone().into()])).await.unwrap();
         let bytes = Bytes::from(bundle(&["index.html"]));
@@ -275,19 +275,19 @@ async fn upload(
     .map_err(ApiError::internal)??;
     let txn = state.db.begin().await?;
     let db = DbBackend::Postgres;
-    txn.query_one(Statement::from_sql_and_values(
+    txn.query_one_raw(Statement::from_sql_and_values(
         db,
         "SELECT id FROM users WHERE id=$1 FOR UPDATE",
         [current.id.into()],
     ))
     .await?;
-    txn.execute(Statement::from_string(
+    txn.execute_raw(Statement::from_string(
         db,
         "DELETE FROM static_drafts WHERE expires_at <= now()",
     ))
     .await?;
     let id = Uuid::new_v4();
-    let result = txn.execute(Statement::from_sql_and_values(db,
+    let result = txn.execute_raw(Statement::from_sql_and_values(db,
         "INSERT INTO static_drafts(id,owner_id,archive,digest) SELECT $1,$2,$3,$4 WHERE (SELECT count(*) FROM static_drafts WHERE owner_id=$2)<4",
         [id.into(), current.id.into(), archive.into(), sha256.clone().into()])).await?;
     if result.rows_affected() == 0 {
@@ -307,7 +307,7 @@ async fn discard(
     require_write(&current)?;
     state
         .db
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM static_drafts WHERE id=$1 AND owner_id=$2",
             [id.into(), current.id.into()],
@@ -324,7 +324,7 @@ async fn preview(
     let permit = ARCHIVE_WORKERS.try_acquire().map_err(|_| {
         ApiError::TooManyRequests("archive preview busy".into())
     })?;
-    let row = state.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = state.db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT archive FROM static_drafts WHERE id=$1 AND owner_id=$2 AND expires_at>now()", [id.into(), current.id.into()])).await?
         .ok_or_else(|| ApiError::NotFound("draft not found".into()))?;
     let bytes: Vec<u8> = row.try_get("", "archive")?;
@@ -338,7 +338,7 @@ async fn preview_session(
 ) -> Result<Response, ApiError> {
     let ticket = Uuid::new_v4().simple().to_string();
     let hash = hex::encode(Sha256::digest(ticket.as_bytes()));
-    let updated = state.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    let updated = state.db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE static_drafts SET preview_hash=$3,preview_until=now()+interval '10 minutes'
          WHERE id=$1 AND owner_id=$2 AND expires_at>now()", [id.into(), current.id.into(), hash.into()])).await?;
     if updated.rows_affected() != 1 {
@@ -364,7 +364,7 @@ async fn preview_asset(
         ApiError::TooManyRequests("archive preview busy".into())
     })?;
     let hash = hex::encode(Sha256::digest(ticket.as_bytes()));
-    let row = state.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = state.db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT archive FROM static_drafts WHERE id=$1 AND preview_hash=$2 AND expires_at>now() AND preview_until>now()",
         [id.into(), hash.into()])).await?.ok_or_else(missing)?;
     render_asset(row.try_get("", "archive")?, path, permit).await

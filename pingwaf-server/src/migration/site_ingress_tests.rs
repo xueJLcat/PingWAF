@@ -4,7 +4,7 @@ use super::*;
 use crate::{config_catalog, config_restore};
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DatabaseTransaction,
-    DbBackend, IsolationLevel, RuntimeErr, Statement, TransactionTrait,
+    DbBackend, IsolationLevel, Statement, TransactionTrait,
 };
 use std::time::Duration;
 
@@ -100,13 +100,7 @@ fn insert(domain: &str, aliases: &str, port: i32, protocol: &str) -> String {
 }
 
 fn assert_db_error(error: &DbErr, code: &str, constraint: Option<&str>) {
-    let (DbErr::Exec(RuntimeErr::SqlxError(sea_orm::sqlx::Error::Database(
-        pg,
-    )))
-    | DbErr::Query(RuntimeErr::SqlxError(sea_orm::sqlx::Error::Database(
-        pg,
-    )))) = error
-    else {
+    let Some(pg) = crate::api::error::database_error(error) else {
         panic!("expected PostgreSQL error, got {error:?}");
     };
     assert_eq!(pg.code().as_deref(), Some(code), "{pg:?}");
@@ -117,7 +111,7 @@ async fn scalar<T: sea_orm::TryGetable>(
     db: &impl ConnectionTrait,
     sql: &str,
 ) -> T {
-    db.query_one(Statement::from_string(DbBackend::Postgres, sql))
+    db.query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
         .await
         .unwrap()
         .unwrap()

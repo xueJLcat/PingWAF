@@ -37,7 +37,7 @@ pub enum SiteHandler {
 /// Validate the final graph in the same transaction that writes listener claims.
 /// Paused sites participate so reactivation cannot introduce a latent cycle.
 pub async fn check_redirects(tx: &DatabaseTransaction) -> Result<(), DbErr> {
-    let rows = tx.query_all(Statement::from_string(tx.get_database_backend(),
+    let rows = tx.query_all_raw(Statement::from_string(tx.get_database_backend(),
         "SELECT id, domain, alternate_domains, site_handler, port::integer AS port, protocol
          FROM sites s CROSS JOIN LATERAL site_listener_claims(s.ingress_port, s.ingress_protocol, s.additional_ingresses)
          WHERE s.site_handler IS NOT NULL"

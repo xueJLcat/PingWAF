@@ -666,7 +666,7 @@ pub(crate) async fn check_legacy_ingress_delivery(
     .unwrap();
     assert_eq!(snapshot["tables"]["sites"][0]["ingress_port"], 81);
     for port in [84, 81] {
-        db.execute(Statement::from_sql_and_values(
+        db.execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE sites SET ingress_port = $1 WHERE id = $2",
             [port.into(), custom.id.into()],
@@ -682,7 +682,7 @@ pub(crate) async fn check_legacy_ingress_delivery(
 
     let key_id = Uuid::new_v4();
     let raw_key = "pwk_legacy_delivery_test";
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, created_at) \
          VALUES ($1, $2, 'legacy test', $3, 'pwk_lega', now())",
@@ -769,7 +769,7 @@ pub(crate) async fn check_legacy_ingress_delivery(
 
     // The legacy single-binding branch must send an authoritative empty
     // replacement (discarding a previously served site), not silence.
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE agents SET site_id = $1 WHERE id = $2",
         [custom.id.into(), agent_id.into()],

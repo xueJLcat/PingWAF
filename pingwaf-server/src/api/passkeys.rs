@@ -943,7 +943,7 @@ mod tests {
 
     fn state_with(config: crate::config::ServerConfig) -> AppState {
         AppState::new(
-            sea_orm::DatabaseConnection::Disconnected,
+            sea_orm::DatabaseConnection::default(),
             config,
             crate::grpc::AgentRegistry::new(),
         )

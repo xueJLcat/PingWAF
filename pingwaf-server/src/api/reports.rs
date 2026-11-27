@@ -70,7 +70,7 @@ pub(super) fn routes() -> Router<AppState> {
 
 async fn remove(State(s): State<AppState>, user: AuthUser, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
     super::common::require_write(&user)?;
-    let result = s.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    let result = s.db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "DELETE FROM protection_reports WHERE id=$1 AND owner_id=$2 AND status IN ('ready','failed')",
         [id.into(), user.id.into()])).await?;
     if result.rows_affected() == 0 {
@@ -91,7 +91,7 @@ async fn create(
     tx.execute_unprepared("SELECT pg_advisory_xact_lock(74511631)")
         .await?;
     let id = Uuid::new_v4();
-    let row=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row=tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO protection_reports(id,owner_id,selection) SELECT $1,$2,$3 WHERE
          (SELECT count(*) FROM protection_reports WHERE owner_id=$2 AND status IN ('running','queued'))<3
          AND (SELECT count(*) FROM protection_reports WHERE expires_at>now())<64",
@@ -109,7 +109,7 @@ async fn list(
     State(s): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    let rows=s.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let rows=s.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT jsonb_build_object('id',id,'created_at',created_at,'expires_at',expires_at,'status',status,'error',error,
          'from',selection->'from','to',selection->'to','timezone',selection->'timezone')
          FROM protection_reports WHERE owner_id=$1 AND expires_at>now() ORDER BY created_at DESC LIMIT 64",[user.id.into()])).await?;
@@ -136,7 +136,7 @@ async fn download(
             Some(sea_orm::AccessMode::ReadOnly),
         )
         .await?;
-    let row=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row=tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         format!("SELECT selection,{column} AS body FROM protection_reports WHERE id=$1 AND owner_id=$2 AND expires_at>now() AND status='ready'"),
         [id.into(),user.id.into()])).await?.ok_or_else(||ApiError::NotFound("report not available".into()))?;
     let selection: Selection = serde_json::from_value(

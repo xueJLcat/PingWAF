@@ -62,7 +62,7 @@ mod tests {
         }
         Migration.up(&SchemaManager::new(&txn)).await.unwrap();
         for table in ["site_certificates", "site_ssl"] {
-            let row = txn.query_one(sea_orm::Statement::from_string(
+            let row = txn.query_one_raw(sea_orm::Statement::from_string(
                 txn.get_database_backend(),
                 format!("SELECT count(*) FILTER (WHERE acme_challenge_type='dns-01' AND
                     (acme_dns_provider,acme_dns_config) IN (('manual','1'::jsonb),('','2'::jsonb),('legacy','3'::jsonb),('route53','4'::jsonb))) AS preserved,

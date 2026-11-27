@@ -28,7 +28,7 @@ pub(super) async fn scope(
         common::load_site(tx, *id, user, false).await?;
     }
     if tx
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT 1 FROM pg_timezone_names WHERE name=$1",
             [selection.timezone.clone().into()],
@@ -64,7 +64,7 @@ pub(super) async fn collect(
     } else {
         3600
     };
-    let rows=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,"
+    let rows=tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,"
       WITH chosen AS (SELECT id,domain FROM sites WHERE id IN (SELECT jsonb_array_elements_text($1)::uuid)),
       params AS (SELECT make_interval(secs=>$5) AS step),
       buckets AS (SELECT generate_series(date_bin(step,$2::timestamptz,'2000-01-01'::timestamptz),$3::timestamptz-interval '1 microsecond',step) AS t FROM params),
@@ -106,7 +106,7 @@ pub(super) async fn collect(
             covered,
         });
     }
-    let rows=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,"
+    let rows=tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,"
       SELECT coalesce(event_type,'unknown') AS category,count(*) AS n FROM security_events WHERE site_id IN
       (SELECT jsonb_array_elements_text($1)::uuid) AND timestamp>=$2 AND timestamp<$3 GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 64",
       [ids.clone().into(),selection.from.into(),selection.to.into()])).await?;
@@ -114,7 +114,7 @@ pub(super) async fn collect(
     for row in rows {
         categories.push((row.try_get("", "category")?, row.try_get("", "n")?));
     }
-    let rows=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,"
+    let rows=tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,"
       SELECT DISTINCT a.id,coalesce(a.display_name,a.hostname) AS name, a.last_heartbeat,
       (a.status='online' AND coalesce(a.last_heartbeat>now()-interval '90 seconds',false)) AS online
       FROM agents a JOIN panel_site_listeners s ON s.agent_id=a.id WHERE s.site_id IN (SELECT jsonb_array_elements_text($1)::uuid) ORDER BY name,id",

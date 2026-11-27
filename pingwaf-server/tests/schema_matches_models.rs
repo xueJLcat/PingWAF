@@ -110,7 +110,7 @@ async fn every_model_matches_the_migrated_schema() {
     // created. Asserted by name so the failure says which column and why.
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
     let row = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "SELECT column_name FROM information_schema.columns \
              WHERE table_name = 'agents' AND column_name = 'tunnel_listener_error'"

@@ -9,18 +9,18 @@ async fn fixed_report_postgres() {
     )
     .await
     .unwrap();
-    let empty=db.query_one(Statement::from_string(DbBackend::Postgres,"SELECT to_regclass('sites') IS NULL AND to_regclass('seaql_migrations') IS NULL")).await.unwrap().unwrap();
+    let empty=db.query_one_raw(Statement::from_string(DbBackend::Postgres,"SELECT to_regclass('sites') IS NULL AND to_regclass('seaql_migrations') IS NULL")).await.unwrap().unwrap();
     assert!(empty.try_get_by_index::<bool>(0).unwrap());
     crate::migration::Migrator::up(&db, None).await.unwrap();
     let user = AuthUser::new(Uuid::new_v4(), "stats@example.test", "admin");
     let site = Uuid::new_v4();
     let idle = Uuid::new_v4();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO users(id,email,password_hash,created_at,updated_at) VALUES($1,$2,'unused',now(),now())",[user.id.into(),user.email.clone().into()])).await.unwrap();
     for (id, name) in
         [(site, "active.example.test"), (idle, "idle.example.test")]
     {
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO sites(id,user_id,name,domain,created_at,updated_at) VALUES($1,$2,$3,$3,now(),now())",
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO sites(id,user_id,name,domain,created_at,updated_at) VALUES($1,$2,$3,$3,now(),now())",
             [id.into(),user.id.into(),name.into()])).await.unwrap();
     }
     let from = Utc::now()
@@ -38,14 +38,14 @@ async fn fixed_report_postgres() {
         timezone: "Asia/Shanghai".into(),
     };
     for id in [site, idle] {
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO report_coverage SELECT t,$1,15 FROM generate_series($2::timestamptz,$3::timestamptz-interval '1 minute',interval '1 minute') t",
             [id.into(),from.into(),to.into()])).await.unwrap();
     }
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO access_logs(site_id,timestamp,client_ip,method) SELECT $1,$2,'127.0.0.1','GET' FROM generate_series(1,3)",
         [site.into(),from.into()])).await.unwrap();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO security_events(site_id,timestamp,client_ip,method,action,event_type,created_at) SELECT $1,$2,'127.0.0.1','GET',kind,'managed',now() FROM unnest(ARRAY['block','block','challenge']) kind",
         [site.into(),from.into()])).await.unwrap();
     let state = State(AppState::new(
@@ -147,23 +147,23 @@ async fn fixed_report_postgres() {
     let node = Uuid::new_v4();
     let foreign_owner = Uuid::new_v4();
     let foreign_site = Uuid::new_v4();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO users(id,email,password_hash,created_at,updated_at) VALUES($1,'foreign@example.test','unused',now(),now())",
         [foreign_owner.into()])).await.unwrap();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO sites(id,user_id,name,domain,created_at,updated_at) VALUES($1,$2,'foreign','foreign.example.test',now(),now())",
         [foreign_site.into(), foreign_owner.into()])).await.unwrap();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO api_keys(id,user_id,name,key_hash,key_prefix,created_at) VALUES($1,$2,'coverage','unused','test',now())",
         [key.into(), user.id.into()])).await.unwrap();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO agents(id,api_key_id,hostname,ip_address,status,site_scope,last_heartbeat,registered_at)
          VALUES($1,$2,'coverage','127.0.0.1','online','all',now(),now())",
         [node.into(), key.into()])).await.unwrap();
     worker::coverage(&db).await.unwrap();
-    assert!(db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    assert!(db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT 1 FROM report_coverage WHERE site_id=$1", [foreign_site.into()])).await.unwrap().is_none());
-    let row = db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT minute FROM report_coverage WHERE site_id=$1 ORDER BY minute DESC LIMIT 1",
         [idle.into()])).await.unwrap().unwrap();
     let minute: DateTime<Utc> = row.try_get("", "minute").unwrap();

@@ -10,6 +10,9 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## Local changes based on PingWAF 0.33.3
 
+- Console test notifications open encrypted channel credentials before delivery, matching scheduled alerts.
+- Update the control plane to SeaORM 2, the bundled geo lookup library to tor-geoip 0.47, and the console build to TypeScript 7 with react-i18next 17.
+
 - The console includes later pages in site, node and certificate inventories, fleet counts and DNS issuer selection. The issuance log fetches the selected page and supports retry after a read failure.
 
 ## Local changes based on PingWAF 0.33.1

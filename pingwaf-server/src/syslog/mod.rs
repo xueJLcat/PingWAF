@@ -34,7 +34,7 @@ struct Stored {
 }
 async fn stored(db: &impl ConnectionTrait, lock: &str) -> Result<Stored> {
     let row = db
-        .query_one(sql(
+        .query_one_raw(sql(
             &format!("SELECT * FROM syslog_settings WHERE id=1 {lock}"),
             vec![],
         ))
@@ -144,7 +144,7 @@ impl Service {
     }
     async fn refresh(&self, db: &DatabaseConnection) -> Result<()> {
         let row = db
-            .query_one(sql(
+            .query_one_raw(sql(
                 "SELECT revision FROM syslog_settings WHERE id=1",
                 vec![],
             ))
@@ -249,9 +249,9 @@ impl Service {
     ) -> Result<()> {
         let tx = db.begin().await?;
         // Serialise admission and quota accounting, including other control-plane instances.
-        tx.execute(sql("SELECT pg_advisory_xact_lock(74638501)", vec![]))
+        tx.execute_raw(sql("SELECT pg_advisory_xact_lock(74638501)", vec![]))
             .await?;
-        let cfg=tx.query_one(sql("SELECT revision,COALESCE((config->>'enabled')::boolean,false) AS enabled,COALESCE((config->>'queue_mib')::bigint,0)*1048576 AS capacity FROM syslog_settings WHERE id=1 FOR SHARE",vec![])).await?.context("settings")?;
+        let cfg=tx.query_one_raw(sql("SELECT revision,COALESCE((config->>'enabled')::boolean,false) AS enabled,COALESCE((config->>'queue_mib')::bigint,0)*1048576 AS capacity FROM syslog_settings WHERE id=1 FOR SHARE",vec![])).await?.context("settings")?;
         let revision: i64 = cfg.try_get("", "revision")?;
         let enabled: bool = cfg.try_get("", "enabled")?;
         let capacity: i64 = cfg.try_get("", "capacity")?;
@@ -267,7 +267,7 @@ impl Service {
                 full += 1;
                 continue;
             }
-            tx.execute(sql("INSERT INTO syslog_queue(event_id,revision,kind,message) VALUES($1,$2,$3,$4) ON CONFLICT(event_id) DO NOTHING",
+            tx.execute_raw(sql("INSERT INTO syslog_queue(event_id,revision,kind,message) VALUES($1,$2,$3,$4) ON CONFLICT(event_id) DO NOTHING",
                 vec![p.id.into(),p.revision.into(),p.kind.into(),p.bytes.clone().into()])).await?;
             used += p.bytes.len() as i64;
         }
@@ -288,18 +288,18 @@ impl Service {
                 let active=self.active.load_full();
                 if active.revision!=conn_rev{conn=None;conn_rev=active.revision}
                 if expiry.elapsed()>=Duration::from_secs(10){
-                    let n=db.execute(sql("DELETE FROM syslog_queue WHERE created_at < now()-make_interval(hours=>$1)",vec![(active.config.retention_hours as i32).into()])).await?.rows_affected();
+                    let n=db.execute_raw(sql("DELETE FROM syslog_queue WHERE created_at < now()-make_interval(hours=>$1)",vec![(active.config.retention_hours as i32).into()])).await?.rows_affected();
                     self.stats.lock().unwrap().expired+=n;expiry=Instant::now();
                 }
                 if !active.config.enabled{return Ok(false)}
                 let tx=db.begin().await?;
-                let lock=tx.query_one(sql("SELECT pg_try_advisory_xact_lock(74638502) AS acquired",vec![])).await?.context("lock")?;
+                let lock=tx.query_one_raw(sql("SELECT pg_try_advisory_xact_lock(74638502) AS acquired",vec![])).await?.context("lock")?;
                 if !lock.try_get::<bool>("","acquired")?{return Ok(false)}
                 // Hold a shared revision lock across the bounded socket write. A config
                 // change cannot report success while an old-target send is still in flight.
-                let version=tx.query_one(sql("SELECT revision FROM syslog_settings WHERE id=1 FOR SHARE",vec![])).await?.context("settings")?;
+                let version=tx.query_one_raw(sql("SELECT revision FROM syslog_settings WHERE id=1 FOR SHARE",vec![])).await?.context("settings")?;
                 if version.try_get::<i64>("","revision")?!=active.revision{return Ok(false)}
-                let row=tx.query_one(sql("SELECT seq,kind,message,attempts,retry_at<=now() AS ready FROM syslog_queue ORDER BY seq LIMIT 1 FOR UPDATE",vec![])).await?;
+                let row=tx.query_one_raw(sql("SELECT seq,kind,message,attempts,retry_at<=now() AS ready FROM syslog_queue ORDER BY seq LIMIT 1 FOR UPDATE",vec![])).await?;
                 let Some(row)=row else{return Ok(false)};
                 if !row.try_get::<bool>("","ready")?{return Ok(false)}
                 self.send_row(tx,row,&active,&mut conn).await
@@ -334,7 +334,7 @@ impl Service {
         match result {
             Ok(peer) => {
                 let kind: String = row.try_get("", "kind")?;
-                tx.execute(sql(
+                tx.execute_raw(sql(
                     "DELETE FROM syslog_queue WHERE seq=$1",
                     vec![seq.into()],
                 ))
@@ -357,7 +357,7 @@ impl Service {
                 let max = (c.retry_min * (1u64 << attempts.clamp(0, 16)))
                     .min(c.retry_max);
                 let delay = rand::random_range(c.retry_min..=max) as i32;
-                tx.execute(sql("UPDATE syslog_queue SET attempts=attempts+1,retry_at=now()+make_interval(secs=>$2::int) WHERE seq=$1",vec![seq.into(),delay.into()])).await?;
+                tx.execute_raw(sql("UPDATE syslog_queue SET attempts=attempts+1,retry_at=now()+make_interval(secs=>$2::int) WHERE seq=$1",vec![seq.into(),delay.into()])).await?;
                 tx.commit().await?;
                 self.stats.lock().unwrap().retries += 1;
                 self.fail(&e);
@@ -369,7 +369,7 @@ impl Service {
 async fn queue_stats(
     db: &impl ConnectionTrait,
 ) -> Result<(i64, i64, Option<DateTime<Utc>>)> {
-    let r=db.query_one(sql("SELECT items AS n,bytes,(SELECT MIN(created_at) FROM syslog_queue) AS oldest FROM syslog_queue_usage WHERE id=1",vec![])).await?.context("queue stats")?;
+    let r=db.query_one_raw(sql("SELECT items AS n,bytes,(SELECT MIN(created_at) FROM syslog_queue) AS oldest FROM syslog_queue_usage WHERE id=1",vec![])).await?.context("queue stats")?;
     Ok((
         r.try_get("", "n")?,
         r.try_get("", "bytes")?,
@@ -401,7 +401,7 @@ mod tests {
             access: true,
             ..Default::default()
         };
-        db.execute(sql(
+        db.execute_raw(sql(
             "UPDATE syslog_settings SET revision=1,config=$1",
             vec![serde_json::to_value(&config)?.into()],
         ))
@@ -424,23 +424,23 @@ mod tests {
         svc.persist_batch(&db, &[(packet, permit())]).await?;
         let (n, bytes, _) = queue_stats(&db).await?;
         assert_eq!(n, 1);
-        db.execute(sql("INSERT INTO syslog_queue(event_id,revision,kind,message) VALUES($1,1,'access',$2)",vec![Uuid::new_v4().into(),vec![0u8;(1048576-bytes) as usize].into()])).await?;
+        db.execute_raw(sql("INSERT INTO syslog_queue(event_id,revision,kind,message) VALUES($1,1,'access',$2)",vec![Uuid::new_v4().into(),vec![0u8;(1048576-bytes) as usize].into()])).await?;
         svc.persist_batch(&db, &[(make(), permit())]).await?;
         assert_eq!(svc.stats.lock().unwrap().dropped_full, 1);
         assert_eq!(queue_stats(&db).await?.1, 1048576);
-        db.execute(sql(
+        db.execute_raw(sql(
             "DELETE FROM syslog_queue WHERE event_id!=$1",
             vec![first.into()],
         ))
         .await?;
-        db.execute(sql("UPDATE syslog_settings SET config=jsonb_set(config,'{enabled}','false'),revision=2",vec![])).await?;
+        db.execute_raw(sql("UPDATE syslog_settings SET config=jsonb_set(config,'{enabled}','false'),revision=2",vec![])).await?;
         let (paused, paused_workers) = Service::start(db.clone()).await;
         assert!(paused
             .project(&LogEntry::default(), Uuid::nil(), None, Utc::now(), false)
             .is_none());
         assert_eq!(queue_stats(&db).await?.0, 1);
         drop(paused_workers);
-        db.execute(sql("UPDATE syslog_settings SET config=jsonb_set(config,'{enabled}','true'),revision=3",vec![])).await?;
+        db.execute_raw(sql("UPDATE syslog_settings SET config=jsonb_set(config,'{enabled}','true'),revision=3",vec![])).await?;
         let (_resumed, mut workers) = Service::start(db.clone()).await;
         let mut buf = [0u8; 8192];
         let n = tokio::time::timeout(

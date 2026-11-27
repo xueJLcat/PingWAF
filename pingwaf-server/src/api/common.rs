@@ -2,7 +2,7 @@
 //! the multi-tenancy checks that every handler performs before touching data.
 
 use chrono::{DateTime, Utc};
-use sea_orm::sea_query::{extension::postgres::PgExpr, Expr};
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbErr,
     EntityTrait, QueryFilter, Statement,
@@ -440,6 +440,7 @@ pub(crate) async fn purge_target_agents(
 
 /// Match literal user input against case-preserving names or addresses.
 pub(crate) fn literal_text_search<C: ColumnTrait>(columns: &[C], search: &str) -> Condition {
+    use sea_orm::sea_query::extension::postgres::PgExpr;
     let pattern = format!("%{}%", super::logs::escape_like(search));
     columns.iter().fold(Condition::any(), |condition, column| {
         condition.add(Expr::col(column.as_column_ref()).ilike(pattern.as_str()))
@@ -460,7 +461,7 @@ pub async fn query_all(
     sql: &str,
     values: Vec<sea_orm::Value>,
 ) -> Result<Vec<sea_orm::QueryResult>, ApiError> {
-    db.query_all(Statement::from_sql_and_values(
+    db.query_all_raw(Statement::from_sql_and_values(
         sea_orm::DatabaseBackend::Postgres,
         sql,
         values,
@@ -737,12 +738,7 @@ pub async fn ensure_domains_available(
 ///   this site`) — matched via `is already in use by this site`.
 ///
 pub fn is_domain_conflict(err: &DbErr) -> bool {
-    if let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
-        sea_orm::sqlx::Error::Database(database),
-    ))
-    | DbErr::Query(sea_orm::RuntimeErr::SqlxError(
-        sea_orm::sqlx::Error::Database(database),
-    )) = err
+    if let Some(database) = crate::api::error::database_error(err)
     {
         if database.constraint() == Some("sites_ingress_domain_conflict") {
             return true;

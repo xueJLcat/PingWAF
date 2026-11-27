@@ -42,7 +42,7 @@ pub(super) async fn run(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     tx.execute_unprepared("DELETE FROM protection_reports WHERE expires_at<=now(); DELETE FROM report_coverage WHERE minute<now()-interval '8 days'").await?;
     let lease = Uuid::new_v4();
-    let row=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"
+    let row=tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,"
       UPDATE protection_reports SET status='running',lease=$1,lease_until=now()+interval '5 minutes'
       WHERE id=(SELECT id FROM protection_reports WHERE (status='queued' OR (status='running' AND lease_until<=now()))
                  AND NOT EXISTS(SELECT 1 FROM protection_reports WHERE status='running' AND lease_until>now())
@@ -55,7 +55,7 @@ pub(super) async fn run(db: &DatabaseConnection) -> Result<(), DbErr> {
     let saved: Option<Value> = row.try_get("", "snapshot")?;
     let outcome=async {
         let selection:Selection=serde_json::from_value(selection).map_err(|_|ApiError::Internal("invalid report selection".into()))?;
-        let user=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        let user=db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT email,role FROM users WHERE id=$1 AND NOT disabled",[owner.into()])).await?.ok_or_else(||ApiError::Forbidden("report owner unavailable".into()))?;
         let user=AuthUser::new(owner,user.try_get::<String>("","email")?,user.try_get::<String>("","role")?);
         let snap:Snapshot=if let Some(saved)=saved {
@@ -63,7 +63,7 @@ pub(super) async fn run(db: &DatabaseConnection) -> Result<(), DbErr> {
             serde_json::from_value(saved).map_err(|_|ApiError::Internal("invalid report snapshot".into()))?
         }else{
             let snap=snapshot::collect(db,&user,selection,false).await?;
-            db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "UPDATE protection_reports SET snapshot=$3 WHERE id=$1 AND lease=$2",[id.into(),lease.into(),json!(snap).into()])).await?;
             snap
         };
@@ -71,13 +71,13 @@ pub(super) async fn run(db: &DatabaseConnection) -> Result<(), DbErr> {
     }.await;
     match outcome {
         Ok((pdf, csv)) => {
-            db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE protection_reports SET pdf=$3,csv=$4,status='ready',lease=NULL,lease_until=NULL WHERE id=$1 AND lease=$2",
             [id.into(),lease.into(),pdf.into(),csv.into()])).await?;
         },
         Err(error) => {
             tracing::warn!(%id,?error,"report generation failed");
-            db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE protection_reports SET status='failed',error='Report generation failed; check scope, data and server logs',lease=NULL,lease_until=NULL WHERE id=$1 AND lease=$2",
             [id.into(),lease.into()])).await?;
         },

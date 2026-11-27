@@ -14,7 +14,7 @@ async fn scoped_transaction(
         .await?;
     require_session(&tx, agent, session).await?;
     let (_, owner) = authorize(&tx, agent).await?;
-    if tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    if tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT 1 FROM sites s JOIN panel_site_listeners a ON a.site_id=s.id WHERE s.id=$1 AND a.agent_id=$2 AND s.user_id=$3 AND s.status='active'",
         [site.into(),agent.into(),owner.into()])).await?.is_none() { return Err(BuildError::Forbidden); }
     Ok(tx)
@@ -25,7 +25,7 @@ pub(in crate::grpc) async fn page_rules(
     site: Uuid,
     rule: Option<Uuid>,
 ) -> Result<Vec<PageIntegrityRule>, DbErr> {
-    let rows=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let rows=tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT r.id,r.path,r.mode,r.dynamic_stage,r.dynamic_region,r.dynamic_test_digest,v.version,v.digest,v.content_type,
              CASE WHEN $2::uuid IS NOT NULL THEN v.body END AS body
              FROM page_integrity_rules r LEFT JOIN page_integrity_versions v ON (v.rule_id,v.version)=(r.id,r.active_version)
@@ -127,22 +127,22 @@ pub(in crate::grpc) async fn observe_page(
     };
     let write=async {
         let tx=scoped_transaction(db,agent,session,site).await?;
-        tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT 1 FROM page_integrity_rules WHERE id=$1 AND site_id=$2 FOR UPDATE",[rule.into(),site.into()])).await?.ok_or(BuildError::Forbidden)?;
         if let Some(bytes)=event.candidate {
-            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "UPDATE page_integrity_rules SET candidate_digest=$2,candidate_body=$3,candidate_type=$4,candidate_at=now() WHERE id=$1
                  AND (candidate_digest,candidate_type) IS DISTINCT FROM ($2,$4)",
                 [rule.into(),event.detail.clone().into(),bytes.into(),event.content_type.into()])).await?;
         }
         if event.category!="capture" {
-            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "INSERT INTO page_integrity_events(rule_id,category,detail,observations) VALUES($1,$2,$3,$4)
                  ON CONFLICT(rule_id,category,detail) DO UPDATE SET last_seen=now(),observations=page_integrity_events.observations+excluded.observations",
                 [rule.into(),event.category.clone().into(),event.detail.clone().into(),(event.count as i64).into()])).await?;
         }
         let notify = if alert.is_some() {
-            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "UPDATE page_integrity_events SET last_notified=now() WHERE rule_id=$1 AND category=$2 AND detail=$3
                  AND (last_notified IS NULL OR last_notified < now()-interval '10 minutes')",
                 [rule.into(),event.category.into(),event.detail.into()])).await?.rows_affected()==1

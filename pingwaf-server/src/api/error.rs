@@ -200,14 +200,17 @@ impl IntoResponse for ApiError {
     }
 }
 
+pub(crate) fn database_error(err: &DbErr) -> Option<&dyn sea_orm::sqlx::error::DatabaseError> {
+    match err {
+        DbErr::Exec(sea_orm::RuntimeErr::SqlxError(source))
+        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(source)) => source.as_database_error(),
+        _ => None,
+    }
+}
+
 impl From<DbErr> for ApiError {
     fn from(err: DbErr) -> Self {
-        if let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
-            sea_orm::sqlx::Error::Database(db),
-        ))
-        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(
-            sea_orm::sqlx::Error::Database(db),
-        )) = &err
+        if let Some(db) = database_error(&err)
         {
             let message = match db.constraint() {
                 Some("panel_override_scope") => Some("address override requires a site and port assigned to this node"),

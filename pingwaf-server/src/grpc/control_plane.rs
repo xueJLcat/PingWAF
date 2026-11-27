@@ -2372,7 +2372,7 @@ async fn persist_site_certificates(db: &DatabaseConnection, statuses: &[SiteStat
             },
         };
         let Some(expires_at) = status.ssl_expires_at.and_then(|ts| DateTime::from_timestamp(ts.seconds, 0)) else { continue };
-        let result = db.execute(Statement::from_sql_and_values(DbBackend::Postgres, "
+        let result = db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres, "
             UPDATE site_certificates c SET status=$3, expires_at=$4, failure_reason=NULL, updated_at=$5
             WHERE c.site_id=$1 AND c.cert_pem IS NULL AND c.acme_email IS NOT NULL
               AND c.id=COALESCE($2::uuid, (SELECT certificate_id FROM site_ssl WHERE site_id=$1))
@@ -3250,9 +3250,9 @@ async fn mark_offline(db: &DatabaseConnection, agent_id: Uuid) {
         .col_expr(agent::Column::Status, Expr::value(agent_status::OFFLINE))
         .filter(agent::Column::Id.eq(agent_id))
         .filter(
-            agent::Column::LastHeartbeat
-                .is_null()
-                .or(agent::Column::LastHeartbeat.lt(threshold)),
+            sea_orm::Condition::any()
+                .add(agent::Column::LastHeartbeat.is_null())
+                .add(agent::Column::LastHeartbeat.lt(threshold)),
         )
         .filter(agent::Column::Status.ne(agent_status::OFFLINE))
         .exec(db)
@@ -3942,11 +3942,11 @@ async fn persist_snapshot_sync(
     // lock order and check the current grant after acquiring the lock.
     let result: Result<(), sea_orm::DbErr> = async {
         let tx = db.begin().await?;
-        let changed = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        let changed = tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT id FROM agents WHERE id=$1 AND config_hash IS DISTINCT FROM $2 FOR UPDATE",
             [agent.into(), report.applied_config_hash.clone().into()])).await?;
         if changed.is_some() {
-            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                 "UPDATE agents SET config_hash=$2, last_config_sync_at=now(), last_policy_sync_at=now()
                  WHERE id=$1 AND EXISTS (SELECT FROM managed_config_generations g, managed_config_authority a
                     WHERE g.agent_id=$1 AND g.session_id=$3 AND g.generation=$4 AND a.id=1 AND a.epoch=$5)",

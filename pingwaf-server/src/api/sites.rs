@@ -79,12 +79,7 @@ fn site_domain_conflict(err: ApiError) -> ApiError {
 /// A non-conflict database error keeps its default code: `map_domain_conflict`
 /// passes it through `From<DbErr>`, which never produces a `BadRequest`.
 pub(crate) fn map_site_domain_conflict(err: DbErr) -> ApiError {
-    if let DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
-        sea_orm::sqlx::Error::Database(db),
-    ))
-    | DbErr::Query(sea_orm::RuntimeErr::SqlxError(
-        sea_orm::sqlx::Error::Database(db),
-    )) = &err
+    if let Some(db) = crate::api::error::database_error(&err)
     {
         if db.code().as_deref() == Some("40001") {
             return ApiError::Conflict(
@@ -1583,7 +1578,7 @@ async fn ingress_options(
 pub(crate) async fn custom_ingress_writes_enabled(
     db: &impl ConnectionTrait,
 ) -> Result<bool, DbErr> {
-    db.query_one(sea_orm::Statement::from_string(db.get_database_backend(),
+    db.query_one_raw(sea_orm::Statement::from_string(db.get_database_backend(),
         "SELECT NOT EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'sites'::regclass AND conname = 'sites_custom_ingress_disabled')"
     )).await?.ok_or_else(|| DbErr::Custom("missing ingress migration state".into()))?.try_get_by_index(0)
 }
@@ -2267,7 +2262,7 @@ async fn clone_site(
         super::static_drafts::bind_version(&txn, new_id, current.id, model.site_handler.as_ref(), None).await?;
     }
     if let Some(digest) = model.site_handler.as_ref().filter(|h| h["kind"] == "zip").and_then(|h| h["digest"].as_str()) {
-        let copied = txn.execute(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+        let copied = txn.execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
             "INSERT INTO static_releases(site_id,digest,archive) SELECT $1,digest,archive FROM static_releases WHERE site_id=$2 AND digest=$3",
             [new_id.into(), source_id.into(), digest.into()])).await?;
         if copied.rows_affected() != 1 { return Err(ApiError::BadRequest("source version missing".into())); }
@@ -4373,8 +4368,10 @@ async fn load_address_collisions(
         .filter(site_upstreams::Column::SiteId.eq(site_id))
         .filter(site_upstreams::Column::PoolId.eq(pool_id))
         .filter(
-            Expr::expr(Func::lower(Expr::col(site_upstreams::Column::Address)))
-                .eq(Func::lower(Expr::val(address))),
+            sea_orm::ExprTrait::eq(
+                Func::lower(Expr::col(site_upstreams::Column::Address)),
+                Func::lower(Expr::val(address)),
+            ),
         );
     if let Some(exclude) = exclude {
         query = query.filter(site_upstreams::Column::Id.ne(exclude));
@@ -4591,7 +4588,7 @@ pub(crate) async fn check_ingress_writes(state: &AppState, owner: Uuid) {
     .await
     .unwrap_err();
     assert_eq!(ApiError::from(error).code(), "site.ingress_invalid");
-    state.db.execute(sea_orm::Statement::from_sql_and_values(
+    state.db.execute_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DbBackend::Postgres,
         "UPDATE site_ssl SET acme_challenge_type = 'dns-01', acme_email='regression@example.test', acme_dns_config='{}' WHERE site_id=$1",
         [row.id.into()],

@@ -204,9 +204,9 @@ async fn list(
             .into_query();
 
         condition = condition.add(
-            ip_groups::Column::IsGlobal
-                .eq(true)
-                .or(ip_groups::Column::Id.in_subquery(linked_group_ids)),
+            sea_orm::Condition::any()
+                .add(ip_groups::Column::IsGlobal.eq(true))
+                .add(ip_groups::Column::Id.in_subquery(linked_group_ids)),
         );
     }
     if let Some(ref action) = non_empty(&query.action) {
@@ -472,11 +472,11 @@ async fn affected_sites(
 
     let mut ids: Vec<Uuid> = site::Entity::find()
         .filter(
-            site::Column::Id
-                .in_subquery(associated)
-                .or(site::Column::Id.in_subquery(referencing))
-                .or(site::Column::Id.in_subquery(gating))
-                .or(site::Column::Id.in_subquery(bot_verified)),
+            sea_orm::Condition::any()
+                .add(site::Column::Id.in_subquery(associated))
+                .add(site::Column::Id.in_subquery(referencing))
+                .add(site::Column::Id.in_subquery(gating))
+                .add(site::Column::Id.in_subquery(bot_verified)),
         )
         .select_only()
         .column(site::Column::Id)
@@ -809,9 +809,9 @@ async fn sync_due_groups(state: &AppState) -> Result<(), sea_orm::DbErr> {
         // The raw source_url check keeps pre-0.25 URL groups (whose
         // subscription_kind is NULL) syncing after the upgrade.
         .filter(
-            ip_groups::Column::SubscriptionKind
-                .is_in([subscription_kind::BUILTIN, subscription_kind::URL])
-                .or(ip_groups::Column::SourceUrl.is_not_null()),
+            sea_orm::Condition::any()
+                .add(ip_groups::Column::SubscriptionKind.is_in([subscription_kind::BUILTIN, subscription_kind::URL]))
+                .add(ip_groups::Column::SourceUrl.is_not_null()),
         )
         .filter(ip_groups::Column::SyncIntervalMinutes.is_not_null())
         .all(&state.db)

@@ -7,7 +7,7 @@ use prost::Message;
 use sea_orm::{
     AccessMode, ColumnTrait, ConnectionTrait, DatabaseConnection,
     DatabaseTransaction, DbBackend, DbErr, EntityTrait, IsolationLevel,
-    QueryFilter, QueryOrder, RuntimeErr, Statement, TransactionTrait,
+    QueryFilter, QueryOrder, Statement, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tonic::Status;
@@ -168,7 +168,7 @@ pub(super) async fn content_chunk(
         let tx = db.begin_with_config(Some(IsolationLevel::RepeatableRead), Some(AccessMode::ReadOnly)).await?;
         require_session(&tx, agent_id, session).await?;
         let (_, owner) = authorize(&tx, agent_id).await?;
-        let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        let row = tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT substring(r.archive FROM $5 FOR 262144) AS data, octet_length(r.archive) AS size
              FROM static_releases r JOIN sites s ON s.id=r.site_id JOIN panel_site_listeners a ON a.site_id=s.id
              WHERE a.agent_id=$1 AND s.user_id=$2 AND s.id=$3 AND r.digest=$4 AND s.status='active'
@@ -216,15 +216,8 @@ impl From<DbErr> for BuildError {
 }
 
 fn is_serialization_failure(err: &DbErr) -> bool {
-    match err {
-        DbErr::Exec(RuntimeErr::SqlxError(sea_orm::sqlx::Error::Database(
-            pg,
-        )))
-        | DbErr::Query(RuntimeErr::SqlxError(
-            sea_orm::sqlx::Error::Database(pg),
-        )) => pg.code().as_deref() == Some("40001"),
-        _ => false,
-    }
+    crate::api::error::database_error(err)
+        .is_some_and(|db| db.code().as_deref() == Some("40001"))
 }
 
 async fn build_once(
@@ -712,7 +705,7 @@ pub(crate) async fn node_site_entries(
 async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::AgentRegistry, model: &site::Model,
     epoch: Uuid, desired_revision: Option<String>) -> Result<SiteDeployment, DbErr> {
     let mut result = SiteDeployment { desired_revision, nodes: Vec::new(), summary: EntrySummary::default() };
-    let assignments = tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let assignments = tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1 ORDER BY agent_id",
         [model.id.into()])).await?;
     for row in assignments {
@@ -747,7 +740,7 @@ async fn deployment_with_revision(tx: &DatabaseTransaction, registry: &super::Ag
 }
 
 async fn effective_agents(tx: &impl ConnectionTrait, site: Uuid) -> Result<Vec<Uuid>, DbErr> {
-    tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT DISTINCT agent_id FROM panel_site_listeners WHERE site_id=$1 ORDER BY agent_id",
         [site.into()])).await?.into_iter().map(|row| row.try_get("", "agent_id")).collect()
 }
@@ -780,7 +773,7 @@ pub(crate) async fn check_assigned_ingress(
     active: bool,
 ) -> Result<(), crate::api::error::ApiError> {
     // A restore may re-create a site that has no current listener rows.
-    let assignments = tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let assignments = tx.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT a.id FROM agents a JOIN api_keys k ON k.id=a.api_key_id WHERE k.user_id=$2 AND (
              (a.site_scope='all' AND (a.site_id IS NULL OR a.site_id=$1) AND EXISTS
                  (SELECT FROM managed_config_generations g WHERE g.agent_id=a.id AND g.session_id IS NOT NULL))
@@ -817,7 +810,7 @@ async fn visible_sites(
 }
 
 async fn authority_epoch(tx: &DatabaseTransaction) -> Result<Uuid, DbErr> {
-    tx.query_one(Statement::from_string(
+    tx.query_one_raw(Statement::from_string(
         DbBackend::Postgres,
         "SELECT epoch FROM managed_config_authority WHERE id = 1 FOR SHARE",
     ))
@@ -835,7 +828,7 @@ pub(super) async fn lock_registration(
     key_id: Uuid,
     hostname: &str,
 ) -> Result<(), DbErr> {
-    tx.execute(Statement::from_sql_and_values(
+    tx.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [format!("pingwaf-register:{key_id}:{hostname}").into()],
@@ -856,7 +849,7 @@ pub(super) async fn register_session(
         "UPDATE managed_config_generations SET session_id = $2
          WHERE agent_id = $1 AND session_id IS NOT NULL"
     };
-    tx.execute(Statement::from_sql_and_values(
+    tx.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         sql,
         [agent_id.into(), session_id.into()],
@@ -869,7 +862,7 @@ pub(super) async fn current_session(
     db: &impl ConnectionTrait,
     agent_id: Uuid,
 ) -> Result<Option<Uuid>, DbErr> {
-    let row = db.query_one(Statement::from_sql_and_values(
+    let row = db.query_one_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT session_id FROM managed_config_generations WHERE agent_id = $1",
         [agent_id.into()],
@@ -886,7 +879,7 @@ async fn allocate_generation(
     agent_id: Uuid,
     session_id: Uuid,
 ) -> Result<i64, BuildError> {
-    tx.query_one(Statement::from_sql_and_values(
+    tx.query_one_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE managed_config_generations SET generation = generation + 1
          WHERE agent_id = $1 AND session_id = $2
@@ -1063,7 +1056,7 @@ pub(super) async fn check_postgres(
     );
 
     let exec = |sql: &'static str, values: Vec<sea_orm::Value>| async move {
-        db.execute(Statement::from_sql_and_values(
+        db.execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
             values,

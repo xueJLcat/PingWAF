@@ -373,9 +373,9 @@ async fn load_ip_groups(
     ip_groups::Entity::find()
         .filter(ip_groups::Column::Enabled.eq(true))
         .filter(
-            ip_groups::Column::IsGlobal
-                .eq(true)
-                .or(ip_groups::Column::Id.in_subquery(linked_ids)),
+            sea_orm::Condition::any()
+                .add(ip_groups::Column::IsGlobal.eq(true))
+                .add(ip_groups::Column::Id.in_subquery(linked_ids)),
         )
         .order_by_asc(ip_groups::Column::Name)
         .all(db)

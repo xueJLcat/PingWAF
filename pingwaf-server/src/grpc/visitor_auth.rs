@@ -192,7 +192,7 @@ pub(super) async fn check_managed_password_postgres(
     let exec = |sql: &'static str, values: Vec<Value>| async move {
         service
             .db
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 sql,
                 values,

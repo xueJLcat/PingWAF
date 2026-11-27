@@ -237,7 +237,7 @@ pub(crate) async fn update(
         .is_some_and(|c| c.invalidates_queue(&edit.config));
     let dropped = clear_if_needed(&tx, discard, edit.discard).await?;
     let revision = locked.revision + 1;
-    tx.execute(sql("UPDATE syslog_settings SET revision=$1,config=$2,ca=$3,cert=$4,sealed_key=$5 WHERE id=1",vec![
+    tx.execute_raw(sql("UPDATE syslog_settings SET revision=$1,config=$2,ca=$3,cert=$4,sealed_key=$5 WHERE id=1",vec![
         revision.into(),json!(&edit.config).into(),material.ca.clone().into(),material.cert.clone().into(),sealed.clone().into()])).await?;
     tx.commit().await?;
     service.install(Active {
@@ -270,7 +270,7 @@ async fn clear_if_needed(
         .with_code("syslog.queue_not_empty"));
     }
     Ok(tx
-        .execute(sql("DELETE FROM syslog_queue", vec![]))
+        .execute_raw(sql("DELETE FROM syslog_queue", vec![]))
         .await?
         .rows_affected())
 }
@@ -291,7 +291,7 @@ pub(crate) async fn remove(
     let old = stored(&tx, "FOR UPDATE").await.map_err(internal)?;
     check_revision(req.revision, old.revision)?;
     let dropped = clear_if_needed(&tx, true, req.discard).await?;
-    tx.execute(sql("UPDATE syslog_settings SET revision=revision+1, config=NULL,ca='',cert='',sealed_key='' WHERE id=1",vec![])).await?;
+    tx.execute_raw(sql("UPDATE syslog_settings SET revision=revision+1, config=NULL,ca='',cert='',sealed_key='' WHERE id=1",vec![])).await?;
     let result = stored(&tx, "").await.map_err(internal)?;
     tx.commit().await?;
     service.install(result.active().map_err(internal)?);

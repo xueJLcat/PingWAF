@@ -491,7 +491,7 @@ pub async fn enqueue_upload(
     // Atomic state transition: concurrent requests, including requests from
     // another control-plane instance, cannot all claim the same upload.
     let claimed = db
-        .execute(sea_orm::Statement::from_sql_and_values(
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             "UPDATE config_backups \
              SET target_id = $2, status = 'uploading', upload_started_at = $3, \
@@ -592,7 +592,7 @@ async fn upload_backup(
     // Fence on the exact lease claimed by this task. A late task from an older
     // attempt must not overwrite a newer retry's state.
     let changed = db
-        .execute(sea_orm::Statement::from_sql_and_values(
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             "UPDATE config_backups SET status = $1, error = $2, completed_at = $3 \
              WHERE id = $4 AND status = 'uploading' AND upload_started_at = $5",
@@ -619,7 +619,7 @@ pub async fn reset_stale_uploads(
 ) -> Result<u64, sea_orm::DbErr> {
     let cutoff = Utc::now() - chrono::Duration::minutes(15);
     let result = db
-        .execute(sea_orm::Statement::from_sql_and_values(
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             "UPDATE config_backups SET status = 'failed', \
              error = 'upload lease expired', completed_at = $1 \
@@ -638,7 +638,7 @@ pub async fn prune_backups(
 ) -> Result<u64, sea_orm::DbErr> {
     let cutoff = Utc::now() - chrono::Duration::days(30);
     let result = db
-        .execute(sea_orm::Statement::from_sql_and_values(
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             "WITH ranked AS (\
                  SELECT id, ROW_NUMBER() OVER (\

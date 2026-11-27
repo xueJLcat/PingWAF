@@ -25,7 +25,7 @@ pub(crate) async fn read(
     db: &impl ConnectionTrait,
     agent: Uuid,
 ) -> Result<Policy, DbErr> {
-    let row = db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT p.addresses, p.revision, p.updated_by, COALESCE((SELECT jsonb_agg(jsonb_build_object(
         'site_id', o.site_id, 'port', o.port, 'addresses', o.addresses) ORDER BY o.site_id, o.port)
         FROM node_listener_overrides o WHERE o.agent_id=p.id), '[]'::jsonb) AS overrides

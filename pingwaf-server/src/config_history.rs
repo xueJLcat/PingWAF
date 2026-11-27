@@ -193,7 +193,7 @@ pub async fn prune_expired(db: &DatabaseConnection) -> Result<u64, DbErr> {
             OR id IN (SELECT id FROM ranked WHERE position > $2)",
         [cutoff.into(), MAX_VERSIONS_PER_SCOPE.into()],
     );
-    let result = db.execute(stmt).await?;
+    let result = db.execute_raw(stmt).await?;
     Ok(result.rows_affected())
 }
 
@@ -217,7 +217,7 @@ async fn prune_scope<C: ConnectionTrait>(db: &C, scope: VersionScope) {
             MAX_VERSIONS_PER_SCOPE.into(),
         ],
     );
-    if let Err(err) = db.execute(stmt).await {
+    if let Err(err) = db.execute_raw(stmt).await {
         tracing::warn!(error = %err, "could not prune config versions");
     }
 }
@@ -265,7 +265,7 @@ pub async fn rollback_with_agents(
     // Serialise rollbacks per scope: a second rollback waits here instead of
     // recording and applying against a state the first one is about to
     // replace. The lock is released when the transaction ends.
-    txn.execute(sea_orm::Statement::from_sql_and_values(
+    txn.execute_raw(sea_orm::Statement::from_sql_and_values(
         txn.get_database_backend(),
         "SELECT pg_advisory_xact_lock(hashtext($1))",
         [scope.describe().to_string().into()],

@@ -160,7 +160,7 @@ async fn columns_for<C: ConnectionTrait>(
     table: &str,
 ) -> Result<BTreeMap<String, ColumnInfo>, DbErr> {
     let rows = db
-        .query_all(statement(
+        .query_all_raw(statement(
             db,
             "SELECT column_name, is_nullable, column_default \
              FROM information_schema.columns \
@@ -185,7 +185,7 @@ async fn columns_for<C: ConnectionTrait>(
                 // the uploaded document, and is evaluated to a JSON value of
                 // the correct type (bool, number, string, jsonb or timestamp).
                 let value = db
-                    .query_one(statement(
+                    .query_one_raw(statement(
                         db,
                         format!("SELECT to_jsonb({expression}) AS value"),
                         Vec::new(),
@@ -243,7 +243,7 @@ async fn user_exists<C: ConnectionTrait>(
     id: Uuid,
 ) -> Result<bool, DbErr> {
     Ok(db
-        .query_one(statement(
+        .query_one_raw(statement(
             db,
             "SELECT 1 AS present FROM users WHERE id = $1",
             vec![id.into()],
@@ -473,7 +473,7 @@ async fn reference_exists<C: ConnectionTrait>(
         DbErr::Custom(format!("unknown referenced table {table}"))
     })?;
     Ok(db
-        .query_one(statement(
+        .query_one_raw(statement(
             db,
             format!(
                 "SELECT 1 AS present FROM {} WHERE id = $1",
@@ -902,7 +902,7 @@ async fn check_restore_ingress<C: ConnectionTrait>(
             "port":port, "protocol":protocol}));
     }
     if !zip_releases.is_empty() {
-        if let Some(missing) = db.query_one(statement(db, "
+        if let Some(missing) = db.query_one_raw(statement(db, "
             SELECT z.id FROM jsonb_to_recordset($1) AS z(id uuid,digest text)
             WHERE NOT EXISTS (SELECT FROM static_releases r WHERE r.site_id=z.id AND r.digest=z.digest)
             LIMIT 1", vec![json!(zip_releases).into()])).await? {
@@ -966,7 +966,7 @@ async fn check_restore_ingress<C: ConnectionTrait>(
                            AND w.host = ('*.' || array_to_string(l.parts[pos:cardinality(l.parts)],'.')) COLLATE "C") THEN 'domain'
         END AS conflict"#;
     let result = db
-        .query_one(statement(
+        .query_one_raw(statement(
             db,
             sql,
             vec![
@@ -1363,9 +1363,9 @@ async fn delete_rows(
             "UPDATE certificate_events SET certificate_id = NULL \
              WHERE certificate_id IN (SELECT id FROM {table}{scope_sql})"
         );
-        txn.execute(statement(txn, sql, values.clone())).await?;
+        txn.execute_raw(statement(txn, sql, values.clone())).await?;
     }
-    txn.execute(statement(
+    txn.execute_raw(statement(
         txn,
         format!("DELETE FROM {table}{scope_sql}"),
         values,
@@ -1380,7 +1380,7 @@ async fn delete_rows(
         // delete above, while the removed ids are already gone.
         match site_id {
             Some(id) => {
-                txn.execute(statement(
+                txn.execute_raw(statement(
                     txn,
                     "DELETE FROM site_certificate_links \
                      WHERE site_id <> $2 AND certificate_id IN \
@@ -1390,7 +1390,7 @@ async fn delete_rows(
                 .await?;
             },
             None => {
-                txn.execute(statement(
+                txn.execute_raw(statement(
                     txn,
                     "DELETE FROM site_certificate_links \
                      WHERE certificate_id NOT IN \
@@ -1413,7 +1413,7 @@ async fn insert_rows(
         return Ok(());
     }
     let table = quote_ident(spec.name);
-    txn.execute(statement(
+    txn.execute_raw(statement(
         txn,
         format!(
             "INSERT INTO {table} SELECT * FROM \
@@ -1457,7 +1457,7 @@ async fn upsert_rows(
          jsonb_populate_recordset(NULL::{table}, $1::jsonb) \
          ON CONFLICT ({conflict}) DO UPDATE SET {assignments}"
     );
-    txn.execute(statement(
+    txn.execute_raw(statement(
         txn,
         sql,
         vec![Value::Array(rows.to_vec()).into()],
@@ -1481,7 +1481,7 @@ pub async fn apply_restore(
             if prepared.rows.iter().any(|r| uuid_field(r,"agent_id").is_none_or(|id| !policy_nodes.contains(&id))) {
                 return Err(DbErr::Custom("listener override has no node policy in the backup".into()));
             }
-            txn.execute(statement(txn,
+            txn.execute_raw(statement(txn,
                 "DELETE FROM node_listener_overrides WHERE agent_id = ANY($1::uuid[])",
                 vec![policy_nodes.clone().into()])).await?;
         } else {
@@ -1489,7 +1489,7 @@ pub async fn apply_restore(
         }
     }
     for id in &plan.prune_site_ids {
-        txn.execute(statement(
+        txn.execute_raw(statement(
             txn,
             "DELETE FROM sites WHERE id = $1",
             vec![(*id).into()],
@@ -1539,7 +1539,7 @@ pub async fn apply_restore(
     )
     .await?;
     crate::models::site_handler::check_redirects(txn).await?;
-    if txn.query_one(Statement::from_string(txn.get_database_backend(),
+    if txn.query_one_raw(Statement::from_string(txn.get_database_backend(),
         "SELECT 1 FROM sites s WHERE s.site_handler->>'kind'='zip' AND NOT EXISTS
             (SELECT FROM static_releases r WHERE r.site_id=s.id AND r.digest=s.site_handler->>'digest') LIMIT 1"
     )).await?.is_some() {

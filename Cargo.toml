@@ -564,8 +564,8 @@ rhai = "1"
 # separate `sea-orm-migration` crate, which re-exports the derive macros the
 # migration modules need. Both crates must stay on the same minor version so
 # cargo resolves a single copy of sea-orm.
-sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
-sea-orm-migration = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-orm = { version = "2.0.3", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm-migration = { version = "2.0.3", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 # The tunnel listener and connector speak TLS through the same rustls the rest
 # of the process already uses; this is the tokio adapter for it.
@@ -597,6 +597,6 @@ pyroscope = { version = "2.1.1", features = ["backend-pprof-rs"] }
 rgb = { version = "0.8.52", features = ["bytemuck"] }
 syslog = "7.0.0"
 tokio-test = "0.4.5"
-tor-geoip = { version = "0.46.0", default-features = false, features = [
+tor-geoip = { version = "0.47.0", default-features = false, features = [
     "embedded-db",
 ] }

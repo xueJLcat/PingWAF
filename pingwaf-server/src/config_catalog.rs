@@ -392,7 +392,7 @@ pub(crate) async fn query_rows<C: ConnectionTrait>(
         _ => {},
     }
     let result =
-        db.query_one(statement(db, sql, values))
+        db.query_one_raw(statement(db, sql, values))
             .await?
             .ok_or_else(|| {
                 DbErr::Custom("snapshot query returned no row".into())

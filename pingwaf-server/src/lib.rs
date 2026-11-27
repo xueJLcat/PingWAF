@@ -61,7 +61,7 @@ use crate::models::{instance_setting, role, user};
 
 async fn check_dashboard_ingress(db: &sea_orm::DatabaseConnection, port: u16) -> anyhow::Result<()> {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
-    let row = db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT s.id FROM sites s CROSS JOIN LATERAL
          site_listener_claims(s.ingress_port, s.ingress_protocol, s.additional_ingresses) c
          WHERE c.port = $1 LIMIT 1", [i32::from(port).into()])).await?;

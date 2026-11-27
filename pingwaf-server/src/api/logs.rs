@@ -192,7 +192,7 @@ fn apply_scope(
     match scope {
         None => condition,
         Some(ids) if ids.is_empty() => {
-            condition.add(column.eq(Uuid::nil()).and(column.ne(Uuid::nil())))
+            condition.add(Condition::all().add(column.eq(Uuid::nil())).add(column.ne(Uuid::nil())))
         },
         Some(ids) => condition.add(column.is_in(ids.iter().copied())),
     }
@@ -237,7 +237,7 @@ pub(crate) fn text_filter(column: impl ColumnTrait, raw: &str) -> Condition {
     if parts.is_empty() {
         // "`,`" and friends: match nothing rather than silently dropping the
         // filter, which would return rows the caller excluded.
-        return Condition::all().add(column.eq("").and(column.ne("")));
+        return Condition::all().add(column.eq("")).add(column.ne(""));
     }
     let mut condition = Condition::any();
     for part in &parts {
@@ -678,7 +678,7 @@ pub async fn purge_logs(
     let security_cutoff = Utc::now() - Duration::days(security_days);
     // Invalidate completeness before deleting source rows, including partial sweeps.
     use sea_orm::ConnectionTrait as _;
-    db.execute(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+    db.execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
         "DELETE FROM report_coverage WHERE minute<$1 AND ($2::uuid IS NULL OR site_id=$2)",
         [access_cutoff.max(security_cutoff).into(),site_id.into()])).await?;
 

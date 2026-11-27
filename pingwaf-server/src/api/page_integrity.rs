@@ -57,7 +57,7 @@ async fn update_mode(
     validate_mode(&body.mode)?;
     let tx = s.db.begin().await?;
     common::load_site_write(&tx, id, &user).await?;
-    let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT active_version,mode FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",
         [id.into(), rule.into()])).await?.ok_or_else(|| ApiError::NotFound("rule not found".into()))?;
     let current: String = row.try_get("", "mode")?;
@@ -67,7 +67,7 @@ async fn update_mode(
         return Err(ApiError::Conflict("baseline or mode changed; refresh before saving".into()));
     }
     if current != body.mode {
-        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE page_integrity_rules SET mode=$2 WHERE id=$1", [rule.into(), body.mode.into()])).await?;
         tx.commit().await?;
         crate::grpc::notify_config_changed(&s, id, Some(&user.email)).await;
@@ -83,7 +83,7 @@ async fn list(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     common::load_site_read(&s.db, id, &user).await?;
-    let rows = s.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+    let rows = s.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT jsonb_build_object('id',id,'path',path,'mode',mode,'active_version',active_version,
          'candidate_digest',candidate_digest,'candidate_at',candidate_at,'dynamic_stage',dynamic_stage) FROM page_integrity_rules WHERE site_id=$1 ORDER BY path",
         [id.into()])).await?;
@@ -126,7 +126,7 @@ async fn create(
     }
     let rule = Uuid::new_v4();
     let tx = s.db.begin().await?;
-    tx.query_one(Statement::from_sql_and_values(
+    tx.query_one_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT id FROM sites WHERE id=$1 FOR UPDATE",
         [id.into()],
@@ -134,7 +134,7 @@ async fn create(
     .await?
     .ok_or_else(|| ApiError::NotFound("site not found".into()))?;
     let count = tx
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT count(*) FROM page_integrity_rules WHERE site_id=$1",
             [id.into()],
@@ -147,7 +147,7 @@ async fn create(
             "site limit of 32 protected paths reached".into(),
         ));
     }
-    let row=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row=tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO page_integrity_rules(id,site_id,path) VALUES($1,$2,$3) ON CONFLICT(site_id,path) DO NOTHING",
         [rule.into(),id.into(),body.path.into()])).await?;
     if row.rows_affected() == 0 {
@@ -164,7 +164,7 @@ async fn preview(
     Path((id, rule)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
     common::load_site_read(&s.db, id, &user).await?;
-    let row=s.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row=s.db.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT jsonb_build_object('path',r.path,'mode',r.mode,'candidate_digest',r.candidate_digest,
          'dynamic_stage',r.dynamic_stage,'dynamic_region',r.dynamic_region,'tested_digest',r.dynamic_preview_digest,'candidate_type',r.candidate_type,'candidate_base64',encode(r.candidate_body,'base64'),
          'active_version',r.active_version,'approved_type',v.content_type,'approved_digest',v.digest,
@@ -189,7 +189,7 @@ async fn approve(
     }
     let tx = s.db.begin().await?;
     common::load_site_write(&tx, id, &user).await?;
-    let row=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row=tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT candidate_body,candidate_digest,candidate_type,active_version,mode
          FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",[id.into(),rule.into()])).await?.ok_or_else(||ApiError::NotFound("rule not found".into()))?;
     let bytes: Option<Vec<u8>> = row.try_get("", "candidate_body")?;
@@ -209,7 +209,7 @@ async fn approve(
     let current_mode: String = row.try_get("", "mode")?;
     let mode = body.mode.unwrap_or_else(|| current_mode.clone());
     // Read the version after acquiring the rule lock so a concurrent approval is visible.
-    let same = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let same = tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT 1 FROM page_integrity_rules r JOIN page_integrity_versions v ON (v.rule_id,v.version)=(r.id,r.active_version)
          WHERE r.id=$1 AND v.digest=r.candidate_digest AND v.content_type=r.candidate_type AND v.body=r.candidate_body",
         [rule.into()])).await?.is_some();
@@ -222,12 +222,12 @@ async fn approve(
         version
     } else {
         let version = current_version.unwrap_or(0) + 1;
-        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO page_integrity_versions(rule_id,version,digest,content_type,body,approved_by) VALUES($1,$2,$3,$4,$5,$6)",
         [rule.into(),version.into(),digest.into(),content_type.into(),bytes.into(),user.id.into()])).await?;
         version
     };
-    tx.execute(Statement::from_sql_and_values(
+    tx.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE page_integrity_rules SET active_version=$2,mode=$3 WHERE id=$1",
         [rule.into(), version.into(), mode.into()],
@@ -246,7 +246,7 @@ async fn revoke(
     common::require_write(&user)?;
     common::load_site_write(&s.db, id, &user).await?;
     let row =
-        s.db.execute(Statement::from_sql_and_values(
+        s.db.execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM page_integrity_rules WHERE site_id=$1 AND id=$2",
             [id.into(), rule.into()],
@@ -272,17 +272,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let empty = db.query_one(Statement::from_string(DbBackend::Postgres,
+        let empty = db.query_one_raw(Statement::from_string(DbBackend::Postgres,
             "SELECT to_regclass('seaql_migrations') IS NULL AND to_regclass('sites') IS NULL")).await.unwrap().unwrap();
         assert!(empty.try_get_by_index::<bool>(0).unwrap());
         crate::migration::Migrator::up(&db, None).await.unwrap();
         let admin =
             AuthUser::new(Uuid::new_v4(), "review@example.test", "admin");
         let site = Uuid::new_v4();
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO users(id,email,password_hash,created_at,updated_at) VALUES($1,$2,'unused',now(),now())",
             [admin.id.into(),admin.email.clone().into()])).await.unwrap();
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO sites(id,user_id,name,domain,ingress_protocol,ingress_port,created_at,updated_at) VALUES($1,$2,'test','review.example.test','http',18815,now(),now())",
             [site.into(),admin.id.into()])).await.unwrap();
         let state = State(AppState::new(
@@ -307,7 +307,7 @@ mod tests {
         assert!(update_mode(state.clone(), viewer, Path((site,rule)), mode_input()).await.is_err());
         let body = br#"<p id="summary">approved</p><p id="footer">about</p>"#.to_vec();
         let digest = pingwaf_content::protection::body_digest(&body);
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE page_integrity_rules SET candidate_digest=$2,candidate_body=$3,candidate_type='text/html' WHERE id=$1",
             [rule.into(),digest.clone().into(),body.into()])).await.unwrap();
         let choose = |digest: String| {
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(approve(state.clone(),admin.clone(),Path((site,rule)),choose(digest.clone())).await.unwrap().0, 1);
         let altered = b"<p>unexpected</p>".to_vec();
         let altered_digest = pingwaf_content::protection::body_digest(&altered);
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE page_integrity_rules SET candidate_digest=$2,candidate_body=$3 WHERE id=$1",
             [rule.into(),altered_digest.clone().into(),altered.into()])).await.unwrap();
         assert!(matches!(change(2,"trusted_copy","alert").await, Err(ApiError::Conflict(_))));
@@ -401,7 +401,7 @@ async fn dynamic(
     common::require_write(&user)?;
     common::load_site_write(&s.db, site, &user).await?;
     let tx = s.db.begin().await?;
-    let row = tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+    let row = tx.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT dynamic_review,dynamic_stage,dynamic_region,dynamic_preview_digest,candidate_digest,candidate_body,candidate_type FROM page_integrity_rules WHERE site_id=$1 AND id=$2 FOR UPDATE",
         [site.into(),rule.into()])).await?.ok_or_else(||ApiError::NotFound("page not found".into()))?;
     let mut token = None;
@@ -426,7 +426,7 @@ async fn dynamic(
         let review = serde_json::json!({"actor": user.id, "digest": input.digest, "region": input.region});
         match input.stage.as_str() {
             "preview" => {
-                tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
                     "UPDATE page_integrity_rules SET dynamic_review=$3 WHERE site_id=$1 AND id=$2",
                     [site.into(), rule.into(), review.into()])).await?;
                 tx.commit().await?;
@@ -457,7 +457,7 @@ async fn dynamic(
             },
         }
     }
-    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    tx.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE page_integrity_rules SET dynamic_stage=$3,dynamic_region=$4,dynamic_test_digest=$5,dynamic_preview_digest=$6,dynamic_review=NULL WHERE site_id=$1 AND id=$2",
         [site.into(),rule.into(),input.stage.into(),input.region.into(),token_digest.into(),input.digest.into()])).await?;
     tx.commit().await?;
@@ -472,7 +472,7 @@ async fn disable_dynamic(
 ) -> Result<Json<Value>, ApiError> {
     common::require_write(&user)?;
     common::load_site_write(&s.db, site, &user).await?;
-    s.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+    s.db.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE page_integrity_rules SET dynamic_stage='off',dynamic_test_digest='',dynamic_review=NULL WHERE site_id=$1 AND (dynamic_stage<>'off' OR dynamic_review IS NOT NULL)",[site.into()])).await?;
     crate::grpc::notify_config_changed(&s, site, Some(&user.email)).await;
     Ok(Json(serde_json::json!({"disabled":true})))
