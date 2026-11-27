@@ -456,7 +456,12 @@ mod tests {
         })
         .await?;
         workers.shutdown().await;
-        crate::migration::Migrator::down(&db, Some(1)).await?;
+        let steps = crate::migration::Migrator::migrations()
+            .iter()
+            .rev()
+            .position(|migration| migration.name() == "m20240101_000120_syslog")
+            .expect("syslog migration must be registered") + 1;
+        crate::migration::Migrator::down(&db, Some(steps as u32)).await?;
         crate::migration::Migrator::up(&db, None).await?;
         assert_eq!(stored(&db, "").await?.revision, 0);
         assert_eq!(queue_stats(&db).await?.1, 0);
