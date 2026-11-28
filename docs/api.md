@@ -2046,6 +2046,8 @@ keeps one shape for the console without breaking callers that read
 `hostname`. `last_seen` is likewise an alias of `last_heartbeat`
 (`null` = the agent has never heartbeated).
 
+The site assignment endpoint (`PUT /agents/{agent_id}/sites`) retries a concurrent PostgreSQL write conflict in a fresh transaction, up to three attempts in total. If all three conflict, the response is HTTP 409 with code `agent.scope_write_conflict`. Refresh the assignment before submitting it again. An aborted attempt does not publish a configuration.
+
 `site_scope` controls which site configurations the agent receives:
 
 - **`all`** (legacy default) — every site owned by the agent's API key. This is

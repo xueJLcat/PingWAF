@@ -843,8 +843,6 @@ async fn update_sites(
 ) -> Result<Json<AgentResponse>, ApiError> {
     require_write(&current)?;
     let id = parse_uuid(&agent_id, "agent id")?;
-    let row = load_agent(&state, id, &current).await?;
-
     let scope = payload.scope.trim();
     validate_site_scope(scope)?;
 
@@ -853,59 +851,14 @@ async fn update_sites(
     } else {
         Default::default()
     };
-    let txn = state
-        .db
-        .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
-        .await?;
-    let mut active: agent::ActiveModel = row.into();
-    active.site_scope = Set(scope.to_string());
-    active.site_id = Set(None);
-    let updated = active.update(&txn).await?;
-    agent_sites::Entity::delete_many()
-        .filter(agent_sites::Column::AgentId.eq(id))
-        .exec(&txn)
-        .await?;
-    if !site_ids.is_empty() {
-        let key_id = updated.api_key_id.ok_or_else(|| {
-            ApiError::BadRequest(
-                "agent has no API key; cannot assign sites".into(),
-            )
-        })?;
-        let key = api_key::Entity::find_by_id(key_id)
-            .one(&txn)
-            .await?
-            .ok_or_else(|| {
-                ApiError::BadRequest("agent API key no longer exists".into())
-            })?;
-        for site_id in &site_ids {
-            let site =
-                crate::api::common::load_site(&txn, *site_id, &current, false)
-                    .await?;
-            if site.user_id != key.user_id {
-                return Err(ApiError::BadRequest(format!(
-                    "agent API key does not own site {}",
-                    site.domain
-                )));
-            }
-            crate::grpc::check_agent_site(&txn, &state.agents, id, &site).await?;
-            agent_sites::ActiveModel {
-                agent_id: Set(id),
-                site_id: Set(*site_id),
-                created_at: Set(chrono::Utc::now()),
-            }
-            .insert(&txn)
-            .await?;
+    // A heartbeat can update this agent after PostgreSQL establishes our snapshot.
+    // Retry the entire assignment, including authorization, on a fresh snapshot.
+    for attempt in 1..=3 {
+        match assign_sites_once(&state, &current, id, scope, &site_ids).await {
+            Err(err) if attempt < 3 && err.code() == SCOPE_WRITE_CONFLICT => continue,
+            result => { result?; break; }
         }
     }
-    if scope == "all" {
-        for site in crate::grpc::agent_site_query(&updated)
-            .filter(site::Column::IngressPort.is_not_null())
-            .filter(site::Column::Status.eq(crate::models::site_status::ACTIVE))
-            .all(&txn).await? {
-            crate::grpc::check_agent_site(&txn, &state.agents, id, &site).await?;
-        }
-    }
-    txn.commit().await?;
 
     if let Err(err) =
         crate::grpc::repush_agent_config(&state.db, &state.agents, id).await
@@ -923,6 +876,82 @@ async fn update_sites(
     let row = load_agent(&state, id, &current).await?;
     let mut items = enrich(&state, &current, vec![row]).await?;
     Ok(Json(items.remove(0)))
+}
+
+const SCOPE_WRITE_CONFLICT: &str = "agent.scope_write_conflict";
+
+fn scope_write_error(err: sea_orm::DbErr) -> ApiError {
+    if crate::api::error::database_error(&err)
+        .is_some_and(|db| db.code().as_deref() == Some("40001"))
+    {
+        ApiError::Conflict("Agent configuration changed concurrently; retry the assignment".into())
+            .with_code(SCOPE_WRITE_CONFLICT)
+    } else {
+        err.into()
+    }
+}
+
+async fn assign_sites_once(
+    state: &AppState,
+    current: &AuthUser,
+    id: Uuid,
+    scope: &str,
+    site_ids: &std::collections::BTreeSet<Uuid>,
+) -> Result<(), ApiError> {
+    let txn = state
+        .db
+        .begin_with_config(Some(sea_orm::IsolationLevel::RepeatableRead), None)
+        .await?;
+    let row = load_agent_from_db(&txn, id, current).await?;
+    let mut active: agent::ActiveModel = row.into();
+    active.site_scope = Set(scope.to_string());
+    active.site_id = Set(None);
+    let updated = active.update(&txn).await.map_err(scope_write_error)?;
+    agent_sites::Entity::delete_many()
+        .filter(agent_sites::Column::AgentId.eq(id))
+        .exec(&txn)
+        .await.map_err(scope_write_error)?;
+    if !site_ids.is_empty() {
+        let key_id = updated.api_key_id.ok_or_else(|| {
+            ApiError::BadRequest(
+                "agent has no API key; cannot assign sites".into(),
+            )
+        })?;
+        let key = api_key::Entity::find_by_id(key_id)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest("agent API key no longer exists".into())
+            })?;
+        for site_id in site_ids {
+            let site =
+                crate::api::common::load_site(&txn, *site_id, current, false)
+                    .await?;
+            if site.user_id != key.user_id {
+                return Err(ApiError::BadRequest(format!(
+                    "agent API key does not own site {}",
+                    site.domain
+                )));
+            }
+            crate::grpc::check_agent_site(&txn, &state.agents, id, &site).await?;
+            agent_sites::ActiveModel {
+                agent_id: Set(id),
+                site_id: Set(*site_id),
+                created_at: Set(chrono::Utc::now()),
+            }
+            .insert(&txn)
+            .await.map_err(scope_write_error)?;
+        }
+    }
+    if scope == "all" {
+        for site in crate::grpc::agent_site_query(&updated)
+            .filter(site::Column::IngressPort.is_not_null())
+            .filter(site::Column::Status.eq(crate::models::site_status::ACTIVE))
+            .all(&txn).await? {
+            crate::grpc::check_agent_site(&txn, &state.agents, id, &site).await?;
+        }
+    }
+    txn.commit().await.map_err(scope_write_error)
 }
 
 /// `GET /api/v1/agents/{agent_id}/samples` — host probe history, newest first.
@@ -1086,21 +1115,29 @@ pub async fn load_agent(
     id: Uuid,
     current: &AuthUser,
 ) -> Result<agent::Model, ApiError> {
+    load_agent_from_db(&state.db, id, current).await
+}
+
+async fn load_agent_from_db(
+    db: &impl sea_orm::ConnectionTrait,
+    id: Uuid,
+    current: &AuthUser,
+) -> Result<agent::Model, ApiError> {
     let row = agent::Entity::find_by_id(id)
-        .one(&state.db)
+        .one(db)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
     if !current.is_admin() {
         if let Some(site_id) = row.site_id {
             // `load_site_read` hides sites owned by somebody else behind a 404.
-            load_site_read(&state.db, site_id, current).await?;
+            crate::api::common::load_site(db, site_id, current, false).await?;
         } else {
             // An unbound agent serves every site of its API key's owner —
             // visible only to that owner (mirrors `agent_visible_site_ids`).
             let owned_by_caller = match row.api_key_id {
                 Some(key_id) => api_key::Entity::find_by_id(key_id)
-                    .one(&state.db)
+                    .one(db)
                     .await?
                     .map(|key| key.user_id == current.id)
                     .unwrap_or(false),
