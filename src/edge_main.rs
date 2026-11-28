@@ -52,6 +52,7 @@ mod pingwaf;
 mod plugin;
 mod process;
 mod server_locations;
+mod upgrade;
 mod upstreams;
 mod version;
 mod webhook;

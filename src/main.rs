@@ -96,6 +96,7 @@ mod plugin;
 mod process;
 mod quick_start;
 mod server_locations;
+mod upgrade;
 mod upstreams;
 mod version;
 mod webhook;

@@ -68,6 +68,40 @@ pub enum PingWafCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Print the version, and with `--check` the newest published release
+    Version {
+        /// Ask GitHub for the newest release and report whether it is newer
+        #[arg(long)]
+        check: bool,
+    },
+    /// Replace this binary with a release from GitHub
+    Upgrade(UpgradeOpts),
+}
+
+/// `pingwaf-agent upgrade` / `pingwaf upgrade`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct UpgradeOpts {
+    /// Only report whether a newer release exists; change nothing
+    #[arg(long)]
+    pub check: bool,
+    /// Install this version instead of the newest release
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Reinstall even when the version already matches
+    #[arg(long)]
+    pub force: bool,
+    /// Replace this file instead of the running binary
+    #[arg(long)]
+    pub binary: Option<PathBuf>,
+    /// Do not restart the systemd unit afterwards
+    #[arg(long)]
+    pub no_restart: bool,
+    /// systemd unit to restart (default: the binary's own name)
+    #[arg(long)]
+    pub service: Option<String>,
+    /// GitHub repository to download from (owner/name)
+    #[arg(long, default_value = "shuaiZend/PingWAF")]
+    pub repo: String,
 }
 
 /// Options shared by all PingWAF modes.
@@ -557,9 +591,13 @@ pub const RUN_MODES: [&str; 3] = ["server", "agent", "all-in-one"];
 #[cfg(all(test, feature = "edge"))]
 pub const RUN_MODES: [&str; 1] = ["agent"];
 
-/// The maintenance commands: they run against the database and exit.
+/// The commands that are not run modes: they answer and exit.
+///
+/// `user`/`mode`/`security`/`config` run against the database; `version` and
+/// `upgrade` do not touch it (they report or replace this binary).
 #[cfg(test)]
-const MAINTENANCE_MODES: [&str; 4] = ["user", "mode", "security", "config"];
+const MAINTENANCE_MODES: [&str; 6] =
+    ["user", "mode", "security", "config", "version", "upgrade"];
 
 /// Whether `value` names a PingWAF subcommand.
 ///
@@ -712,6 +750,9 @@ fn apply_secret_files(command: &mut PingWafCommand) -> Result<(), String> {
             apply_security_subcommand(command)
         },
         PingWafCommand::Config { command } => apply_config_subcommand(command),
+        // Neither carries a secret: `version` only reads, `upgrade` takes a
+        // repository name and a version string.
+        PingWafCommand::Version { .. } | PingWafCommand::Upgrade(_) => Ok(()),
     }
 }
 
@@ -816,6 +857,26 @@ pub fn parse_agent_cli() -> AgentOpts {
 fn parse_agent_args(args: Vec<String>) -> AgentOpts {
     if wants_version(&args) {
         print_version(&args);
+    }
+
+    // `version` and `upgrade` are real subcommands of this binary (the agent
+    // build had no way to ask for its version or to update itself). They are
+    // handled before the injected `agent`, which would otherwise turn them
+    // into `agent version` and fail to parse.
+    if matches!(args.get(1).map(String::as_str), Some("version" | "upgrade")) {
+        let cli = PingWafCli::parse_from(&args);
+        let result = match cli.command {
+            PingWafCommand::Version { check } => {
+                crate::upgrade::print_version(check)
+            },
+            PingWafCommand::Upgrade(opts) => crate::upgrade::upgrade(&opts),
+            _ => unreachable!("the guard above only admits version/upgrade"),
+        };
+        if let Err(err) = result {
+            eprintln!("pingwaf-agent: {err:#}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 
     let mut argv = args.clone();

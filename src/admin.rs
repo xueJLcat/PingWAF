@@ -63,6 +63,10 @@ pub async fn run(cli: PingWafCli) -> anyhow::Result<()> {
         PingWafCommand::Mode { command } => mode_command(command).await,
         PingWafCommand::Security { command } => security_command(command).await,
         PingWafCommand::Config { command } => config_command(command).await,
+        PingWafCommand::Version { check } => {
+            crate::upgrade::print_version(check)
+        },
+        PingWafCommand::Upgrade(opts) => crate::upgrade::upgrade(&opts),
         PingWafCommand::Server(_)
         | PingWafCommand::Agent(_)
         | PingWafCommand::AllInOne(_) => {

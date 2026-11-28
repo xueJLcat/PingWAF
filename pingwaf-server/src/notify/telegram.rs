@@ -62,13 +62,22 @@ fn chat_id(config: &Value) -> Result<String, String> {
         .unwrap_or_default()
         .trim();
 
-    let valid = value.parse::<i64>().is_ok_and(|id| id != 0)
-        || value.strip_prefix('@').is_some_and(|name| {
-            !name.is_empty()
-                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        });
+    // A numeric string is normalised through the parsed id, not echoed back:
+    // `"007"` and `"+100123"` parse locally but are not what the Bot API takes.
+    if let Ok(id) = value.parse::<i64>() {
+        return if id == 0 {
+            Err(INVALID_CHAT_ID.to_string())
+        } else {
+            Ok(id.to_string())
+        };
+    }
 
-    if !valid {
+    let username = value.strip_prefix('@').is_some_and(|name| {
+        !name.is_empty()
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    });
+
+    if !username {
         return Err(INVALID_CHAT_ID.to_string());
     }
 
@@ -102,9 +111,12 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
 fn truncate_message(text: &str, max_units: usize) -> String {
     let mut result = String::new();
     let mut units = 0;
+    // One unit is always reserved for the ellipsis, so a zero budget still
+    // has to yield something no longer than the budget it was given.
+    let budget = max_units.max(1);
 
     for ch in text.chars() {
-        if units + ch.len_utf16() > max_units.saturating_sub(1) {
+        if units + ch.len_utf16() > budget - 1 {
             result.push('…');
             return result;
         }
@@ -378,6 +390,29 @@ mod tests {
         assert!(validate_config(&cfg).is_ok());
         let body = payload(&cfg, &event()).unwrap();
         assert_eq!(body["chat_id"], json!("-1001234567890"));
+    }
+
+    #[test]
+    fn numeric_string_chat_id_is_normalised() {
+        for (input, expected) in
+            [("007", "7"), ("+1001234567890", "1001234567890")]
+        {
+            let mut cfg = config();
+            cfg["chat_id"] = json!(input);
+
+            assert!(
+                validate_config(&cfg).is_ok(),
+                "{input} should be accepted"
+            );
+            let body = payload(&cfg, &event()).unwrap();
+            assert_eq!(body["chat_id"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn zero_budget_truncation_stays_within_budget() {
+        assert!(truncate_message("abc", 0).encode_utf16().count() <= 1);
+        assert_eq!(truncate_message("abc", 1), "…");
     }
 
     #[test]

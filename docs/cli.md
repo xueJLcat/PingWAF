@@ -50,22 +50,67 @@ Releases also ship `pingwaf-agent`, built from the same source with the
 control plane compiled out (`--bin pingwaf-agent --features edge`). It is the
 data plane and nothing else: no PostgreSQL, no REST API, no embedded
 dashboard, so an edge node downloads and maps far less code. `install.sh
---mode agent` fetches that archive and installs it as `/usr/local/bin/pingwaf`,
-so the unit and every command below stay unchanged; `pingwaf --version` marks
-it with `edge`. Both spellings work:
+--mode agent` fetches that archive and installs it under its own name —
+`/usr/local/bin/pingwaf-agent`, unit `pingwaf-agent.service`, still reading
+`/etc/pingwaf/pingwaf.toml` — so an edge node does not carry a binary called
+`pingwaf` that looks like it could serve the console. `--version` marks the
+build with `edge`. Both spellings work:
 
 ```bash
 pingwaf-agent agent --server-url https://control-plane:9090 --api-key KEY
 pingwaf-agent --server-url https://control-plane:9090 --api-key KEY
 ```
 
-The `agent` subcommand is accepted because a self-upgrade replaces the file
-with the control plane's all-in-one build, which still needs it. That also
-means `auto_upgrade` trades the smaller build for the full one: it follows the
-control plane's executable, so re-run the installer in agent mode to get the
-agent-only artifact back. The agent-only build has no
-`server`/`all-in-one`/maintenance subcommands; run those from the full
+The `agent` subcommand is accepted because a control-plane-driven upgrade
+(`agent.auto_upgrade`) replaces the file with the control plane's all-in-one
+build, which still needs it. That upgrade follows the control plane's
+executable, so it trades the smaller build for the full one; the release-feed
+upgrade below installs the agent-only artifact instead. The agent-only build
+has no `server`/`all-in-one`/maintenance subcommands; run those from the full
 `pingwaf` binary.
+
+### Version and upgrade
+
+Both binaries answer `version` and `upgrade` (the agent used to have no way to
+ask for either):
+
+```bash
+pingwaf-agent version            # version, build commit, TLS backend, target
+pingwaf-agent version --check    # …and the newest published release
+pingwaf-agent upgrade --check    # is there a newer release?
+pingwaf-agent upgrade            # install it and restart pingwaf-agent.service
+pingwaf upgrade --version 0.33.4 --no-restart   # the full binary, pinned version
+```
+
+`upgrade` downloads `pingwaf-agent-linux-{amd64,arm64}.tar.gz` (or
+`pingwaf-linux-…` for the full binary) from the GitHub release, verifies the
+`.sha256` sidecar **before** extracting, asks the extracted binary for its
+version before replacing anything, keeps the current file as `<binary>.prev`,
+and stages the replacement next to the target so an interrupted upgrade leaves
+the old binary in place. It needs `curl` (the installer already requires it) and
+write access to the target directory — run it with `sudo` on a normal install.
+`--repo owner/name` points it at a fork or mirror; `--binary PATH` replaces a
+file other than the running one; `--no-restart` skips the systemd restart.
+
+This is the release-feed path: it installs the **agent-only** build for
+`pingwaf-agent`. The opt-in `agent.auto_upgrade` remains the fleet path — it
+follows whatever build the control plane is serving, which is the full binary.
+
+An edge installed before the binary was renamed still has `/usr/local/bin/pingwaf`
+and `pingwaf.service`. Re-run `install.sh --mode agent` once: it installs
+`pingwaf-agent`, writes `pingwaf-agent.service`, and retires the old agent unit
+(stopped, disabled and removed) so the two cannot fight over the ports and the
+config file.
+
+**In agent mode the config file is authoritative** (`[agent]` in
+`/etc/pingwaf/pingwaf.toml` wins over `PINGWAF_*`), so the systemd unit carries
+no second copy of the connection settings — a duplicate was inert at best and,
+when it disagreed with the file, `systemctl cat` reported a URL the agent never
+dialed. Re-running the installer updates only the keys you pass explicitly
+(`--server-url`, `--api-key`, `--server-ca-cert`, `--server-tls-name`): each is
+written into `[agent]` (a `pingwaf.toml.bak-<timestamp>` copy is kept first) and
+the plan summary shows the effective URL, marking it "from the existing config
+file" when the file wins.
 
 > An agent-only node is currently **unbound**: it receives every site owned by
 > the API key's owner, not one site. The control plane must be **0.32.40 or

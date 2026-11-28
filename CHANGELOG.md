@@ -26,6 +26,95 @@ verbatim for reference and attribution, and is not maintained here.
 - Add ServerChan Turbo and ServerChan³ notification channels with masked SendKeys.
 - Allow administrators to delete an individual configuration snapshot. Snapshot action icons show their labels on keyboard focus and hover.
 - Give site types their own aligned table column and show the same labels beneath the site name on mobile. Page protection is accessible through the sidebar and site settings.
+
+## [Unreleased]
+
+### Fixed
+
+- **Re-running the installer on an existing agent silently ignored
+  `--server-url`.** The agent's config file (`[agent]` in
+  `/etc/pingwaf/pingwaf.toml`) is authoritative and wins over `PINGWAF_*`, but
+  the installer only wrote the flag's value into the systemd unit as an inert
+  environment line — so `systemctl cat` showed a URL the agent never dialed
+  (in the field, an `http://` default against the file's `https://`), and a
+  changed `--server-url` looked accepted while nothing changed. The installer
+  now reads the file, writes an explicitly passed `--server-url`, `--api-key`,
+  `--server-ca-cert` or `--server-tls-name` into `[agent]` (backing the file up
+  first), keeps the unit free of duplicate settings, warns when a key is
+  missing and none was supplied, and the plan summary prints the URL the agent
+  will actually dial.
+
+## [PingWAF 0.33.5] — 2026-11-28
+
+### Added
+
+- **`version` and `upgrade` on the command line.** Both binaries now answer
+  `version` (version, build commit, TLS backend, target, and with `--check` the
+  newest published release) and `upgrade` (`--check`, `--version <tag>`,
+  `--force`, `--no-restart`, `--service`, `--binary`, `--repo`). The agent had
+  no way to ask for either; its only update path was the opt-in
+  `agent.auto_upgrade`, which follows the control plane's *full* build.
+  `upgrade` follows GitHub releases instead and installs the agent-only
+  artifact: it verifies the release's `.sha256` sidecar before extracting, asks
+  the extracted binary for its version before replacing anything, keeps the
+  current file as `<binary>.prev`, stages the new file next to the target (an
+  interrupted upgrade leaves the old binary in place) and restarts the systemd
+  unit unless told not to.
+
+### Changed
+
+- **The agent-only build installs as `pingwaf-agent`.** `install.sh --mode
+  agent` used to install the data-plane archive as `/usr/local/bin/pingwaf`,
+  which left an edge node carrying a binary that looked like the console
+  server. It now installs `/usr/local/bin/pingwaf-agent` with its own
+  `pingwaf-agent.service` (still reading `/etc/pingwaf/pingwaf.toml`), and an
+  upgrade retires a legacy `pingwaf.service` agent unit so the two cannot fight
+  over the ports. `server`/`all-in-one` keep `pingwaf`.
+
+## [PingWAF 0.33.4] — 2026-11-27
+
+### Added
+
+- **Telegram notification channel.** Alerts can now be delivered to a Telegram
+  bot (`kind = "telegram"`), to a private chat, a group, a supergroup, a channel
+  or a forum topic. The channel takes `config.bot_token` (issued by `@BotFather`,
+  shaped `<numeric bot id>:<secret>`), `config.chat_id` (a numeric id, quoted or
+  not, or `@channelusername`) and an optional `config.message_thread_id` for
+  forum topics. The destination is fixed to `api.telegram.org`: there is no
+  configurable URL, so this channel adds no SSRF surface. Messages are plain
+  text — `parse_mode` is never set, so `<`, `*` and `_` in an alert body are not
+  interpreted as markup — carry a severity indicator and a UTC timestamp, are
+  truncated at Telegram's 4096 UTF-16-unit limit, and leave link previews off.
+  `bot_token` is sealed at rest with `PINGWAF_SECRET_KEY` and masked in API
+  responses exactly like `smtp_pass`, `secret` and `secret_token`; the dashboard
+  form asks for it as a password field in all three languages. Note that any
+  existing channel whose config already carries a field named `bot_token` is now
+  treated as a secret on read and on write, even for the other kinds.
+- **A failed delivery says why.** Telegram returns the reason in its response
+  body (`chat not found`, `message thread not found`, `bot was blocked by the
+  user`, …), and the test button now surfaces it instead of collapsing every
+  refusal into `HTTP 400 Bad Request`. The text is capped at 200 characters, has
+  control characters stripped and any appearance of the bot token redacted, so
+  it is safe in the console and in the log. HTTP 429 is reported as a rate limit
+  and is deliberately not retried in this release.
+
+### Changed
+
+- **Dashboard dependencies.** Fifteen npm packages moved to their latest minor or
+  patch release (`react-router-dom`, `recharts`, `vite`, `vitest`, the Tailwind
+  Vite plugin, `eslint`, `@tanstack/react-query`, `zustand` and others). No major
+  bump, no schema change and no API change; the dashboard build and the frontend
+  test suite are unchanged in shape.
+
+### Fixed
+
+- **"Send test message" no longer sends the sealed secret.** With
+  `PINGWAF_SECRET_KEY` set, the test path read the channel row straight from the
+  database and handed the delivery code the `enc:v1:…` ciphertext as the SMTP
+  password, the DingTalk signing key or the webhook secret, so a working channel
+  reported a failure. The test path now opens the stored config before
+  delivering, the same way the periodic reload does.
+
 ## [PingWAF 0.33.3] — 2026-11-26
 
 ### Added

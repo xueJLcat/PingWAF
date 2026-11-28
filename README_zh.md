@@ -192,7 +192,7 @@ PINGWAF_SECRET_KEY="$(openssl rand -hex 32)" \
 
 ## 🧭 运行模式
 
-PingWAF 是单一二进制（`pingwaf`），与 `pingap` 共享入口。它通过 CLI 子命令**或** `PINGWAF_MODE` 环境变量选择运行模式。发布包同时提供 **`pingwaf-agent`**（仅数据面的构建，不含 PostgreSQL、REST API 与控制台）；`install.sh --mode agent` 会下载它并以 `pingwaf` 名称安装。
+PingWAF 是单一二进制（`pingwaf`），与 `pingap` 共享入口。它通过 CLI 子命令**或** `PINGWAF_MODE` 环境变量选择运行模式。发布包同时提供 **`pingwaf-agent`**（仅数据面的构建，不含 PostgreSQL、REST API 与控制台）；`install.sh --mode agent` 会下载它并以 `pingwaf-agent` 名称安装（独立 systemd 单元），两个二进制都支持 `version` 与 `upgrade` 子命令。
 
 | 模式 | 命令 | 角色 |
 | --- | --- | --- |
