@@ -272,7 +272,7 @@ Options:
   --token-file PATH        Read the pairing token from a file instead of
                            --token (keeps it out of `ps`)
   --socks5-proxy ADDR      SOCKS5 proxy for a host with no direct egress
-                           (`host:port` or `socks5://user:pass@host:port`)
+                           (host:port or socks5://user:pass@host:port)
   --socks5-username USER   SOCKS5 username (wins over embedded userinfo)
   --socks5-password PASS   SOCKS5 password (prefer PINGWAF_TUNNEL_SOCKS5_PASSWORD)
   --db-url URL             PostgreSQL connection string
